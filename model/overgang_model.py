@@ -1,0 +1,923 @@
+"""
+OVER GANG MLB PREDICTOR v3.3
+- Fixed missing pitcher data root cause
+- Enhanced name normalization (unidecode, nicknames, suffixes)
+- League average and backup stat fallback
+- IP-based filtering based on season timing
+- Telegram alerts for unmatched pitchers
+"""
+import sys
+import os
+
+# Add the project root to PYTHONPATH
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import pandas as pd
+from datetime import datetime, timedelta
+from pytz import timezone, utc
+import os
+import re
+import time
+from zoneinfo import ZoneInfo
+import json
+import requests
+from bs4 import BeautifulSoup
+from unidecode import unidecode
+from rapidfuzz import fuzz, process
+from functools import lru_cache
+from statsapi import schedule
+from pybaseball import pitching_stats, statcast_pitcher
+import numpy as np
+import subprocess
+import sys
+from pathlib import Path
+
+from scrapers.velocity_tracker import VelocityTracker
+velocity_tracker = VelocityTracker()
+from core.public_betting_dummy import DUMMY_PUBLIC_BETTING
+from core.public_betting_loader import load_public_betting_data
+public_data = load_public_betting_data()
+from core.public_betting_loader import split_game_key
+from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
+from core.public_betting_loader import normalize_team_name
+from core.kelly_utils import calculate_kelly_units
+from core.batters import Batters, LineupImpact, BATTER_DF
+from model.data_manager import DataManager
+manual_fallback_df = DataManager.load_manual_fallback_pitchers()
+
+try:
+    BATTER_DF = Batters.load_batter_table()  # reads data/batter_stats.csv
+    print(f"✅ Loaded batter table: {len(BATTER_DF)} rows")
+except Exception as e:
+    print(f"⚠️ Could not load batter table: {e}")
+    BATTER_DF = pd.DataFrame()
+
+def safe_get(obj, key, default):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    elif hasattr(obj, '__getitem__') and key in obj:
+        return obj[key]
+    return default
+
+# ================================
+# ⚙️ CONFIGURATION
+# ================================
+TELEGRAM_BOT_TOKEN = '7660295294:AAHakWClywbZP9hdgC5DomgT8EyBa14w-wU'
+TELEGRAM_CHAT_ID = '1821580164'
+MIN_CONFIDENCE_ALERT = 0.85
+DATA_DIR = "data"
+ARCHIVE_DIR = "archive"
+STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
+AUTO_UPDATE_DATA = True
+
+# Dynamic IP thresholds
+MIN_PITCHER_IP_EARLY = 10
+MIN_PITCHER_IP_MID = 20
+MIN_PITCHER_IP_LATE = 15
+
+# Thresholds
+NAME_MATCH_THRESHOLD = 85
+FATIGUE_THRESHOLD = 4.25
+VELOCITY_DROP_THRESHOLD = -1.5
+
+# Park Factors
+PARK_FACTORS = {
+    "Coors Field": (1.25, 0.80),
+    "Fenway Park": (1.15, 0.90),
+    "Globe Life Field": (1.15, 0.90),
+    "Camden Yards": (1.10, 0.92),
+    "Great American Ball Park": (1.12, 0.91),
+    "Wrigley Field": (1.08, 0.95),
+    "Petco Park": (0.92, 1.10),
+    "Oracle Park": (0.85, 1.15),
+    "Citi Field": (0.90, 1.12),
+    "Dodger Stadium": (0.95, 1.08),
+    "T-Mobile Park": (0.88, 1.14),
+    "Unknown": (1.0, 1.0)
+}
+
+# ================================
+# ⚾ BULLPEN DATA (MLB Stats API)
+# ================================
+class BullpenManager:
+    BULLPEN_CSV = os.path.join("data", "bullpen_stats.csv")
+    UPDATER = os.path.join("scripts", "update_bullpen.py")
+
+    TEAM_NAME_FIXES = {
+        "Athletics": "Oakland Athletics",
+        "Angels": "Los Angeles Angels",
+        "Dodgers": "Los Angeles Dodgers",
+        "Giants": "San Francisco Giants",
+        "Cubs": "Chicago Cubs",
+        "White Sox": "Chicago White Sox",
+        "Cardinals": "St. Louis Cardinals",
+        "Guardians": "Cleveland Guardians",
+        "D-backs": "Arizona Diamondbacks",
+        "Red Sox": "Boston Red Sox",
+        "Yankees": "New York Yankees",
+        "Mets": "New York Mets",
+        "Rays": "Tampa Bay Rays",
+        "Nationals": "Washington Nationals",
+        "Marlins": "Miami Marlins",
+    }
+
+    @staticmethod
+    def _safe_read_csv(path):
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+
+    @staticmethod
+    def update_bullpen_data(max_age_hours: int = 6) -> pd.DataFrame:
+        """Ensure MLB-API bullpen CSV exists and is fresh; return as DataFrame."""
+        need_refresh = True
+        if os.path.exists(BullpenManager.BULLPEN_CSV):
+            age_hours = (time.time() - os.path.getmtime(BullpenManager.BULLPEN_CSV)) / 3600.0
+            need_refresh = age_hours > max_age_hours
+
+        if need_refresh:
+            print("🔄 Updating bullpen stats (MLB Stats API)…")
+            try:
+                # run the updater in project root so relative paths resolve
+                subprocess.check_call(["python", "-u", BullpenManager.UPDATER])
+            except Exception as e:
+                print(f"⚠️ Bullpen update failed to run updater: {e}")
+
+        df = BullpenManager._safe_read_csv(BullpenManager.BULLPEN_CSV)
+        if df.empty:
+            print(f"⚠️ {BullpenManager.BULLPEN_CSV} missing or empty; using empty DataFrame")
+        return df
+
+    @staticmethod
+    def get_bullpen_stats(team: str) -> dict:
+        """Return dict with ERA, IP_Week, Relievers for a team; league-average fallback."""
+        # Fix short/common names to MLB API full names
+        team_fixed = BullpenManager.TEAM_NAME_FIXES.get(team, team)
+
+        df = BullpenManager._safe_read_csv(BullpenManager.BULLPEN_CSV)
+        if df.empty:
+            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+
+        # Normalize
+        if "Team" not in df.columns:
+            # unexpected schema — fail safe
+            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+
+        df["Team_norm"] = df["Team"].astype(str).str.strip().str.lower()
+        lookup = team_fixed.strip().lower()
+
+        # Try exact
+        hit = df[df["Team_norm"] == lookup]
+        if hit.empty:
+            # try original (in case caller already had the full name)
+            hit = df[df["Team_norm"] == team.strip().lower()]
+
+        if hit.empty:
+            print(f"⚠️ Team not found in bullpen file: {team} (resolved: {team_fixed})")
+            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+
+        row = hit.iloc[0].to_dict()
+        # ensure numeric
+        def _num(v, default=0.0):
+            try: return float(v)
+            except: return default
+
+        return {
+            'ERA': _num(row.get('ERA'), 4.25),
+            'IP_Week': _num(row.get('IP_Week'), 12.0),
+            'Relievers': int(_num(row.get('Relievers'), 7)),
+            'source': 'MLB Stats API'
+        }
+
+# ================================
+# 🧠 VEGAS LINE + VELO TRACKING
+# ================================
+class VegasLines:
+    @staticmethod
+    def get_vegas_line(home_team, away_team):
+        game_key = f"{away_team.lower()} @ {home_team.lower()}"
+        try:
+            df = pd.read_csv("data/public_betting.csv")
+            row = df[df['Game'].str.lower() == game_key]
+            if not row.empty:
+                total_current = float(row.iloc[0].get("total_current", 8.5))
+                return total_current
+        except Exception as e:
+            print(f"⚠️ Vegas line fetch failed: {e}")
+        return 8.5
+
+class VelocityTracker:
+    @staticmethod
+    @lru_cache(maxsize=100)
+    def get_velocity_drop(pitcher_name):
+        try:
+            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            data = statcast_pitcher(start_date, end_date, pitcher_name)
+            if data is None or len(data) < 10:
+                return 0
+            recent_avg = data['release_speed'].tail(3).mean()
+            season_peak = data['release_speed'].quantile(0.75)
+            return recent_avg - season_peak
+        except Exception as e:
+            print(f"⚠️ Velocity error for {pitcher_name}: {e}")
+            return 0
+
+# ================================
+# 📈 PREDICTION ENGINE
+# ================================
+def generate_prediction(
+    away_stats, home_stats, bullpen_home, bullpen_away,
+    velo_drop_away, velo_drop_home, park_factors,
+    vegas_data=None,
+    public_data=None
+):
+
+    # ✅ If vegas_line is a float already, use it. If it's a dict, extract .get('total_current')
+    try:
+        if isinstance(vegas_data, dict):
+            vegas_line = float(vegas_data.get("total_current", 8.5))
+        else:
+            vegas_line = float(vegas_data)
+    except Exception as e:
+        print(f"⚠️ Failed to extract vegas_line from vegas_data: {e} → using default 8.5")
+        vegas_line = 8.5
+
+    if not isinstance(public_data, dict):
+        print(f"❌ Invalid public_data type: {type(public_data)} → {public_data}")
+        return "SKIPPED", 0.0, vegas_line, vegas_line
+
+    away_xera = safe_get(away_stats, 'xERA', 4.50)
+    home_xera = safe_get(home_stats, 'xERA', 4.50)
+    away_whip = safe_get(away_stats, 'WHIP', 1.30)
+    home_whip = safe_get(home_stats, 'WHIP', 1.30)
+
+    if safe_get(away_stats, 'LowIP', False):
+        away_xera = min(away_xera + 0.75, 6.00)
+    if safe_get(home_stats, 'LowIP', False):
+        home_xera = min(home_xera + 0.75, 6.00)
+
+    total_xera = away_xera + home_xera
+    avg_whip = (away_whip + home_whip) / 2
+    over_boost, under_boost = park_factors
+
+    if total_xera > 9.0 and avg_whip > 1.3:
+        prediction = "🚨 OVER"
+        confidence = 0.9
+    elif total_xera < 7.0 and avg_whip < 1.2:
+        prediction = "🔒 UNDER"
+        confidence = 0.9
+    elif total_xera > 8.5:
+        prediction = "OVER"
+        confidence = 0.75
+    else:
+        prediction = "UNDER"
+        confidence = 0.75
+
+    if "OVER" in prediction and total_xera > vegas_line:
+        confidence = min(0.99, confidence + 0.05)
+    elif "UNDER" in prediction and total_xera < vegas_line:
+        confidence = min(0.99, confidence + 0.05)
+
+    if "OVER" in prediction:
+        if safe_get(bullpen_home, 'ERA', 4.25) > FATIGUE_THRESHOLD:
+            confidence = min(0.99, confidence * 1.05)
+        if safe_get(bullpen_away, 'ERA', 4.25) > FATIGUE_THRESHOLD:
+            confidence = min(0.99, confidence * 1.03)
+        confidence *= over_boost
+    else:
+        confidence *= under_boost
+
+    if velo_drop_away < VELOCITY_DROP_THRESHOLD:
+        confidence *= 0.98
+    if velo_drop_home < VELOCITY_DROP_THRESHOLD:
+        confidence *= 0.99
+
+    relievers_home = safe_get(bullpen_home, 'Relievers', 7)
+    relievers_away = safe_get(bullpen_away, 'Relievers', 7)
+    reliever_factor = min(1.0, (relievers_away + relievers_home) / 14)
+
+    if "OVER" in prediction:
+        confidence *= 1 + (1 - reliever_factor) * 0.1
+    else:
+        confidence *= 1 + reliever_factor * 0.05
+
+    line_adjustment = max(-1.5, min(1.5, (total_xera - vegas_line) / 2))
+    final_line = vegas_line + line_adjustment
+
+    total_open = vegas_line
+    total_current = vegas_line
+
+    if isinstance(public_data, dict):
+        try:
+            ou_pct = float(public_data.get("ou_bets_pct_over", 50))
+            if "OVER" in prediction:
+                if ou_pct > 65:
+                    confidence += 0.05
+                elif ou_pct < 35:
+                    confidence -= 0.05
+            elif "UNDER" in prediction:
+                if ou_pct > 65:
+                    confidence -= 0.05
+                elif ou_pct < 35:
+                    confidence += 0.05
+        except Exception as e:
+            print(f"⚠️ Public data ou_pct error: {e}")
+
+        try:
+            total_open = safe_float(public_data.get("Total_Open"), default=vegas_line)
+            total_current = safe_float(public_data.get("Total_Current"), default=total_open)
+            if total_current > total_open:
+                confidence += 0.02
+            elif total_current < total_open:
+                confidence -= 0.02
+        except Exception as e:
+            print(f"⚠️ Public data line movement error: {e}")
+
+        try:
+            if "OVER" in prediction and ou_pct >= 80:
+                confidence = min(0.99, confidence + 0.10)
+            elif "UNDER" in prediction and (100 - ou_pct) >= 80:
+                confidence = min(0.99, confidence + 0.10)
+        except Exception as e:
+            print(f"⚠️ Public data super boost error: {e}")
+
+    # Final confidence bounds
+    confidence = max(0.01, min(confidence, 0.99))
+
+    print(f"📦 Raw prediction: {prediction}, Confidence: {confidence:.2f}")
+    return f"{prediction} {final_line:.1f}", round(confidence, 2), total_open, total_current
+
+# ================================
+# 💬 TELEGRAM UTILS
+# ================================
+def send_telegram_alert(message):
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "parse_mode": "Markdown",
+                    "disable_notification": False
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            if attempt == 2:
+                print(f"💥 Telegram failed: {e}")
+            time.sleep(2)
+    return False
+
+def format_alert(game_data: dict) -> str:
+    try:
+        game_utc_time = datetime.strptime(game_data['Datetime'], "%Y-%m-%dT%H:%M:%SZ")
+        mt_time = game_utc_time.replace(tzinfo=utc).astimezone(timezone("US/Mountain"))
+        formatted_time = mt_time.strftime('%I:%M %p MT')
+    except:
+        formatted_time = "TBD"
+
+    velo_away = game_data.get('VeloDrop_Away', '?')
+    velo_home = game_data.get('VeloDrop_Home', '?')
+    ou_over = game_data.get('ou_bets_pct_over', '?')
+    ou_under = game_data.get('ou_bets_pct_under', '?')
+    ml_home = game_data.get('ml_bets_pct_home', '?')
+    ml_away = game_data.get('ml_bets_pct_away', '?')
+    total_open = game_data.get('total_open', '?')
+    total_open = game_data.get('total_open', '?')
+    total_current = game_data.get('total_current', '?')
+    vegas_line = game_data.get('vegas_line', '?')
+
+    # Determine emoji for line movement
+    if total_open != "?" and total_current != "?":
+        try:
+            open_val = float(total_open)
+            current_val = float(total_current)
+            if current_val > open_val:
+                line_move_emoji = "📈"
+            elif current_val < open_val:
+                line_move_emoji = "📉"
+            else:
+                line_move_emoji = "⏸️"
+            line_movement = f"{total_open} → {total_current} {line_move_emoji}"
+        except:
+            line_movement = f"{total_open} → {total_current}"
+    else:
+        line_movement = f"{total_open} → {total_current}"
+
+    try:
+        raw_conf = float(game_data['Confidence'])
+        confidence_clean = f"{raw_conf:.0f}%"
+
+        if raw_conf >= 95:
+            confidence_emoji = "🔥"
+        elif raw_conf >= 90:
+            confidence_emoji = "💪"
+        elif raw_conf >= 80:
+            confidence_emoji = "👍"
+        elif raw_conf >= 70:
+            confidence_emoji = "🤞"
+        else:
+            confidence_emoji = "😬"
+
+    except:
+        confidence_clean = game_data.get('Confidence', '?')
+        confidence_emoji = ""
+
+    return (
+        f"🔥 *OVER GANG ALERT* 🔥\n\n"
+        f"🏟️ *{game_data['Game']}*\n"
+        f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {formatted_time}\n\n"
+        f"🎯 *Pitchers*: {game_data['Pitchers']}\n"
+        f"📊 xERA: {game_data['xERA']} | WHIP: {game_data['WHIP']}\n"
+        f"🧠 *Prediction*: {game_data['Prediction']}\n"
+        f"💪 *Confidence*: {confidence_clean}{f' {confidence_emoji}' if confidence_emoji else ''}\n"
+        f"🎲 *Vegas Total Line*: {vegas_line}\n"
+        f"🏆 *ML Pick*: {game_data.get('ML_Pick', '-')}\n"
+        f"💪 *Confidence*: {game_data.get('ML_Confidence', '-')}\n"
+        f"📈 *Edge*: {game_data.get('ML_Value', '-')} | *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n"
+        f"📉 *Public Bets*: {ou_over if ou_over != '?' else '-'}% Over / {ou_under if ou_under != '?' else '-'}% Under\n"
+        f"💸 *Total Line*: {line_movement}\n\n"
+        f"🧾 *ML Bets*: {ml_home if ml_home != '?' else '-'}% Home / {ml_away if ml_away != '?' else '-'}% Away"
+    )
+
+def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
+    try:
+        with open(file_path, 'rb') as doc:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": caption
+                },
+                files={"document": doc},
+                timeout=15
+            )
+        response.raise_for_status()
+        print(f"📤 CSV file sent to Telegram: {file_path}")
+    except Exception as e:
+        print(f"❌ Failed to send file to Telegram: {e}")
+
+def safe_float(val, default=0.0):
+    try:
+        return float(val)
+    except:
+        return default
+
+# --- Safe lineup impact helper (ALWAYS returns values) ---
+def safe_lineup_impacts(lineup_obj, away_lineup, home_lineup, away_pitcher_hand, home_pitcher_hand, logger=None):
+    """
+    Returns: (away_impact, home_impact, away_scope, home_scope)
+    Impacts are floats (default 0.0). Scopes: 'lineup'|'team'|'none'
+    """
+    away_impact = 0.0
+    home_impact = 0.0
+    away_scope = "none"
+    home_scope = "none"
+    try:
+        # AWAY hitters vs HOME starter's hand
+        away_impact, away_scope = lineup_obj.score_lineup(
+            away_lineup,
+            pitcher_hand=(home_pitcher_hand or 'R')
+        )
+        # HOME hitters vs AWAY starter's hand
+        home_impact, home_scope = lineup_obj.score_lineup(
+            home_lineup,
+            pitcher_hand=(away_pitcher_hand or 'R')
+        )
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ Lineup impact error (safe): {e}")
+    # clamp to a sane range
+    away_impact = max(-0.30, min(0.30, float(away_impact)))
+    home_impact = max(-0.30, min(0.30, float(home_impact)))
+    return away_impact, home_impact, away_scope, home_scope
+
+# ================================
+# 🔍 CORE LOGIC
+# ================================
+def run_predictions():
+    print(f"🔮 OVER GANG PREDICTOR v3.3 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("="*50 + "\n")
+
+    if AUTO_UPDATE_DATA:
+        print("🔄 AUTO UPDATE MODE: Fetching latest data")
+        stats_df = DataManager.update_pitcher_stats()
+        BullpenManager.update_bullpen_data()
+    else:
+        print("⏩ MANUAL MODE: Using existing data")
+        stats_df = DataManager.load_pitcher_stats()
+
+    velocity_tracker = VelocityTracker()
+    lineups = LineupImpact()
+    try:
+        # --- Mountain Time "today"
+        today_mt = datetime.now(ZoneInfo("America/Denver")).date()
+
+        # Pull MLB schedule for that calendar day (UTC-based API)
+        games = schedule(
+            start_date=today_mt.strftime('%Y-%m-%d'),
+            end_date=today_mt.strftime('%Y-%m-%d')
+        )
+
+        public_betting_data = load_public_betting_data()
+
+        # Keep only games that are actually TODAY in MT
+        def game_mt_date(g):
+            dt_utc = datetime.strptime(
+                g["game_datetime"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=ZoneInfo("UTC"))
+            return dt_utc.astimezone(ZoneInfo("America/Denver")).date()
+
+        games = [g for g in games if game_mt_date(g) == today_mt]
+
+        print(f"✅ Found {len(games)} games for {today_mt} MT")
+        for g in games:
+            print("•", f"{g['away_name']} @ {g['home_name']}")
+
+        if not games:
+            print("⚠️ No games scheduled today")
+            return
+
+    except Exception as e:
+        print(f"❌ Schedule API error: {e}")
+        return
+
+    results = []
+    alerts = []
+    unmatched_pitchers = set()
+    alias_log = []
+
+    for game in games:
+        try:
+            home_team = safe_get(game, 'home_name', 'Home Team')
+            away_team = safe_get(game, 'away_name', 'Away Team')
+            vegas_line = VegasLines.get_vegas_line(home_team, away_team)
+
+            # --- starters must be defined BEFORE we score lineups
+            away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')
+            home_pitcher = safe_get(game, 'home_probable_pitcher', 'TBD')
+
+            # ✅ Use fallback league average pitchers instead of skipping
+            if not away_pitcher.strip() or away_pitcher == "TBD":
+                print(f"⚠️ Missing away pitcher for {away_team} — using League Avg Away")
+                away_pitcher = "League Avg Away"
+            if not home_pitcher.strip() or home_pitcher == "TBD":
+                print(f"⚠️ Missing home pitcher for {home_team} — using League Avg Home")
+                home_pitcher = "League Avg Home"
+
+            print(f"🎯 Matchup: {away_team} ({away_pitcher}) vs {home_team} ({home_pitcher})")
+
+            venue = game.get("venue_name", "Unknown")
+            park_factors = PARK_FACTORS.get(venue, PARK_FACTORS['Unknown'])
+
+            print(f"\n🔍 Processing: {away_team} @ {home_team}")
+            print(f"🧪 Matching: Away = {away_pitcher} | Home = {home_pitcher}")
+
+            # --- score lineups vs the real opposing starter hand (safe) ---
+            try:
+                # teams must be full, lowercase names to match the CSV
+                away_best9 = lineups.get_team_best9(away_team.lower())
+                home_best9 = lineups.get_team_best9(home_team.lower())
+
+                # Determine the hand each offense will face
+                try:
+                    home_starter_hand = Batters.get_pitcher_hand(home_pitcher)  # away lineup faces HOME starter
+                except Exception:
+                    home_starter_hand = None
+                try:
+                    away_starter_hand = Batters.get_pitcher_hand(away_pitcher)  # home lineup faces AWAY starter
+                except Exception:
+                    away_starter_hand = None
+
+                away_impact, home_impact, away_scope, home_scope = safe_lineup_impacts(
+                    lineup_obj=lineups,
+                    away_lineup=away_best9,
+                    home_lineup=home_best9,
+                    away_pitcher_hand=away_starter_hand,
+                    home_pitcher_hand=home_starter_hand,
+                    logger=None
+                )
+
+                # positive means home lineup projects stronger than away
+                lineup_delta = float(home_impact) - float(away_impact)
+
+                # small, controlled nudge to the total (tune 0.1–0.5 after backtests)
+                vegas_line_adj = float(vegas_line) + 0.3 * lineup_delta
+
+                print(
+                    f"🧮 Lineup impacts → AWAY {away_team}: {away_impact:.3f} ({away_scope}) | "
+                    f"HOME {home_team}: {home_impact:.3f} ({home_scope}) | Δ={lineup_delta:+.3f}"
+                )
+            except Exception as e:
+                print(f"⚠️ Lineup impact error: {e}")
+                lineup_delta = 0.0
+                vegas_line_adj = float(vegas_line)
+
+            away_stats = DataManager.match_pitcher_row(stats_df, away_pitcher, alias_log=alias_log)
+            home_stats = DataManager.match_pitcher_row(stats_df, home_pitcher, alias_log=alias_log)
+
+            # 🧠 Log fallback usage if LowIP
+            for name, stats in [(away_pitcher, away_stats), (home_pitcher, home_stats)]:
+                if isinstance(stats, dict) and stats.get("LowIP", False):
+                    print(f"⚠️ Using fallback stats for: {name}")
+
+            # which hand each starter throws
+            try:
+                away_hand = Batters.get_pitcher_hand(away_pitcher)  # hand of AWAY starter (faces HOME offense)
+            except Exception:
+                away_hand = None
+            try:
+                home_hand = Batters.get_pitcher_hand(home_pitcher)  # hand of HOME starter (faces AWAY offense)
+            except Exception:
+                home_hand = None
+
+            # defaults in case batter table isn't loaded or hand unknown
+            home_off = {"mult": 1.0, "pop": "none"}
+            away_off = {"mult": 1.0, "pop": "none"}
+
+            if not BATTER_DF.empty and (away_hand or home_hand):
+                try:
+                    # HOME offense vs AWAY pitcher's hand
+                    if away_hand:
+                        home_off = Batters.offense_vs_hand_dict(
+                            BATTER_DF, home_team, away_hand, lineup_names=None
+                        )
+                    # AWAY offense vs HOME pitcher's hand
+                    if home_hand:
+                        away_off = Batters.offense_vs_hand_dict(
+                            BATTER_DF, away_team, home_hand, lineup_names=None
+                        )
+
+                    print(
+                        f"🧮 Offense vs hand → HOME {home_team} vs {away_hand or '?'}: "
+                        f"x{home_off.get('mult',1.0):.3f} ({home_off.get('pop','none')}); "
+                        f"AWAY {away_team} vs {home_hand or '?'}: "
+                        f"x{away_off.get('mult',1.0):.3f} ({away_off.get('pop','none')})"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Batter split adjustment failed: {e}")
+
+            # combine to a single gentle multiplier and clamp
+            bat_mult = float((home_off.get("mult", 1.0) + away_off.get("mult", 1.0)) / 2.0)
+            bat_mult = max(0.94, min(1.06, bat_mult))  # safety clamp ~±6%
+
+            if isinstance(away_stats, dict) and away_stats.get('LowIP', False):
+                unmatched_pitchers.add(away_pitcher)
+            if isinstance(home_stats, dict) and home_stats.get('LowIP', False):
+                unmatched_pitchers.add(home_pitcher)
+
+            print(f"🧠 Pitcher Check: {away_pitcher} → {away_stats if away_stats is not None else 'None'}")
+            print(f"🧠 Pitcher Check: {home_pitcher} → {home_stats if home_stats is not None else 'None'}")
+
+            # ✅ Check pitcher data validity
+            if (away_stats is None or not isinstance(away_stats, (dict, pd.Series)) or
+                home_stats is None or not isinstance(home_stats, (dict, pd.Series))):
+                print(f"⚠️ Skipping - missing or invalid pitcher data")
+                print(f"❓ away_stats = {away_stats}")
+                print(f"❓ home_stats = {home_stats}")
+                continue
+
+            bullpen_home = BullpenManager.get_bullpen_stats(home_team)
+            bullpen_away = BullpenManager.get_bullpen_stats(away_team)
+            velo_drop_away = velocity_tracker.get_velocity_drop(away_pitcher)
+            velo_drop_home = velocity_tracker.get_velocity_drop(home_pitcher)
+            print(f"🚀 Velo Drop → Away: {velo_drop_away}, Home: {velo_drop_home}")
+
+            # 🧠 Normalize game name and look up public betting data
+            away_norm = normalize_team_name(away_team)
+            home_norm = normalize_team_name(home_team)
+            game_key = f"{away_norm} @ {home_norm}"
+
+            print(f"🧩 Game Key: {game_key}")
+            print(f"📊 Public Data Found: {game_key in public_betting_data}")
+
+            public = public_betting_data.get(game_key)
+            if public is None:
+                print(f"⚠️ No public betting data for: {game_key}")
+                public = {}
+
+            game_name = f"{away_team} @ {home_team}"
+
+            game_data = {
+                'Game': game_name,
+                'Venue': venue,
+                'Pitchers': f"{away_pitcher} vs {home_pitcher}",
+                'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
+                'vegas_line': vegas_line
+            }
+
+            # 🔮 Run prediction with public data
+            prediction, confidence, total_open, total_current = generate_prediction(
+                away_stats=away_stats,
+                home_stats=home_stats,
+                bullpen_home=bullpen_home,
+                bullpen_away=bullpen_away,
+                velo_drop_away=velo_drop_away,
+                velo_drop_home=velo_drop_home,
+                park_factors=park_factors,
+                vegas_data=vegas_line_adj,
+                public_data=public  # ✅ Always a dict or empty fallback
+            )
+
+            if prediction == "SKIPPED":
+                print(f"⏭️ Skipping {game_name} due to bad public data")
+                continue
+
+            # 🪄 Apply batter split multiplier  
+            try:
+                # if prediction is numeric (like projected runs total)
+                if isinstance(prediction, (int, float)):
+                    prediction = prediction * bat_mult
+
+                # nudge confidence (0.98–1.02 scale depending on bat_mult)
+                confidence = float(confidence) * (0.985 + 0.015 * bat_mult)
+
+            except Exception as e:
+                print(f"⚠️ Batter multiplier apply failed: {e}")
+
+            # lineup_delta computed earlier; positive = home bats > away bats
+            try:
+                pick = str(prediction).upper()
+                # scale lineup effect into confidence points (~-0.03..+0.03 typical)
+                lineup_points = 0.05 * float(lineup_delta)  # previously 5.0 → use 0.05 to keep 0..1 scale
+
+                if pick.startswith("OVER"):
+                    conf_delta = max(0.0, lineup_points) - 0.5 * max(0.0, -lineup_points)
+                elif pick.startswith("UNDER"):
+                    conf_delta = max(0.0, -lineup_points) - 0.5 * max(0.0, lineup_points)
+                else:
+                    conf_delta = 0.0
+
+                # apply and clamp to [0,1]
+                confidence = float(confidence) + conf_delta
+                confidence = max(0.0, min(1.0, confidence))
+                print(f"🧪 Confidence adj via lineups: {conf_delta:+.3f} → {confidence:.3f}")
+            except Exception as e:
+                print(f"⚠️ Confidence adjust error: {e}")
+
+            game_data.update({
+                'Prediction': prediction,
+                'Confidence': f"{confidence:.0%}",
+                'Line_Open': public.get("Total_Open", '?') if public else '?',
+                'Line_Current': public.get("Total_Current", '?') if public else '?',
+                'xERA': f"{safe_get(away_stats, 'xERA', 'N/A')}/{safe_get(home_stats, 'xERA', 'N/A')}",
+                'WHIP': f"{safe_get(away_stats, 'WHIP', 'N/A')}/{safe_get(home_stats, 'WHIP', 'N/A')}",
+                'Bullpen': f"{safe_float(safe_get(bullpen_away, 'ERA', 0)):.2f}/{safe_float(safe_get(bullpen_home, 'ERA', 0)):.2f}",
+                'Velo Drops': f"{safe_float(velo_drop_away):.1f}/{safe_float(velo_drop_home):.1f}",
+                'Velo': round((safe_float(velo_drop_home) + safe_float(velo_drop_away)) / 2, 2),
+                'Park Factor': f"{park_factors[0]}/{park_factors[1]}",
+                'Relievers': f"{safe_get(bullpen_away, 'Relievers', '?')}/{safe_get(bullpen_home, 'Relievers', '?')}",
+                'Line_Open': total_open,
+                'Line_Current': total_current,
+                'VeloDrop_Away': round(safe_float(velo_drop_away), 1),
+                'VeloDrop_Home': round(safe_float(velo_drop_home), 1),
+            })
+
+            try:
+                # Base units (if you later compute Kelly for totals, swap that value in here)
+                base_units = 1.0
+                units_mult = 1.0 + 0.25 * abs(float(lineup_delta))  # tune 0.15–0.35
+                units_mult = min(units_mult, 1.50)  # safety cap
+                sized_units = round(base_units * units_mult, 2)
+                game_data['Units'] = sized_units
+
+                # Optional quick note:
+                print(f"💰 Units adj via lineups: x{units_mult:.2f} → {sized_units}u")
+            except Exception as e:
+                print(f"⚠️ Units adjust error: {e}")
+
+            # 💵 MONEYLINE PREDICTION
+            home_ml_data = get_team_ml_data(home_team, home_pitcher)
+            away_ml_data = get_team_ml_data(away_team, away_pitcher)
+
+            home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
+
+            # Get implied odds for home ML
+            try:
+                odds_str = vegas_line.get("ML_Home", "-130")
+                odds_value = float(odds_str) if isinstance(odds_str, str) else odds_str
+                implied_home = 1 / (1 + abs(odds_value) / 100) if odds_value < 0 else abs(odds_value) / (100 + abs(odds_value))
+            except:
+                implied_home = 0.53
+
+            implied_away = 1 - implied_home
+
+            home_kelly = calculate_kelly_units(home_win_prob, implied_home)
+            away_kelly = calculate_kelly_units(away_win_prob, implied_away)
+
+            # ✅ Always give a pick (even if edge is small)
+            if home_win_prob > away_win_prob:
+                ml_pick = f"{home_team.upper()} ML"
+                ml_conf = f"{round(home_win_prob * 100)}%"
+                ml_value = f"{round((home_win_prob - implied_home) * 100)}%"
+                ml_kelly = f"{round(home_kelly, 2)}u"
+            else:
+                ml_pick = f"{away_team.upper()} ML"
+                ml_conf = f"{round(away_win_prob * 100)}%"
+                ml_value = f"{round((away_win_prob - implied_away) * 100)}%"
+                ml_kelly = f"{round(away_kelly, 2)}u"
+
+            # Add to game data
+            game_data.update({
+                "ML_Pick": ml_pick,
+                "ML_Confidence": ml_conf,
+                "ML_Value": ml_value,
+                "ML_Kelly_Units": ml_kelly,
+            })
+
+            if isinstance(public, dict):
+                print(f"Public keys found: {list(public.keys())}")
+            else:
+                print("Public betting data is missing (NoneType)")
+
+            if public:
+                game_data['ou_bets_pct_over'] = public.get('ou_bets_pct_over', '?')
+                game_data['ou_bets_pct_under'] = public.get('ou_bets_pct_under', '?')
+                game_data['ml_bets_pct_home'] = public.get('ml_bets_pct_home', '?')
+                game_data['ml_bets_pct_away'] = public.get('ml_bets_pct_away', '?')
+                game_data['total_open'] = public.get('total_open', '?')
+                game_data['total_current'] = public.get('total_current', '?')
+
+            results.append(game_data)
+            print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%}")
+            if confidence >= MIN_CONFIDENCE_ALERT:
+                alerts.append(game_data)
+
+        except Exception as e:
+            print(f"❌ Game processing error: {e}")
+            continue
+
+    # Save results
+    if results:
+        archive_date = datetime.now().strftime("%Y%m%d_%H%M")
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+        results_df = pd.DataFrame(results, columns=[
+            "Game", "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
+            "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
+        ])
+
+        csv_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
+        results_df.to_csv(csv_path, index=False)
+
+        print(f"\n💾 Saved {len(results)} predictions")
+
+        # 📤 Auto-upload to Telegram
+        send_telegram_file(csv_path, caption=f"📊 Over Gang Predictions for {datetime.now().strftime('%b %d')}")
+
+    # Send alerts
+    if alerts:
+        print(f"\n🚨 Sending {len(alerts)} alerts...")
+        for alert in alerts:
+            message = format_alert(alert)
+            if send_telegram_alert(message):
+                print(f"📤 Alert sent for {alert['Game']}")
+                time.sleep(1)
+
+    # Log unmatched
+    if unmatched_pitchers:
+        alias_path = os.path.join(DATA_DIR, "pitcher_aliases.json")
+        existing_aliases = {}
+        if os.path.exists(alias_path):
+            try:
+                with open(alias_path, 'r') as f:
+                    existing_aliases = json.load(f)
+            except:
+                existing_aliases = {}
+
+            new_aliases = {
+                DataManager.normalize_name(p): [DataManager.normalize_name(p)]
+                for p in unmatched_pitchers
+                if DataManager.normalize_name(p) not in existing_aliases
+                and DataManager.normalize_name(p) not in stats_df.index
+            }
+
+        if new_aliases:
+            existing_aliases.update(new_aliases)
+            with open(alias_path, 'w') as f:
+                json.dump(existing_aliases, f, indent=2)
+
+            alert_msg = "🚨 *Over Gang Alert*: Unmatched Pitchers Detected\n\n"
+            alert_msg += "\n".join(f"• {p}" for p in unmatched_pitchers)
+            alert_msg += "\n\n🔧 Add aliases to `/data/pitcher_aliases.json`"
+            send_telegram_alert(alert_msg)
+    else:
+        print("\nℹ️ No unmatched pitchers detected")
+
+    if alias_log:
+        print("\n🔁 Alias matches used:")
+        for match in alias_log:
+            print(f"• {match}")
+
+# ================================
+# 🚀 ENTRY POINT
+# ================================
+if __name__ == "__main__":
+    run_predictions()
