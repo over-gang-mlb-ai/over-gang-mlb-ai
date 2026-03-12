@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.log
+logs/
+latest_predictions.csv
+.env
+archive/
+debug/
+run.log
