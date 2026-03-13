@@ -68,6 +68,12 @@ class Batters:
             Batters._df = pd.DataFrame()
             return Batters._df
 
+        # Normalize CSV columns to expected schema (only rename keys that exist)
+        _rename = {"name": "Name", "team_name": "Team", "pa": "PA"}
+        _rename = {k: v for k, v in _rename.items() if k in df.columns}
+        if _rename:
+            df = df.rename(columns=_rename)
+
         # Normalize name column
         if "name_norm" not in df.columns:
             if "Name" in df.columns:

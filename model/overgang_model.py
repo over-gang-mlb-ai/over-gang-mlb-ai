@@ -708,6 +708,12 @@ def run_predictions():
             print(f"\n🔍 Processing: {away_team} @ {home_team}")
             print(f"🧪 Matching: Away = {away_pitcher} | Home = {home_pitcher}")
 
+            away_impact = 0.0
+            home_impact = 0.0
+            away_scope = "none"
+            home_scope = "none"
+            lineup_delta = 0.0
+
             # --- score lineups vs the real opposing starter hand (safe) ---
             try:
                 # teams must be full, lowercase names to match the CSV
