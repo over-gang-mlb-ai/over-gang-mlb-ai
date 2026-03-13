@@ -1,10 +1,12 @@
 """
-OVER GANG MLB PREDICTOR v3.3
-- Fixed missing pitcher data root cause
-- Enhanced name normalization (unidecode, nicknames, suffixes)
-- League average and backup stat fallback
-- IP-based filtering based on season timing
-- Telegram alerts for unmatched pitchers
+OVER GANG MLB PREDICTOR v4.0 — True projection model
+
+Projects expected runs per team (away + home), sums to a game total, then compares
+to the Vegas total for edge, confidence, and recommended bet.
+
+Inputs: starter xERA/WHIP, bullpen ERA/fatigue (IP_Week), park factors, velocity
+drops, lineup impact, public betting %. Output: projected_total, away_runs, home_runs,
+edge vs Vegas, pick (OVER/UNDER), confidence, recommended_units.
 """
 import sys
 import os
@@ -80,6 +82,24 @@ NAME_MATCH_THRESHOLD = 85
 FATIGUE_THRESHOLD = 4.25
 VELOCITY_DROP_THRESHOLD = -1.5
 
+# ================================
+# 📐 PROJECTION MODEL CONSTANTS (true expected runs)
+# ================================
+LEAGUE_RUNS_PER_TEAM = 4.25   # league avg runs per team per 9
+LEAGUE_ERA = 4.25
+STARTER_IP_SHARE = 0.60      # ~60% of IP from starter, 40% bullpen
+BULLPEN_IP_SHARE = 0.40
+WHIP_LEAGUE = 1.30            # baseline WHIP for modifier
+EDGE_THRESHOLD = 0.25        # min |edge| to recommend OVER/UNDER (runs); tune up (e.g. 0.35) if too aggressive
+EDGE_FOR_FULL_UNIT = 0.5     # edge >= this gets 1.0 unit; scale below; tune up (e.g. 0.6) for conservative sizing
+BULLPEN_FATIGUE_IP_CUTOFF = 12.0   # IP_Week above this = tired bullpen
+BULLPEN_FATIGUE_RUNS_BOOST = 0.03  # +3% runs per 10 IP over cutoff (capped)
+VELO_DROP_RUNS_PER_MPH = 0.02      # +2% runs per mph velocity drop below 0
+LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller than offense_mult
+LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
+OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
+OFFENSE_MULT_MAX = 1.10
+
 # Park Factors
 PARK_FACTORS = {
     "Coors Field": (1.25, 0.80),
@@ -95,6 +115,57 @@ PARK_FACTORS = {
     "T-Mobile Park": (0.88, 1.14),
     "Unknown": (1.0, 1.0)
 }
+
+
+def project_team_runs(
+    opponent_starter_xera: float,
+    opponent_starter_whip: float,
+    opponent_bullpen_era: float,
+    opponent_bullpen_ip_week: float,
+    park_runs_factor: float,
+    lineup_impact: float,
+    opponent_velo_drop: float,
+    opponent_low_ip: bool = False,
+    offense_mult: float = 1.0,
+) -> float:
+    """
+    Project expected runs scored by one team in the game (they face opponent starter + bullpen).
+
+    offense_mult: team offense strength vs opposing pitcher hand (Batters.offense_vs_hand_dict "mult");
+      clamped to OFFENSE_MULT_MIN..OFFENSE_MULT_MAX. 1.0 when batter data unavailable.
+    lineup_impact: smaller adjustment from LineupImpact.score_lineup (capped by LINEUP_IMPACT_CAP).
+    """
+    if opponent_low_ip:
+        opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
+    effective_era = (
+        STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * opponent_bullpen_era
+    )
+    effective_era = max(2.5, min(7.0, effective_era))
+    runs = LEAGUE_RUNS_PER_TEAM * (LEAGUE_ERA / effective_era)
+
+    runs *= park_runs_factor
+
+    offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(offense_mult)))
+    runs *= offense_mult
+
+    lineup_mult = 1.0 + max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, lineup_impact))
+    runs *= lineup_mult
+
+    whip_mult = opponent_starter_whip / WHIP_LEAGUE
+    whip_mult = max(0.90, min(1.15, whip_mult))
+    runs *= whip_mult
+
+    if opponent_velo_drop < 0:
+        velo_mult = 1.0 - (VELO_DROP_RUNS_PER_MPH * opponent_velo_drop)
+        runs *= min(1.10, velo_mult)
+
+    if opponent_bullpen_ip_week > BULLPEN_FATIGUE_IP_CUTOFF:
+        excess_ip = min(20.0, opponent_bullpen_ip_week - BULLPEN_FATIGUE_IP_CUTOFF)
+        fatigue_mult = 1.0 + BULLPEN_FATIGUE_RUNS_BOOST * (excess_ip / 10.0)
+        runs *= min(1.08, fatigue_mult)
+
+    return round(runs, 2)
+
 
 # ================================
 # ⚾ BULLPEN DATA (MLB Stats API)
@@ -227,16 +298,31 @@ class VelocityTracker:
             return 0
 
 # ================================
-# 📈 PREDICTION ENGINE
+# 📈 PREDICTION ENGINE (true projection model)
 # ================================
 def generate_prediction(
-    away_stats, home_stats, bullpen_home, bullpen_away,
-    velo_drop_away, velo_drop_home, park_factors,
+    away_stats,
+    home_stats,
+    bullpen_home,
+    bullpen_away,
+    velo_drop_away,
+    velo_drop_home,
+    park_factors,
     vegas_data=None,
-    public_data=None
+    public_data=None,
+    away_lineup_impact=0.0,
+    home_lineup_impact=0.0,
+    away_offense_mult=1.0,
+    home_offense_mult=1.0,
 ):
+    """
+    Project expected runs for each team, sum to projected total, then compare to Vegas.
 
-    # ✅ If vegas_line is a float already, use it. If it's a dict, extract .get('total_current')
+    Returns dict with: projected_total, away_runs, home_runs, edge, pick, prediction (str),
+    confidence, total_open, total_current, recommended_units, skip (bool).
+    """
+    if public_data is None:
+        public_data = {}
     try:
         if isinstance(vegas_data, dict):
             vegas_line = float(vegas_data.get("total_current", 8.5))
@@ -248,108 +334,146 @@ def generate_prediction(
 
     if not isinstance(public_data, dict):
         print(f"❌ Invalid public_data type: {type(public_data)} → {public_data}")
-        return "SKIPPED", 0.0, vegas_line, vegas_line
+        return {
+            "skip": True,
+            "prediction": "SKIPPED",
+            "confidence": 0.0,
+            "total_open": vegas_line,
+            "total_current": vegas_line,
+        }
 
-    away_xera = safe_get(away_stats, 'xERA', 4.50)
-    home_xera = safe_get(home_stats, 'xERA', 4.50)
-    away_whip = safe_get(away_stats, 'WHIP', 1.30)
-    home_whip = safe_get(home_stats, 'WHIP', 1.30)
+    away_xera = safe_get(away_stats, "xERA", 4.50)
+    home_xera = safe_get(home_stats, "xERA", 4.50)
+    away_whip = safe_get(away_stats, "WHIP", 1.30)
+    home_whip = safe_get(home_stats, "WHIP", 1.30)
+    bullpen_home_era = safe_get(bullpen_home, "ERA", 4.25)
+    bullpen_away_era = safe_get(bullpen_away, "ERA", 4.25)
+    bullpen_home_ip_week = safe_get(bullpen_home, "IP_Week", 12.0)
+    bullpen_away_ip_week = safe_get(bullpen_away, "IP_Week", 12.0)
+    over_boost, _ = park_factors
 
-    if safe_get(away_stats, 'LowIP', False):
-        away_xera = min(away_xera + 0.75, 6.00)
-    if safe_get(home_stats, 'LowIP', False):
-        home_xera = min(home_xera + 0.75, 6.00)
+    # ---------- Project runs for each team ----------
+    # Away offense faces home pitcher + home bullpen; away_offense_mult from Batters.offense_vs_hand_dict(away_team vs home_hand)
+    away_runs = project_team_runs(
+        opponent_starter_xera=home_xera,
+        opponent_starter_whip=home_whip,
+        opponent_bullpen_era=bullpen_home_era,
+        opponent_bullpen_ip_week=bullpen_home_ip_week,
+        park_runs_factor=over_boost,
+        lineup_impact=away_lineup_impact,
+        opponent_velo_drop=velo_drop_home,
+        opponent_low_ip=safe_get(home_stats, "LowIP", False),
+        offense_mult=away_offense_mult,
+    )
+    # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
+    home_runs = project_team_runs(
+        opponent_starter_xera=away_xera,
+        opponent_starter_whip=away_whip,
+        opponent_bullpen_era=bullpen_away_era,
+        opponent_bullpen_ip_week=bullpen_away_ip_week,
+        park_runs_factor=over_boost,
+        lineup_impact=home_lineup_impact,
+        opponent_velo_drop=velo_drop_away,
+        opponent_low_ip=safe_get(away_stats, "LowIP", False),
+        offense_mult=home_offense_mult,
+    )
 
-    total_xera = away_xera + home_xera
-    avg_whip = (away_whip + home_whip) / 2
-    over_boost, under_boost = park_factors
+    projected_total = round(away_runs + home_runs, 2)
+    edge = round(projected_total - vegas_line, 2)
 
-    if total_xera > 9.0 and avg_whip > 1.3:
-        prediction = "🚨 OVER"
-        confidence = 0.9
-    elif total_xera < 7.0 and avg_whip < 1.2:
-        prediction = "🔒 UNDER"
-        confidence = 0.9
-    elif total_xera > 8.5:
-        prediction = "OVER"
-        confidence = 0.75
+    # ---------- Pick: OVER / UNDER based on edge vs threshold ----------
+    if edge >= EDGE_THRESHOLD:
+        pick = "OVER"
+        strength = "🚨 " if edge >= 0.6 else ""
+        prediction_str = f"{strength}OVER {vegas_line:.1f}"
+    elif edge <= -EDGE_THRESHOLD:
+        pick = "UNDER"
+        strength = "🔒 " if edge <= -0.6 else ""
+        prediction_str = f"{strength}UNDER {vegas_line:.1f}"
     else:
-        prediction = "UNDER"
+        pick = "LEAN_OVER" if edge > 0 else "LEAN_UNDER"
+        prediction_str = f"LEAN {'OVER' if edge > 0 else 'UNDER'} {vegas_line:.1f} (proj {projected_total:.1f})"
+
+    # ---------- Base confidence from |edge| ----------
+    abs_edge = abs(edge)
+    if abs_edge >= 1.0:
+        confidence = 0.85
+    elif abs_edge >= 0.5:
         confidence = 0.75
-
-    if "OVER" in prediction and total_xera > vegas_line:
-        confidence = min(0.99, confidence + 0.05)
-    elif "UNDER" in prediction and total_xera < vegas_line:
-        confidence = min(0.99, confidence + 0.05)
-
-    if "OVER" in prediction:
-        if safe_get(bullpen_home, 'ERA', 4.25) > FATIGUE_THRESHOLD:
-            confidence = min(0.99, confidence * 1.05)
-        if safe_get(bullpen_away, 'ERA', 4.25) > FATIGUE_THRESHOLD:
-            confidence = min(0.99, confidence * 1.03)
-        confidence *= over_boost
+    elif abs_edge >= EDGE_THRESHOLD:
+        confidence = 0.65
     else:
-        confidence *= under_boost
+        confidence = 0.45
 
+    # (Bullpen/park already in projection; avoid re-using for confidence to prevent bias)
+
+    # Velocity drop (tired starter): slight confidence reduction (data noisier)
     if velo_drop_away < VELOCITY_DROP_THRESHOLD:
         confidence *= 0.98
     if velo_drop_home < VELOCITY_DROP_THRESHOLD:
         confidence *= 0.99
 
-    relievers_home = safe_get(bullpen_home, 'Relievers', 7)
-    relievers_away = safe_get(bullpen_away, 'Relievers', 7)
-    reliever_factor = min(1.0, (relievers_away + relievers_home) / 14)
-
-    if "OVER" in prediction:
-        confidence *= 1 + (1 - reliever_factor) * 0.1
+    relievers = (safe_get(bullpen_away, "Relievers", 7) + safe_get(bullpen_home, "Relievers", 7)) / 14.0
+    reliever_factor = min(1.0, relievers)
+    if pick == "OVER":
+        confidence *= 1.0 + (1.0 - reliever_factor) * 0.1
     else:
-        confidence *= 1 + reliever_factor * 0.05
+        confidence *= 1.0 + reliever_factor * 0.05
 
-    line_adjustment = max(-1.5, min(1.5, (total_xera - vegas_line) / 2))
-    final_line = vegas_line + line_adjustment
+    total_open = safe_float(public_data.get("Total_Open"), default=vegas_line)
+    total_current = safe_float(public_data.get("Total_Current"), default=total_open)
 
-    total_open = vegas_line
-    total_current = vegas_line
+    # Public betting: fade heavy public (contrarian)
+    try:
+        ou_pct = float(public_data.get("ou_bets_pct_over", 50))
+        if pick == "OVER":
+            if ou_pct > 65:
+                confidence += 0.05
+            elif ou_pct < 35:
+                confidence -= 0.05
+        elif pick == "UNDER":
+            if ou_pct > 65:
+                confidence -= 0.05
+            elif ou_pct < 35:
+                confidence += 0.05
+        if (pick == "OVER" and ou_pct >= 80) or (pick == "UNDER" and (100 - ou_pct) >= 80):
+            confidence = min(0.99, confidence + 0.10)
+    except Exception as e:
+        print(f"⚠️ Public data ou_pct error: {e}")
 
-    if isinstance(public_data, dict):
-        try:
-            ou_pct = float(public_data.get("ou_bets_pct_over", 50))
-            if "OVER" in prediction:
-                if ou_pct > 65:
-                    confidence += 0.05
-                elif ou_pct < 35:
-                    confidence -= 0.05
-            elif "UNDER" in prediction:
-                if ou_pct > 65:
-                    confidence -= 0.05
-                elif ou_pct < 35:
-                    confidence += 0.05
-        except Exception as e:
-            print(f"⚠️ Public data ou_pct error: {e}")
+    if total_current > total_open:
+        confidence += 0.02
+    elif total_current < total_open:
+        confidence -= 0.02
 
-        try:
-            total_open = safe_float(public_data.get("Total_Open"), default=vegas_line)
-            total_current = safe_float(public_data.get("Total_Current"), default=total_open)
-            if total_current > total_open:
-                confidence += 0.02
-            elif total_current < total_open:
-                confidence -= 0.02
-        except Exception as e:
-            print(f"⚠️ Public data line movement error: {e}")
-
-        try:
-            if "OVER" in prediction and ou_pct >= 80:
-                confidence = min(0.99, confidence + 0.10)
-            elif "UNDER" in prediction and (100 - ou_pct) >= 80:
-                confidence = min(0.99, confidence + 0.10)
-        except Exception as e:
-            print(f"⚠️ Public data super boost error: {e}")
-
-    # Final confidence bounds
     confidence = max(0.01, min(confidence, 0.99))
 
-    print(f"📦 Raw prediction: {prediction}, Confidence: {confidence:.2f}")
-    return f"{prediction} {final_line:.1f}", round(confidence, 2), total_open, total_current
+    # Recommended units from edge size (only bet when |edge| >= threshold)
+    if abs_edge < EDGE_THRESHOLD:
+        recommended_units = 0.0
+    elif abs_edge >= EDGE_FOR_FULL_UNIT:
+        recommended_units = 1.0
+    else:
+        recommended_units = round(0.5 + 0.5 * (abs_edge - EDGE_THRESHOLD) / (EDGE_FOR_FULL_UNIT - EDGE_THRESHOLD), 2)
+
+    print(
+        f"📦 Projection: {away_runs:.2f} + {home_runs:.2f} = {projected_total:.2f} | "
+        f"Edge: {edge:+.2f} | {prediction_str} | Conf: {confidence:.2f}"
+    )
+    return {
+        "skip": False,
+        "projected_total": projected_total,
+        "away_runs": away_runs,
+        "home_runs": home_runs,
+        "vegas_line": vegas_line,
+        "edge": edge,
+        "pick": pick,
+        "prediction": prediction_str,
+        "confidence": round(confidence, 2),
+        "total_open": total_open,
+        "total_current": total_current,
+        "recommended_units": recommended_units,
+    }
 
 # ================================
 # 💬 TELEGRAM UTILS
@@ -390,7 +514,6 @@ def format_alert(game_data: dict) -> str:
     ml_home = game_data.get('ml_bets_pct_home', '?')
     ml_away = game_data.get('ml_bets_pct_away', '?')
     total_open = game_data.get('total_open', '?')
-    total_open = game_data.get('total_open', '?')
     total_current = game_data.get('total_current', '?')
     vegas_line = game_data.get('vegas_line', '?')
 
@@ -412,8 +535,10 @@ def format_alert(game_data: dict) -> str:
         line_movement = f"{total_open} → {total_current}"
 
     try:
-        raw_conf = float(game_data['Confidence'])
-        confidence_clean = f"{raw_conf:.0f}%"
+        raw_conf = game_data.get('Confidence_Value')
+        if raw_conf is None:
+            raw_conf = float(str(game_data.get('Confidence', '0')).replace('%', ''))
+        confidence_clean = f"{raw_conf:.0f}%" if raw_conf is not None else str(game_data.get('Confidence', '?'))
 
         if raw_conf >= 95:
             confidence_emoji = "🔥"
@@ -430,20 +555,23 @@ def format_alert(game_data: dict) -> str:
         confidence_clean = game_data.get('Confidence', '?')
         confidence_emoji = ""
 
+    proj_total = game_data.get('Projected_Total', '?')
+    edge_val = game_data.get('Edge', '?')
+    edge_str = f"{edge_val:+.2f}" if isinstance(edge_val, (int, float)) else edge_val
+    away_r = game_data.get('Away_Runs', '?')
+    home_r = game_data.get('Home_Runs', '?')
     return (
         f"🔥 *OVER GANG ALERT* 🔥\n\n"
         f"🏟️ *{game_data['Game']}*\n"
         f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {formatted_time}\n\n"
         f"🎯 *Pitchers*: {game_data['Pitchers']}\n"
         f"📊 xERA: {game_data['xERA']} | WHIP: {game_data['WHIP']}\n"
-        f"🧠 *Prediction*: {game_data['Prediction']}\n"
-        f"💪 *Confidence*: {confidence_clean}{f' {confidence_emoji}' if confidence_emoji else ''}\n"
-        f"🎲 *Vegas Total Line*: {vegas_line}\n"
-        f"🏆 *ML Pick*: {game_data.get('ML_Pick', '-')}\n"
-        f"💪 *Confidence*: {game_data.get('ML_Confidence', '-')}\n"
-        f"📈 *Edge*: {game_data.get('ML_Value', '-')} | *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n"
-        f"📉 *Public Bets*: {ou_over if ou_over != '?' else '-'}% Over / {ou_under if ou_under != '?' else '-'}% Under\n"
-        f"💸 *Total Line*: {line_movement}\n\n"
+        f"📐 *Projection*: {away_r} + {home_r} = *{proj_total}* runs\n"
+        f"📏 *Edge*: {edge_str} vs Vegas {vegas_line}\n"
+        f"🧠 *Pick*: {game_data['Prediction']}\n"
+        f"💪 *Confidence*: {confidence_clean}{f' {confidence_emoji}' if confidence_emoji else ''} | *Units*: {game_data.get('Units', '-')}\n"
+        f"🏆 *ML Pick*: {game_data.get('ML_Pick', '-')} | *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n"
+        f"📉 *Public*: {ou_over if ou_over != '?' else '-'}% Over / {ou_under if ou_under != '?' else '-'}% Under | Line: {line_movement}\n"
         f"🧾 *ML Bets*: {ml_home if ml_home != '?' else '-'}% Home / {ml_away if ml_away != '?' else '-'}% Away"
     )
 
@@ -503,7 +631,7 @@ def safe_lineup_impacts(lineup_obj, away_lineup, home_lineup, away_pitcher_hand,
 # 🔍 CORE LOGIC
 # ================================
 def run_predictions():
-    print(f"🔮 OVER GANG PREDICTOR v3.3 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"🔮 OVER GANG PREDICTOR v4.0 (projection model) | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*50 + "\n")
 
     if AUTO_UPDATE_DATA:
@@ -664,9 +792,9 @@ def run_predictions():
                 except Exception as e:
                     print(f"⚠️ Batter split adjustment failed: {e}")
 
-            # combine to a single gentle multiplier and clamp
-            bat_mult = float((home_off.get("mult", 1.0) + away_off.get("mult", 1.0)) / 2.0)
-            bat_mult = max(0.94, min(1.06, bat_mult))  # safety clamp ~±6%
+            # Per-team offense mult for project_team_runs: Batters.offense_vs_hand_dict "mult" when available, else 1.0
+            away_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(away_off.get("mult", 1.0))))
+            home_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(home_off.get("mult", 1.0))))
 
             if isinstance(away_stats, dict) and away_stats.get('LowIP', False):
                 unmatched_pitchers.add(away_pitcher)
@@ -713,8 +841,8 @@ def run_predictions():
                 'vegas_line': vegas_line
             }
 
-            # 🔮 Run prediction with public data
-            prediction, confidence, total_open, total_current = generate_prediction(
+            # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
+            proj = generate_prediction(
                 away_stats=away_stats,
                 home_stats=home_stats,
                 bullpen_home=bullpen_home,
@@ -722,76 +850,62 @@ def run_predictions():
                 velo_drop_away=velo_drop_away,
                 velo_drop_home=velo_drop_home,
                 park_factors=park_factors,
-                vegas_data=vegas_line_adj,
-                public_data=public  # ✅ Always a dict or empty fallback
+                vegas_data=vegas_line,
+                public_data=public,
+                away_lineup_impact=float(away_impact),
+                home_lineup_impact=float(home_impact),
+                away_offense_mult=away_offense_mult,
+                home_offense_mult=home_offense_mult,
             )
 
-            if prediction == "SKIPPED":
+            if proj.get("skip"):
                 print(f"⏭️ Skipping {game_name} due to bad public data")
                 continue
 
-            # 🪄 Apply batter split multiplier  
+            prediction = proj["prediction"]
+            confidence = proj["confidence"]
+            total_open = proj["total_open"]
+            total_current = proj["total_current"]
+            projected_total = proj["projected_total"]
+            away_runs = proj["away_runs"]
+            home_runs = proj["home_runs"]
+            edge = proj["edge"]
+            recommended_units = proj["recommended_units"]
+
+            # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
+
+            confidence = max(0.0, min(1.0, confidence))
+
+            # Optional: scale units by lineup conviction
             try:
-                # if prediction is numeric (like projected runs total)
-                if isinstance(prediction, (int, float)):
-                    prediction = prediction * bat_mult
-
-                # nudge confidence (0.98–1.02 scale depending on bat_mult)
-                confidence = float(confidence) * (0.985 + 0.015 * bat_mult)
-
-            except Exception as e:
-                print(f"⚠️ Batter multiplier apply failed: {e}")
-
-            # lineup_delta computed earlier; positive = home bats > away bats
-            try:
-                pick = str(prediction).upper()
-                # scale lineup effect into confidence points (~-0.03..+0.03 typical)
-                lineup_points = 0.05 * float(lineup_delta)  # previously 5.0 → use 0.05 to keep 0..1 scale
-
-                if pick.startswith("OVER"):
-                    conf_delta = max(0.0, lineup_points) - 0.5 * max(0.0, -lineup_points)
-                elif pick.startswith("UNDER"):
-                    conf_delta = max(0.0, -lineup_points) - 0.5 * max(0.0, lineup_points)
-                else:
-                    conf_delta = 0.0
-
-                # apply and clamp to [0,1]
-                confidence = float(confidence) + conf_delta
-                confidence = max(0.0, min(1.0, confidence))
-                print(f"🧪 Confidence adj via lineups: {conf_delta:+.3f} → {confidence:.3f}")
-            except Exception as e:
-                print(f"⚠️ Confidence adjust error: {e}")
+                units_mult = 1.0 + 0.25 * abs(float(lineup_delta))
+                units_mult = min(units_mult, 1.50)
+                sized_units = round(recommended_units * units_mult, 2)
+            except Exception:
+                sized_units = recommended_units
 
             game_data.update({
-                'Prediction': prediction,
-                'Confidence': f"{confidence:.0%}",
-                'Line_Open': public.get("Total_Open", '?') if public else '?',
-                'Line_Current': public.get("Total_Current", '?') if public else '?',
-                'xERA': f"{safe_get(away_stats, 'xERA', 'N/A')}/{safe_get(home_stats, 'xERA', 'N/A')}",
-                'WHIP': f"{safe_get(away_stats, 'WHIP', 'N/A')}/{safe_get(home_stats, 'WHIP', 'N/A')}",
-                'Bullpen': f"{safe_float(safe_get(bullpen_away, 'ERA', 0)):.2f}/{safe_float(safe_get(bullpen_home, 'ERA', 0)):.2f}",
-                'Velo Drops': f"{safe_float(velo_drop_away):.1f}/{safe_float(velo_drop_home):.1f}",
-                'Velo': round((safe_float(velo_drop_home) + safe_float(velo_drop_away)) / 2, 2),
-                'Park Factor': f"{park_factors[0]}/{park_factors[1]}",
-                'Relievers': f"{safe_get(bullpen_away, 'Relievers', '?')}/{safe_get(bullpen_home, 'Relievers', '?')}",
-                'Line_Open': total_open,
-                'Line_Current': total_current,
-                'VeloDrop_Away': round(safe_float(velo_drop_away), 1),
-                'VeloDrop_Home': round(safe_float(velo_drop_home), 1),
+                "Projected_Total": projected_total,
+                "Away_Runs": away_runs,
+                "Home_Runs": home_runs,
+                "Vegas_Line": total_current if (total_current is not None and total_current != 0) else vegas_line,
+                "Edge": edge,
+                "Prediction": prediction,
+                "Confidence": f"{confidence:.0%}",
+                "Confidence_Value": confidence,
+                "Units": sized_units,
+                "Line_Open": total_open,
+                "Line_Current": total_current,
+                "xERA": f"{safe_get(away_stats, 'xERA', 'N/A')}/{safe_get(home_stats, 'xERA', 'N/A')}",
+                "WHIP": f"{safe_get(away_stats, 'WHIP', 'N/A')}/{safe_get(home_stats, 'WHIP', 'N/A')}",
+                "Bullpen": f"{safe_float(safe_get(bullpen_away, 'ERA', 0)):.2f}/{safe_float(safe_get(bullpen_home, 'ERA', 0)):.2f}",
+                "Velo Drops": f"{safe_float(velo_drop_away):.1f}/{safe_float(velo_drop_home):.1f}",
+                "Velo": round((safe_float(velo_drop_home) + safe_float(velo_drop_away)) / 2, 2),
+                "Park Factor": f"{park_factors[0]}/{park_factors[1]}",
+                "Relievers": f"{safe_get(bullpen_away, 'Relievers', '?')}/{safe_get(bullpen_home, 'Relievers', '?')}",
+                "VeloDrop_Away": round(safe_float(velo_drop_away), 1),
+                "VeloDrop_Home": round(safe_float(velo_drop_home), 1),
             })
-
-            try:
-                # Base units (if you later compute Kelly for totals, swap that value in here)
-                base_units = 1.0
-                units_mult = 1.0 + 0.25 * abs(float(lineup_delta))  # tune 0.15–0.35
-                units_mult = min(units_mult, 1.50)  # safety cap
-                sized_units = round(base_units * units_mult, 2)
-                game_data['Units'] = sized_units
-
-                # Optional quick note:
-                print(f"💰 Units adj via lineups: x{units_mult:.2f} → {sized_units}u")
-            except Exception as e:
-                print(f"⚠️ Units adjust error: {e}")
 
             # 💵 MONEYLINE PREDICTION
             home_ml_data = get_team_ml_data(home_team, home_pitcher)
@@ -799,12 +913,15 @@ def run_predictions():
 
             home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
 
-            # Get implied odds for home ML
+            # Get implied odds for home ML (from public/Vegas data)
             try:
-                odds_str = vegas_line.get("ML_Home", "-130")
-                odds_value = float(odds_str) if isinstance(odds_str, str) else odds_str
-                implied_home = 1 / (1 + abs(odds_value) / 100) if odds_value < 0 else abs(odds_value) / (100 + abs(odds_value))
-            except:
+                odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
+                odds_value = float(odds_str) if isinstance(odds_str, (int, float)) else float(str(odds_str).strip())
+                if odds_value < 0:
+                    implied_home = abs(odds_value) / (100 + abs(odds_value))  # favorite
+                else:
+                    implied_home = 100 / (100 + odds_value)  # underdog
+            except Exception:
                 implied_home = 0.53
 
             implied_away = 1 - implied_home
@@ -860,7 +977,8 @@ def run_predictions():
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
         results_df = pd.DataFrame(results, columns=[
-            "Game", "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
+            "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
+            "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
