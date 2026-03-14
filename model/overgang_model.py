@@ -282,12 +282,26 @@ class VegasLines:
         Uses The Odds API when odds_map provided and match found; else CSV; else 8.5 + default juice/book.
         """
         if odds_map is not None:
+            lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
             row = get_game_odds(away_team, home_team, odds_map)
             line = float(row.get("total_line", 8.5))
-            return (line, dict(row))
+            info = dict(row)
+            match_found = lookup_key in odds_map
+            if match_found:
+                source = "Odds API"
+            else:
+                source = "8.5 fallback (no match in odds_map)"
+            info["_source"] = source
+            info["_lookup_key"] = lookup_key
+            info["_match_found"] = match_found
+            return (line, info)
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
-            return (8.5, _default_odds_info())
+            info = _default_odds_info()
+            info["_source"] = "8.5 fallback (no odds_map, CSV missing/empty)"
+            info["_lookup_key"] = ""
+            info["_match_found"] = False
+            return (8.5, info)
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
                 if f.read().strip() == "":
@@ -303,10 +317,17 @@ class VegasLines:
                 info = _default_odds_info()
                 info["total_line"] = total_current
                 info["book"] = "CSV"
+                info["_source"] = "CSV"
+                info["_lookup_key"] = game_key
+                info["_match_found"] = True
                 return (total_current, info)
         except Exception as e:
             print(f"⚠️ Vegas line fetch failed: {e}")
-        return (8.5, _default_odds_info())
+        info = _default_odds_info()
+        info["_source"] = "8.5 fallback (CSV read failed or no row)"
+        info["_lookup_key"] = ""
+        info["_match_found"] = False
+        return (8.5, info)
 
 class VelocityTracker:
     @staticmethod
@@ -684,6 +705,7 @@ def run_predictions():
 
         public_betting_data = load_public_betting_data()
         odds_map = fetch_mlb_odds()
+        print(f"[ODDS] odds_map size after fetch_mlb_odds(): {len(odds_map)}")
 
         # Keep only games that are actually TODAY in MT
         def game_mt_date(g):
@@ -716,6 +738,11 @@ def run_predictions():
             home_team = safe_get(game, 'home_name', 'Home Team')
             away_team = safe_get(game, 'away_name', 'Away Team')
             vegas_line, odds_info = VegasLines.get_vegas_line(home_team, away_team, odds_map)
+            print(f"[ODDS] Game: {away_team} @ {home_team}")
+            print(f"[ODDS]   Lookup key: {odds_info.get('_lookup_key', '?')}")
+            print(f"[ODDS]   Match found in odds_map: {odds_info.get('_match_found', '?')}")
+            print(f"[ODDS]   odds_info: total_line={odds_info.get('total_line')}, over_juice={odds_info.get('over_juice')}, under_juice={odds_info.get('under_juice')}, book={repr(odds_info.get('book'))}")
+            print(f"[ODDS]   Source: {odds_info.get('_source', '?')}")
 
             # --- starters must be defined BEFORE we score lineups
             away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')

@@ -67,6 +67,7 @@ def fetch_mlb_odds():
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
     Returns dict: game_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }
     """
+    print(f"[ODDS API] ODDS_API_KEY exists: {bool(ODDS_API_KEY)}")
     if not ODDS_API_KEY:
         logging.warning("⚠️ ODDS_API_KEY not set; odds API disabled.")
         return {}
@@ -81,9 +82,12 @@ def fetch_mlb_odds():
     try:
         import requests
         r = requests.get(url, params=params, timeout=15)
+        print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
         r.raise_for_status()
         data = r.json()
+        print(f"[ODDS API] Events returned: {len(data) if isinstance(data, list) else 0}")
     except Exception as e:
+        print(f"[ODDS API] Request failed: {e}")
         logging.warning(f"⚠️ Odds API request failed: {e}")
         return {}
 
@@ -141,6 +145,12 @@ def fetch_mlb_odds():
             "book": (best.get("title") or best.get("key") or ""),
         }
 
+    print(f"[ODDS API] Games parsed into odds_map: {len(result)}")
+    sample_keys = list(result.keys())[:3]
+    print(f"[ODDS API] Sample odds_map keys (3): {sample_keys}")
+    for k in sample_keys:
+        v = result.get(k, {})
+        print(f"[ODDS API]   Sample value: total_line={v.get('total_line')}, over_juice={v.get('over_juice')}, under_juice={v.get('under_juice')}, book={repr(v.get('book'))}")
     return result
 
 
