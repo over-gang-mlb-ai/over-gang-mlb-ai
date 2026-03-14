@@ -43,6 +43,7 @@ from core.public_betting_loader import split_game_key
 from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
+from core.odds_api import fetch_mlb_odds, get_game_odds
 from core.batters import Batters, LineupImpact, BATTER_DF
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
@@ -266,30 +267,46 @@ class BullpenManager:
         }
 
 # ================================
-# 🧠 VEGAS LINE + VELO TRACKING
+# 🧠 VEGAS LINE + VELO TRACKING (The Odds API + CSV fallback)
 # ================================
+def _default_odds_info():
+    return {"total_line": 8.5, "over_juice": -110, "under_juice": -110, "ml_home": None, "ml_away": None, "book": ""}
+
+
 class VegasLines:
     @staticmethod
-    def get_vegas_line(home_team, away_team):
-        game_key = f"{away_team.lower()} @ {home_team.lower()}"
+    def get_vegas_line(home_team, away_team, odds_map=None):
+        """
+        Return (vegas_line_float, odds_info_dict).
+        odds_info_dict has total_line, over_juice, under_juice, ml_home, ml_away, book.
+        Uses The Odds API when odds_map provided and match found; else CSV; else 8.5 + default juice/book.
+        """
+        if odds_map is not None:
+            row = get_game_odds(away_team, home_team, odds_map)
+            line = float(row.get("total_line", 8.5))
+            return (line, dict(row))
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
-            return 8.5
+            return (8.5, _default_odds_info())
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
                 if f.read().strip() == "":
-                    return 8.5
+                    return (8.5, _default_odds_info())
         except Exception:
             pass
         try:
             df = pd.read_csv(csv_path)
-            row = df[df['Game'].str.lower() == game_key]
-            if not row.empty:
-                total_current = float(row.iloc[0].get("total_current", 8.5))
-                return total_current
+            game_key = f"{away_team.lower()} @ {home_team.lower()}"
+            r = df[df["Game"].str.lower() == game_key]
+            if not r.empty:
+                total_current = float(r.iloc[0].get("total_current", 8.5))
+                info = _default_odds_info()
+                info["total_line"] = total_current
+                info["book"] = "CSV"
+                return (total_current, info)
         except Exception as e:
             print(f"⚠️ Vegas line fetch failed: {e}")
-        return 8.5
+        return (8.5, _default_odds_info())
 
 class VelocityTracker:
     @staticmethod
@@ -666,6 +683,7 @@ def run_predictions():
         )
 
         public_betting_data = load_public_betting_data()
+        odds_map = fetch_mlb_odds()
 
         # Keep only games that are actually TODAY in MT
         def game_mt_date(g):
@@ -697,7 +715,7 @@ def run_predictions():
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
             away_team = safe_get(game, 'away_name', 'Away Team')
-            vegas_line = VegasLines.get_vegas_line(home_team, away_team)
+            vegas_line, odds_info = VegasLines.get_vegas_line(home_team, away_team, odds_map)
 
             # --- starters must be defined BEFORE we score lineups
             away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')
@@ -855,7 +873,13 @@ def run_predictions():
                 'Venue': venue,
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
                 'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
-                'vegas_line': vegas_line
+                'vegas_line': vegas_line,
+                'Odds_Line': odds_info.get('total_line', 8.5),
+                'Over_Juice': odds_info.get('over_juice', -110),
+                'Under_Juice': odds_info.get('under_juice', -110),
+                'Odds_Book': odds_info.get('book', ''),
+                'Odds_ML_Home': odds_info.get('ml_home'),
+                'Odds_ML_Away': odds_info.get('ml_away'),
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -996,6 +1020,7 @@ def run_predictions():
         results_df = pd.DataFrame(results, columns=[
             "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
             "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
+            "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
