@@ -276,6 +276,12 @@ class VegasLines:
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
             return 8.5
         try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                if f.read().strip() == "":
+                    return 8.5
+        except Exception:
+            pass
+        try:
             df = pd.read_csv(csv_path)
             row = df[df['Game'].str.lower() == game_key]
             if not row.empty:

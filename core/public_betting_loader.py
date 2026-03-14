@@ -97,8 +97,16 @@ def load_public_betting_data():
         return {}
 
     if os.path.getsize(PUBLIC_BETTING_FILE) == 0:
-        logging.warning("⚠️ Public betting CSV is empty.")
+        logging.warning("⚠️ Public betting CSV is blank; returning empty data.")
         return {}
+
+    try:
+        with open(PUBLIC_BETTING_FILE, "r", encoding="utf-8") as f:
+            if f.read().strip() == "":
+                logging.warning("⚠️ Public betting CSV is blank; returning empty data.")
+                return {}
+    except Exception:
+        pass
 
     try:
         df = pd.read_csv(PUBLIC_BETTING_FILE)
