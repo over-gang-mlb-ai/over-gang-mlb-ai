@@ -61,6 +61,10 @@ def scrape_public_betting():
             print(f"⚠️ Skipped a game due to error: {e}")
             continue
 
+    if not rows:
+        print("⚠️ No games scraped; not writing empty CSV.")
+        return
+
     df = pd.DataFrame(rows)
     df.to_csv(OUTPUT_FILE, index=False)
     print(f"✅ Saved {len(df)} games to {OUTPUT_FILE}")

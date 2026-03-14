@@ -272,8 +272,11 @@ class VegasLines:
     @staticmethod
     def get_vegas_line(home_team, away_team):
         game_key = f"{away_team.lower()} @ {home_team.lower()}"
+        csv_path = "data/public_betting.csv"
+        if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+            return 8.5
         try:
-            df = pd.read_csv("data/public_betting.csv")
+            df = pd.read_csv(csv_path)
             row = df[df['Game'].str.lower() == game_key]
             if not row.empty:
                 total_current = float(row.iloc[0].get("total_current", 8.5))
