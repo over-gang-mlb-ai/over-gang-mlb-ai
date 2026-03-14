@@ -41,6 +41,28 @@ def _event_date_mt(commence_time_str):
         return ""
 
 
+def _commence_window_utc(target_date_yyyy_mm_dd):
+    """
+    For a given date in Mountain Time (YYYY-MM-DD), return (from_utc, to_utc) in ISO format
+    for the API commenceTimeFrom / commenceTimeTo params. Covers full calendar day in MT.
+    Returns (None, None) if target_date is invalid.
+    """
+    if not target_date_yyyy_mm_dd or len(target_date_yyyy_mm_dd) != 10:
+        return None, None
+    try:
+        from zoneinfo import ZoneInfo
+        y, m, d = int(target_date_yyyy_mm_dd[:4]), int(target_date_yyyy_mm_dd[5:7]), int(target_date_yyyy_mm_dd[8:10])
+        day_start_mt = datetime(y, m, d, 0, 0, 0, tzinfo=ZoneInfo(MT_ZONE))
+        day_end_mt = datetime(y, m, d, 23, 59, 59, tzinfo=ZoneInfo(MT_ZONE))
+        utc_start = day_start_mt.astimezone(ZoneInfo("UTC"))
+        utc_end = day_end_mt.astimezone(ZoneInfo("UTC"))
+        from_utc = utc_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_utc = utc_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return from_utc, to_utc
+    except Exception:
+        return None, None
+
+
 def _game_key(away_team, home_team):
     """Build key for lookup: normalized 'away @ home' (match public_betting_loader style)."""
     try:
@@ -84,9 +106,12 @@ def _parse_totals_and_h2h(book):
 def fetch_mlb_odds(target_date=None):
     """
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
-    target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). If set, only events
-    whose commence_time falls on this date in Mountain Time are kept.
-    Returns dict: game_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }
+    target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). If set, we pass
+    commenceTimeFrom/commenceTimeTo so the API returns only events on that date (MT), and we keep
+    only events whose commence_time falls on that date.
+    Returns dict: game_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }.
+    Note: The API returns only events that bookmakers have posted; there is no param to "request
+    more events" for a date—if no odds exist for that date, the response will be empty.
     """
     print(f"[ODDS API] ODDS_API_KEY exists: {bool(ODDS_API_KEY)}")
     if target_date:
@@ -102,6 +127,13 @@ def fetch_mlb_odds(target_date=None):
         "oddsFormat": "american",
         "apiKey": ODDS_API_KEY,
     }
+    # Ask API to return only events on target_date (MT) when set; for baseball_mlb this is supported (not for sport=upcoming).
+    if target_date:
+        commence_from, commence_to = _commence_window_utc(target_date)
+        if commence_from and commence_to:
+            params["commenceTimeFrom"] = commence_from
+            params["commenceTimeTo"] = commence_to
+            print(f"[ODDS API] Requesting window: commenceTimeFrom={commence_from} commenceTimeTo={commence_to}")
     try:
         import requests
         r = requests.get(url, params=params, timeout=15)
