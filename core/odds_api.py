@@ -91,12 +91,39 @@ def fetch_mlb_odds():
         logging.warning(f"⚠️ Odds API request failed: {e}")
         return {}
 
+    # Raw event inspection (first 5 events)
+    events_to_inspect = data[:5] if isinstance(data, list) else []
+    for i, ev in enumerate(events_to_inspect):
+        away = (ev.get("away_team") or "").strip()
+        home = (ev.get("home_team") or "").strip()
+        commence = ev.get("commence_time", "")
+        books = ev.get("bookmakers") or []
+        book_names = [b.get("title") or b.get("key") or "?" for b in books]
+        totals_per_book = []
+        for b in books:
+            has_totals = any((m.get("key") == "totals") for m in (b.get("markets") or []))
+            totals_per_book.append(has_totals)
+        any_totals = any(totals_per_book)
+        print(f"[ODDS API] Event[{i}] away={repr(away)} home={repr(home)} commence_time={commence}")
+        print(f"[ODDS API]   bookmakers ({len(books)}): {book_names}")
+        print(f"[ODDS API]   totals exists per book: {totals_per_book}  any_totals={any_totals}")
+
     result = {}
+    skip_log_cap = 3
+    skip_log_count = 0
+    no_totals_log_cap = 3
+    no_totals_log_count = 0
+    book_choice_log_cap = 3
+    book_choice_log_count = 0
     for event in data:
         home = (event.get("home_team") or "").strip()
         away = (event.get("away_team") or "").strip()
         key = _game_key(away, home)
         if not key or key in result:
+            if skip_log_count < skip_log_cap:
+                reason = "empty key" if not key else "duplicate key (already in result)"
+                print(f"[ODDS API] Skip reason (event {repr(away)} @ {repr(home)}): {reason}")
+                skip_log_count += 1
             continue
 
         best = None
@@ -115,13 +142,24 @@ def fetch_mlb_odds():
             best_rank = rank
             best = book
 
+        used_fallback_loop = False
         if best is None:
             for book in event.get("bookmakers") or []:
                 if any((m.get("key") == "totals") for m in (book.get("markets") or [])):
                     best = book
+                    used_fallback_loop = True
                     break
 
         if best is None:
+            if no_totals_log_count < no_totals_log_cap:
+                book_keys = [b.get("key") or "?" for b in (event.get("bookmakers") or [])]
+                market_keys_per_book = []
+                for b in (event.get("bookmakers") or []):
+                    mkt = [m.get("key") for m in (b.get("markets") or [])]
+                    market_keys_per_book.append((b.get("key"), mkt))
+                print(f"[ODDS API] Event has no book with totals market: away={repr(away)} home={repr(home)}")
+                print(f"[ODDS API]   books: {book_keys}; markets per book: {market_keys_per_book}")
+                no_totals_log_count += 1
             result[key] = {
                 "total_line": DEFAULT_TOTAL,
                 "over_juice": DEFAULT_JUICE,
@@ -131,6 +169,11 @@ def fetch_mlb_odds():
                 "book": "",
             }
             continue
+
+        if book_choice_log_count < book_choice_log_cap:
+            book_name = best.get("title") or best.get("key") or "?"
+            print(f"[ODDS API] Event parsed: away={repr(away)} home={repr(home)} key={repr(key)} book={book_name} (from_fallback_loop={used_fallback_loop})")
+            book_choice_log_count += 1
 
         # Inject home/away for h2h parsing
         best["_home"] = home
@@ -145,7 +188,7 @@ def fetch_mlb_odds():
             "book": (best.get("title") or best.get("key") or ""),
         }
 
-    print(f"[ODDS API] Games parsed into odds_map: {len(result)}")
+    print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
     sample_keys = list(result.keys())[:3]
     print(f"[ODDS API] Sample odds_map keys (3): {sample_keys}")
     for k in sample_keys:
