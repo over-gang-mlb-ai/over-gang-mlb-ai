@@ -2,9 +2,11 @@
 The Odds API integration for MLB.
 Loads ODDS_API_KEY from .env; fetches totals + moneylines (American odds).
 Prefer sharp book first; return safe fallbacks when unavailable.
+Target-date filtering: only keep events whose commence_time (in Mountain Time) matches target_date (YYYY-MM-DD).
 """
 import os
 import logging
+from datetime import datetime
 
 try:
     from dotenv import load_dotenv
@@ -20,6 +22,23 @@ BOOK_PRIORITY = ("pinnacle", "bovada", "betonlineag", "draftkings", "fanduel", "
 
 DEFAULT_TOTAL = 8.5
 DEFAULT_JUICE = -110
+MT_ZONE = "America/Denver"
+
+
+def _event_date_mt(commence_time_str):
+    """
+    Parse API commence_time (ISO UTC) and return date string YYYY-MM-DD in Mountain Time.
+    Returns "" if parse fails.
+    """
+    if not commence_time_str:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
+        mt = dt.astimezone(ZoneInfo(MT_ZONE))
+        return mt.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 
 
 def _game_key(away_team, home_team):
@@ -62,12 +81,16 @@ def _parse_totals_and_h2h(book):
     return total_line, over_juice, under_juice, ml_home, ml_away
 
 
-def fetch_mlb_odds():
+def fetch_mlb_odds(target_date=None):
     """
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
+    target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). If set, only events
+    whose commence_time falls on this date in Mountain Time are kept.
     Returns dict: game_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }
     """
     print(f"[ODDS API] ODDS_API_KEY exists: {bool(ODDS_API_KEY)}")
+    if target_date:
+        print(f"[ODDS API] Target date filter: {target_date} (MT)")
     if not ODDS_API_KEY:
         logging.warning("⚠️ ODDS_API_KEY not set; odds API disabled.")
         return {}
@@ -115,7 +138,17 @@ def fetch_mlb_odds():
     no_totals_log_count = 0
     book_choice_log_cap = 3
     book_choice_log_count = 0
+    date_skip_log_cap = 5
+    date_skip_count = 0
     for event in data:
+        commence_str = event.get("commence_time") or ""
+        event_date_mt = _event_date_mt(commence_str)
+        if target_date and event_date_mt != target_date:
+            if date_skip_count < date_skip_log_cap:
+                print(f"[ODDS API] Skip (wrong date): event_date_mt={event_date_mt} target={target_date} away={repr((event.get('away_team') or '').strip())} home={repr((event.get('home_team') or '').strip())}")
+                date_skip_count += 1
+            continue
+
         home = (event.get("home_team") or "").strip()
         away = (event.get("away_team") or "").strip()
         key = _game_key(away, home)
@@ -189,6 +222,8 @@ def fetch_mlb_odds():
         }
 
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
+    if target_date and len(result) == 0:
+        print(f"[ODDS API] No odds found for target date {target_date}; returning empty odds_map.")
     sample_keys = list(result.keys())[:3]
     print(f"[ODDS API] Sample odds_map keys (3): {sample_keys}")
     for k in sample_keys:

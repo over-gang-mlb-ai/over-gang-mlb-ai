@@ -704,7 +704,8 @@ def run_predictions():
         )
 
         public_betting_data = load_public_betting_data()
-        odds_map = fetch_mlb_odds()
+        target_date_str = today_mt.strftime("%Y-%m-%d")
+        odds_map = fetch_mlb_odds(target_date=target_date_str)
         print(f"[ODDS] odds_map size after fetch_mlb_odds(): {len(odds_map)}")
 
         # Keep only games that are actually TODAY in MT
