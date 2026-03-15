@@ -712,6 +712,15 @@ def run_predictions():
         odds_source = "none"
         if odds_map:
             odds_source = "SportsDataIO"
+            print("[ODDS] Backfilling missing games from Odds API...")
+            odds_api_map = fetch_mlb_odds(target_date=target_date_str)
+            backfill_count = 0
+            for k, v in (odds_api_map or {}).items():
+                if k not in odds_map:
+                    odds_map[k] = v
+                    backfill_count += 1
+            print(f"[ODDS] Odds API backfill size: {backfill_count}")
+            print(f"[ODDS] Combined odds_map size after backfill: {len(odds_map)}")
         else:
             print("[ODDS] Falling back to Odds API...")
             odds_map = fetch_mlb_odds(target_date=target_date_str)
