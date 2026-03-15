@@ -293,6 +293,11 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
         except (TypeError, ValueError):
             under_juice = DEFAULT_JUICE
 
+        if total_line is not None and (total_line < 5 or total_line > 15):
+            print(f"[SportsDataIO] Ignoring unrealistic total line: {total_line}")
+            total_line = None
+            book_name = ""
+
         result[game_key] = {
             "total_line": total_line,
             "over_juice": over_juice,
