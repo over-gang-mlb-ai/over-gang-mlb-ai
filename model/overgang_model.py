@@ -928,6 +928,15 @@ def run_predictions():
                 'Odds_Book': odds_info.get('book', ''),
                 'Odds_ML_Home': odds_info.get('ml_home'),
                 'Odds_ML_Away': odds_info.get('ml_away'),
+                'Market_Source': odds_source if 'odds_source' in locals() else '',
+                'Captured_Book': odds_info.get('book', ''),
+                'Captured_Total': odds_info.get('total_line', 8.5),
+                'Captured_ML_Home': odds_info.get('ml_home'),
+                'Captured_ML_Away': odds_info.get('ml_away'),
+                'Fired_Play': False,
+                'Trigger_Tags': '',
+                'No_Fire_Reason': '',
+                'Model_Notes': '',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -995,6 +1004,17 @@ def run_predictions():
                 "VeloDrop_Away": round(safe_float(velo_drop_away), 1),
                 "VeloDrop_Home": round(safe_float(velo_drop_home), 1),
             })
+            fired = confidence >= MIN_CONFIDENCE_ALERT
+            trigger_tags = "|".join(filter(None, [
+                "high_confidence" if fired else None,
+                "sportsdataio" if (odds_source == "SportsDataIO") else None,
+                "odds_api" if (odds_source == "Odds API") else None,
+                "fallback_line" if (odds_info.get("book", "") == "") else None,
+            ]))
+            game_data["Fired_Play"] = fired
+            game_data["Trigger_Tags"] = trigger_tags
+            game_data["No_Fire_Reason"] = "" if fired else "confidence_below_alert_threshold"
+            game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
 
             # 💵 MONEYLINE PREDICTION
             home_ml_data = get_team_ml_data(home_team, home_pitcher)
@@ -1069,6 +1089,8 @@ def run_predictions():
             "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
             "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
             "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
+            "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
+            "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
