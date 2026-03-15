@@ -71,6 +71,10 @@ def main() -> None:
             df.at[i, "CLV_Result"] = clv_result(clv_val)
             updated += 1
 
+    for col in ("Closing_Line", "CLV", "CLV_Result"):
+        if col in df.columns:
+            df[col] = df[col].astype(object)
+
     try:
         df.to_csv(csv_path, index=False)
     except Exception as e:
