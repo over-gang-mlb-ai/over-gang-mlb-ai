@@ -127,13 +127,9 @@ def fetch_mlb_odds(target_date=None):
         "oddsFormat": "american",
         "apiKey": ODDS_API_KEY,
     }
-    # Ask API to return only events on target_date (MT) when set; for baseball_mlb this is supported (not for sport=upcoming).
+    # Python-side target_date filtering only (no commenceTimeFrom/To on request) for backfill testing.
     if target_date:
-        commence_from, commence_to = _commence_window_utc(target_date)
-        if commence_from and commence_to:
-            params["commenceTimeFrom"] = commence_from
-            params["commenceTimeTo"] = commence_to
-            print(f"[ODDS API] Requesting window: commenceTimeFrom={commence_from} commenceTimeTo={commence_to}")
+        print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
     try:
         import requests
         r = requests.get(url, params=params, timeout=15)
