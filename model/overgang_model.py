@@ -941,6 +941,9 @@ def run_predictions():
                 'Edge_Tier': '',
                 'Bet_Type': 'total',
                 'Side': '',
+                'Line_Status': '',
+                'Fallback_Used': False,
+                'Data_Quality_Flag': '',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -1023,6 +1026,17 @@ def run_predictions():
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
             game_data["Bet_Type"] = "total"
             game_data["Side"] = "over" if "OVER" in (prediction or "").upper() else ("under" if "UNDER" in (prediction or "").upper() else "")
+            line_status = "market" if odds_info.get("book", "") else "fallback"
+            game_data["Line_Status"] = line_status
+            game_data["Fallback_Used"] = odds_info.get("book", "") == ""
+            dq_parts = []
+            if line_status == "fallback":
+                dq_parts.append("fallback_line")
+            if "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
+                dq_parts.append("fallback_pitcher")
+            if public is None or public == {}:
+                dq_parts.append("missing_public_data")
+            game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
             # 💵 MONEYLINE PREDICTION
             home_ml_data = get_team_ml_data(home_team, home_pitcher)
@@ -1100,6 +1114,7 @@ def run_predictions():
             "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
             "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
             "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side",
+            "Line_Status", "Fallback_Used", "Data_Quality_Flag",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
