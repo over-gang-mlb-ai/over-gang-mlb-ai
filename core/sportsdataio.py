@@ -232,23 +232,29 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
             print(f"[SportsDataIO] Second odds row raw: {repr(odds_data[1])}")
 
     # Group by GameId, then by book; pick one book per game by BOOK_PRIORITY.
+    # Top-level items are game objects; real odds rows are inside PregameOdds.
     by_game = {}
-    for row in odds_data:
-        if not isinstance(row, dict):
+    for game_obj in odds_data:
+        if not isinstance(game_obj, dict):
             continue
-        gid = row.get("GameID") or row.get("GameId")
+        gid = game_obj.get("GameID") or game_obj.get("GameId")
         if gid is None:
             continue
         gid_key = int(gid) if isinstance(gid, (int, float)) else gid
         game_key = game_id_to_key.get(int(gid_key)) or game_id_to_key.get(str(gid_key))
         if not game_key:
             continue
-        book_name = (row.get("Sportsbook") or row.get("SportsbookName") or "").strip()
-        book_key = (book_name or str(row.get("SportsbookId", ""))).lower().replace(" ", "").replace("_", "")
-
-        if game_key not in by_game:
-            by_game[game_key] = []
-        by_game[game_key].append((book_key, book_name, row))
+        pregame_odds = game_obj.get("PregameOdds") or []
+        if not pregame_odds:
+            continue
+        for row in pregame_odds:
+            if not isinstance(row, dict):
+                continue
+            book_name = (row.get("Sportsbook") or row.get("SportsbookName") or "").strip()
+            book_key = (book_name or str(row.get("SportsbookId", ""))).lower().replace(" ", "").replace("_", "")
+            if game_key not in by_game:
+                by_game[game_key] = []
+            by_game[game_key].append((book_key, book_name, row))
 
     # For each game, choose single book by priority.
     result = {}
