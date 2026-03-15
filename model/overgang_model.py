@@ -1024,7 +1024,19 @@ def run_predictions():
             ]))
             game_data["Fired_Play"] = fired
             game_data["Trigger_Tags"] = trigger_tags
-            game_data["No_Fire_Reason"] = "" if fired else "confidence_below_alert_threshold"
+            if fired:
+                game_data["No_Fire_Reason"] = ""
+            else:
+                if abs(edge) < 1.0:
+                    game_data["No_Fire_Reason"] = "edge_too_small"
+                elif odds_info.get("book", "") == "":
+                    game_data["No_Fire_Reason"] = "fallback_line_used"
+                elif public is None or public == {} or ("League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")):
+                    game_data["No_Fire_Reason"] = "data_quality_degraded"
+                elif confidence < MIN_CONFIDENCE_ALERT:
+                    game_data["No_Fire_Reason"] = "confidence_below_alert_threshold"
+                else:
+                    game_data["No_Fire_Reason"] = "manual_review"
             game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
             game_data["Confidence_Tier"] = "high" if confidence >= 0.85 else ("medium" if confidence >= 0.60 else "low")
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
