@@ -222,6 +222,14 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
         return {}
 
     print(f"[SportsDataIO] Number of odds rows fetched: {len(odds_data)}")
+    if odds_data:
+        row0 = odds_data[0]
+        print(f"[SportsDataIO] First odds row type: {type(row0)}")
+        if isinstance(row0, dict):
+            print(f"[SportsDataIO] First odds row keys: {list(row0.keys())}")
+        print(f"[SportsDataIO] First odds row raw: {repr(row0)}")
+        if len(odds_data) >= 2:
+            print(f"[SportsDataIO] Second odds row raw: {repr(odds_data[1])}")
 
     # Group by GameId, then by book; pick one book per game by BOOK_PRIORITY.
     by_game = {}
