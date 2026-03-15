@@ -937,6 +937,10 @@ def run_predictions():
                 'Trigger_Tags': '',
                 'No_Fire_Reason': '',
                 'Model_Notes': '',
+                'Confidence_Tier': '',
+                'Edge_Tier': '',
+                'Bet_Type': 'total',
+                'Side': '',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -1015,6 +1019,10 @@ def run_predictions():
             game_data["Trigger_Tags"] = trigger_tags
             game_data["No_Fire_Reason"] = "" if fired else "confidence_below_alert_threshold"
             game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
+            game_data["Confidence_Tier"] = "high" if confidence >= 0.85 else ("medium" if confidence >= 0.60 else "low")
+            game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
+            game_data["Bet_Type"] = "total"
+            game_data["Side"] = "over" if "OVER" in (prediction or "").upper() else ("under" if "UNDER" in (prediction or "").upper() else "")
 
             # 💵 MONEYLINE PREDICTION
             home_ml_data = get_team_ml_data(home_team, home_pitcher)
@@ -1091,6 +1099,7 @@ def run_predictions():
             "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
             "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
             "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
+            "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
