@@ -944,6 +944,10 @@ def run_predictions():
                 'Line_Status': '',
                 'Fallback_Used': False,
                 'Data_Quality_Flag': '',
+                'Bet_Line': odds_info.get('total_line', 8.5),
+                'Closing_Line': '',
+                'CLV': '',
+                'CLV_Result': '',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -1115,6 +1119,7 @@ def run_predictions():
             "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
             "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side",
             "Line_Status", "Fallback_Used", "Data_Quality_Flag",
+            "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
         ])
 
