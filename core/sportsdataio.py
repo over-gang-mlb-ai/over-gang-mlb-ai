@@ -38,6 +38,52 @@ BOOK_PRIORITY = (
 DEFAULT_TOTAL = 8.5
 DEFAULT_JUICE = -110
 
+SPORTSDATAIO_TEAM_MAP = {
+    "ARI": "Arizona Diamondbacks",
+    "ATL": "Atlanta Braves",
+    "BAL": "Baltimore Orioles",
+    "BOS": "Boston Red Sox",
+    "CHC": "Chicago Cubs",
+    "CWS": "Chicago White Sox",
+    "CIN": "Cincinnati Reds",
+    "CLE": "Cleveland Guardians",
+    "COL": "Colorado Rockies",
+    "DET": "Detroit Tigers",
+    "HOU": "Houston Astros",
+    "KC": "Kansas City Royals",
+    "KCR": "Kansas City Royals",
+    "LAA": "Los Angeles Angels",
+    "LAD": "Los Angeles Dodgers",
+    "MIA": "Miami Marlins",
+    "MIL": "Milwaukee Brewers",
+    "MIN": "Minnesota Twins",
+    "NYM": "New York Mets",
+    "NYY": "New York Yankees",
+    "ATH": "Athletics",
+    "OAK": "Athletics",
+    "PHI": "Philadelphia Phillies",
+    "PIT": "Pittsburgh Pirates",
+    "SD": "San Diego Padres",
+    "SDP": "San Diego Padres",
+    "SEA": "Seattle Mariners",
+    "SF": "San Francisco Giants",
+    "SFG": "San Francisco Giants",
+    "STL": "St. Louis Cardinals",
+    "TB": "Tampa Bay Rays",
+    "TBR": "Tampa Bay Rays",
+    "TEX": "Texas Rangers",
+    "TOR": "Toronto Blue Jays",
+    "WSH": "Washington Nationals",
+    "WAS": "Washington Nationals",
+}
+
+
+def _expand_team_name(team_value):
+    s = (team_value or "").strip()
+    if not s:
+        return ""
+    return SPORTSDATAIO_TEAM_MAP.get(s.upper(), s)
+
 
 def _game_key(away_team, home_team):
     """Build key for lookup: normalized 'away @ home' (match public_betting_loader / odds_api style)."""
@@ -119,8 +165,10 @@ def fetch_mlb_games_by_date(target_date_yyyy_mm_dd):
         if not isinstance(g, dict):
             continue
         gid = g.get("GameID") or g.get("GameId")
-        away = (g.get("AwayTeam") or g.get("AwayTeamName") or "").strip()
-        home = (g.get("HomeTeam") or g.get("HomeTeamName") or "").strip()
+        away_raw = (g.get("AwayTeam") or g.get("AwayTeamName") or "").strip()
+        home_raw = (g.get("HomeTeam") or g.get("HomeTeamName") or "").strip()
+        away = _expand_team_name(away_raw)
+        home = _expand_team_name(home_raw)
         if gid is not None and (away or home):
             key = _game_key(away, home)
             game_id_to_key[int(gid)] = key
