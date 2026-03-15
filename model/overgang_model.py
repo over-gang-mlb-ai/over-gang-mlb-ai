@@ -44,6 +44,7 @@ from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, get_game_odds
+from core.sportsdataio import fetch_mlb_odds_by_date
 from core.batters import Batters, LineupImpact, BATTER_DF
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
@@ -705,8 +706,18 @@ def run_predictions():
 
         public_betting_data = load_public_betting_data()
         target_date_str = today_mt.strftime("%Y-%m-%d")
-        odds_map = fetch_mlb_odds(target_date=target_date_str)
-        print(f"[ODDS] odds_map size after fetch_mlb_odds(): {len(odds_map)}")
+        print("[ODDS] Trying SportsDataIO first...")
+        odds_map = fetch_mlb_odds_by_date(target_date_str)
+        print(f"[ODDS] SportsDataIO odds_map size: {len(odds_map)}")
+        odds_source = "none"
+        if odds_map:
+            odds_source = "SportsDataIO"
+        else:
+            print("[ODDS] Falling back to Odds API...")
+            odds_map = fetch_mlb_odds(target_date=target_date_str)
+            if odds_map:
+                odds_source = "Odds API"
+        print(f"[ODDS] Final odds source: {odds_source}")
 
         # Keep only games that are actually TODAY in MT
         def game_mt_date(g):
