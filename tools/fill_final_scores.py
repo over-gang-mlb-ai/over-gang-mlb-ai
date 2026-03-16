@@ -137,6 +137,7 @@ def main() -> None:
         description="Fill Final_Total in a predictions CSV using MLB game results."
     )
     parser.add_argument("csv_path", help="Path to the predictions CSV file")
+    parser.add_argument("--date", help="Override slate date (YYYY-MM-DD). If not set, date is parsed from filename.")
     args = parser.parse_args()
     csv_path = args.csv_path
 
@@ -158,10 +159,16 @@ def main() -> None:
         print(f"Error: Missing required columns: {missing}", file=sys.stderr)
         sys.exit(1)
 
-    target_date = parse_date_from_filename(csv_path)
-    if not target_date:
-        print("Error: Could not parse date from filename (expected predictions_YYYYMMDD_HHMM.csv)", file=sys.stderr)
-        sys.exit(1)
+    if args.date:
+        target_date = args.date.strip()
+        if len(target_date) != 10 or target_date[4] != "-" or target_date[7] != "-":
+            print("Error: --date must be YYYY-MM-DD", file=sys.stderr)
+            sys.exit(1)
+    else:
+        target_date = parse_date_from_filename(csv_path)
+        if not target_date:
+            print("Error: Could not parse date from filename (expected predictions_YYYYMMDD_HHMM.csv or use --date YYYY-MM-DD)", file=sys.stderr)
+            sys.exit(1)
 
     try:
         scores_map = fetch_final_totals_for_date(target_date)
