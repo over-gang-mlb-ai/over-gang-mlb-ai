@@ -331,10 +331,34 @@ def get_game_odds(away_team, home_team, odds_map=None, target_date_yyyy_mm_dd=No
     key = _game_key(away_team, home_team)
     row = odds_map.get(key)
     if row:
+        raw_line = row.get("total_line")
+        if raw_line is None or raw_line == "":
+            total_line = DEFAULT_TOTAL
+        else:
+            try:
+                total_line = float(raw_line)
+            except (TypeError, ValueError):
+                total_line = DEFAULT_TOTAL
+        raw_over = row.get("over_juice")
+        if raw_over is None or raw_over == "":
+            over_juice = DEFAULT_JUICE
+        else:
+            try:
+                over_juice = int(raw_over)
+            except (TypeError, ValueError):
+                over_juice = DEFAULT_JUICE
+        raw_under = row.get("under_juice")
+        if raw_under is None or raw_under == "":
+            under_juice = DEFAULT_JUICE
+        else:
+            try:
+                under_juice = int(raw_under)
+            except (TypeError, ValueError):
+                under_juice = DEFAULT_JUICE
         return {
-            "total_line": float(row.get("total_line", DEFAULT_TOTAL)),
-            "over_juice": int(row.get("over_juice", DEFAULT_JUICE)),
-            "under_juice": int(row.get("under_juice", DEFAULT_JUICE)),
+            "total_line": total_line,
+            "over_juice": over_juice,
+            "under_juice": under_juice,
             "ml_home": row.get("ml_home"),
             "ml_away": row.get("ml_away"),
             "book": row.get("book") or "",
