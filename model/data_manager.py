@@ -297,6 +297,7 @@ class DataManager:
 
         rows = []
         total_raw_people = 0
+        debug_stats_logged = [False]  # one sample per run
         print(f"[Pitcher update] Source: MLB StatsAPI people endpoint (year={year}, pitcher_ids={len(pitcher_ids)})")
 
         for batch in chunks(sorted(pitcher_ids), 50):
@@ -323,25 +324,66 @@ class DataManager:
             for person in data:
                 pid = int(person["id"])
                 name_full = (person.get("fullName") or "").strip()
-                stats = person.get("stats") or []
-                era = whip = ip = None
+                stats = person.get("stats")
+                if stats is None:
+                    stats = []
+                if not isinstance(stats, list):
+                    stats = [stats] if stats else []
 
-                for statgrp in stats:
-                    splits = statgrp.get("splits") or []
+                # One-time debug: first person with non-empty stats
+                if stats and not debug_stats_logged[0]:
+                    debug_stats_logged[0] = True
+                    first = stats[0] if stats else {}
+                    splits_val = first.get("splits") if isinstance(first, dict) else None
+                    first_split = (splits_val[0] if isinstance(splits_val, list) and splits_val else first)
+                    stat_val = first_split.get("stat", {}) if isinstance(first_split, dict) else {}
+                    print(f"[Pitcher update] DEBUG first person with stats: id={pid}, person_keys={list(person.keys())}")
+                    print(f"[Pitcher update] DEBUG stats type={type(stats).__name__}, len(stats)={len(stats)}")
+                    if isinstance(first, dict):
+                        print(f"[Pitcher update] DEBUG first_stats_item keys={list(first.keys())}")
+                    print(f"[Pitcher update] DEBUG splits type={type(splits_val).__name__}, stat keys={list(stat_val.keys()) if isinstance(stat_val, dict) else 'n/a'}")
+
+                era = whip = ip = None
+                stats_list = stats if isinstance(stats, list) else []
+                for statgrp in stats_list:
+                    if not isinstance(statgrp, dict):
+                        continue
+                    splits = statgrp.get("splits") or statgrp.get("split") or []
+                    if not isinstance(splits, list):
+                        splits = [splits] if splits else []
+                    # Some responses put stat at group level (no splits list)
+                    if not splits and statgrp.get("stat") is not None:
+                        splits = [statgrp]
                     for sp in splits:
-                        st = sp.get("stat", {}) or {}
-                        era = st.get("era")
-                        whip = st.get("whip")
-                        ip_str = st.get("inningsPitched")
-                        if ip_str:
+                        if not isinstance(sp, dict):
+                            continue
+                        st = sp.get("stat") or sp
+                        if not isinstance(st, dict):
+                            continue
+                        e = st.get("era") if st.get("era") is not None else st.get("ERA")
+                        w = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
+                        ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
+                        if e is not None:
+                            era = e
+                        if w is not None:
+                            whip = w
+                        if ip_raw is not None:
                             try:
-                                whole, frac = ip_str.split(".") if "." in ip_str else (ip_str, "0")
-                                frac_dec = {"0": 0.0, "1": 1/3, "2": 2/3}.get(frac, 0.0)
-                                ip = float(whole) + frac_dec
+                                if isinstance(ip_raw, (int, float)):
+                                    ip = float(ip_raw)
+                                else:
+                                    s = str(ip_raw).strip()
+                                    if "." in s:
+                                        whole, frac = s.split(".", 1)
+                                    else:
+                                        whole, frac = s, "0"
+                                    frac_dec = {"0": 0.0, "1": 1/3, "2": 2/3}.get(frac, 0.0)
+                                    ip = float(whole) + frac_dec
                             except Exception:
-                                ip = None
-                        # take season aggregate split only
-                        break
+                                try:
+                                    ip = float(ip_raw)
+                                except Exception:
+                                    pass
 
                 era = float(era) if era not in (None, "") else None
                 whip = float(whip) if whip not in (None, "") else None
