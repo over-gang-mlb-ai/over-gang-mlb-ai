@@ -35,6 +35,8 @@ def _grade_row(final_total: float, bet_line: float, side: str, units: float) -> 
         u = max(0.0, u)
     except (TypeError, ValueError):
         return ("", None)
+    if pd.isna(ft) or pd.isna(bl):
+        return ("", None)
     if side == "over":
         if ft > bl:
             return ("win", u)
@@ -80,9 +82,19 @@ def main() -> None:
             if final_total is None or final_total == "" or (isinstance(final_total, str) and not final_total.strip()):
                 continue
             ft = float(final_total)
+            if pd.isna(ft):
+                continue
         except (TypeError, ValueError):
             continue
         bet_line = df.at[i, "Bet_Line"]
+        try:
+            if bet_line is None or bet_line == "" or (isinstance(bet_line, str) and not str(bet_line).strip()):
+                continue
+            bl = float(bet_line)
+            if pd.isna(bl):
+                continue
+        except (TypeError, ValueError):
+            continue
         side = df.at[i, "Side"]
         units = df.at[i, "Units"]
         result, units_won = _grade_row(ft, bet_line, side, units)
@@ -92,6 +104,10 @@ def main() -> None:
         df.at[i, "Units_Won"] = units_won
         df.at[i, "ROI"] = units_won
         graded += 1
+
+    for col in ("Final_Total", "Bet_Result", "Units_Won", "ROI"):
+        if col in df.columns:
+            df[col] = df[col].astype(object)
 
     try:
         df.to_csv(csv_path, index=False)
