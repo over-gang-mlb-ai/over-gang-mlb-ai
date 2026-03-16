@@ -296,6 +296,9 @@ class DataManager:
                 yield batch
 
         rows = []
+        total_raw_people = 0
+        print(f"[Pitcher update] Source: MLB StatsAPI people endpoint (year={year}, pitcher_ids={len(pitcher_ids)})")
+
         for batch in chunks(sorted(pitcher_ids), 50):
             ids = ",".join(map(str, batch))
             url = (
@@ -304,9 +307,18 @@ class DataManager:
                 f"&hydrate=stats(group=[pitching],type=[season],season={year})"
             )
             try:
-                data = requests.get(url, headers=headers, timeout=20).json().get("people", [])
-            except Exception:
+                resp = requests.get(url, headers=headers, timeout=20)
+                body = resp.json()
+                data = body.get("people") if isinstance(body, dict) else None
+                if not isinstance(data, list):
+                    data = []
+            except Exception as e:
+                print(f"[Pitcher update] Batch request failed: {e}")
                 continue
+
+            raw_count = len(data)
+            total_raw_people += raw_count
+            batch_rows_before = len(rows)
 
             for person in data:
                 pid = int(person["id"])
@@ -343,9 +355,24 @@ class DataManager:
                         "IP": ip
                     })
 
+            batch_rows_added = len(rows) - batch_rows_before
+            if raw_count > 0 and batch_rows_added == 0:
+                print(f"[Pitcher update] Batch: raw_people={raw_count}, rows_with_stats=0 (check response structure)")
+
+        rows_after_filter = len(rows)
+        print(f"[Pitcher update] Raw people returned: {total_raw_people}, Rows with ERA/WHIP/IP: {rows_after_filter}")
+
         df = pd.DataFrame(rows)
         if df.empty:
-            raise ValueError("MLB StatsAPI returned no pitcher rows.")
+            if total_raw_people == 0:
+                raise ValueError(
+                    "MLB StatsAPI returned no pitcher rows (people endpoint returned 0 records). "
+                    "Check endpoint or network."
+                )
+            raise ValueError(
+                f"MLB StatsAPI returned no pitcher rows (raw people: {total_raw_people}, "
+                "rows with ERA/WHIP/IP: 0). Check API response structure for stats/splits/stat."
+            )
         return df
 
     # ----------------------------
