@@ -298,6 +298,7 @@ class DataManager:
         rows = []
         total_raw_people = 0
         debug_stats_logged = [False]  # one sample per run
+        debug_raw_person_logged = [False]  # first raw person even if stats empty
         print(f"[Pitcher update] Source: MLB StatsAPI people endpoint (year={year}, pitcher_ids={len(pitcher_ids)})")
 
         for batch in chunks(sorted(pitcher_ids), 50):
@@ -322,6 +323,21 @@ class DataManager:
             batch_rows_before = len(rows)
 
             for person in data:
+                # One-time debug: first raw person (even if stats empty) to see response shape
+                if not debug_raw_person_logged[0]:
+                    debug_raw_person_logged[0] = True
+                    pid_debug = person.get("id", "?")
+                    keys_list = list(person.keys()) if isinstance(person, dict) else []
+                    stats_val = person.get("stats")
+                    stats_repr = repr(stats_val)
+                    if len(stats_repr) > 200:
+                        stats_repr = stats_repr[:200] + "..."
+                    extra_keys = ["pitchHand", "primaryNumber", "primaryPosition", "currentTeam"]
+                    has_extra = {k: k in person for k in extra_keys}
+                    print(f"[Pitcher update] DEBUG first raw person: id={pid_debug}, top_level_keys={keys_list}")
+                    print(f"[Pitcher update] DEBUG 'stats' exists={'stats' in person}, stats type={type(stats_val).__name__}, stats preview={stats_repr}")
+                    print(f"[Pitcher update] DEBUG keys present: {has_extra}")
+
                 pid = int(person["id"])
                 name_full = (person.get("fullName") or "").strip()
                 stats = person.get("stats")
