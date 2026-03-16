@@ -4,7 +4,10 @@ Generate a simple performance summary from an Over Gang predictions CSV.
 Read-only: does not modify the CSV.
 """
 import argparse
+import re
 import sys
+from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -63,23 +66,38 @@ def compute_metrics(df: pd.DataFrame) -> dict:
     }
 
 
+def report_as_string(metrics: dict) -> str:
+    """Return the performance summary as a string."""
+    lines = [
+        "==============================",
+        "OVER GANG PERFORMANCE REPORT",
+        "==============================",
+        "",
+        f"Total Bets: {metrics['Total_Bets']}",
+        f"Wins: {metrics['Wins']}",
+        f"Losses: {metrics['Losses']}",
+        f"Pushes: {metrics['Pushes']}",
+        f"Win Rate: {metrics['Win_Rate'] * 100:.0f}%",
+        "",
+        f"Units Won: {metrics['Units_Won_Total']:.1f}",
+        f"ROI: {metrics['ROI_Percent']:.1f}%",
+        "",
+        f"Average Edge: {metrics['Average_Edge']:.1f}",
+        f"Average CLV: {metrics['Average_CLV']:.1f}",
+    ]
+    return "\n".join(lines)
+
+
 def print_report(metrics: dict) -> None:
     """Print the performance summary to stdout."""
-    print("==============================")
-    print("OVER GANG PERFORMANCE REPORT")
-    print("==============================")
-    print()
-    print(f"Total Bets: {metrics['Total_Bets']}")
-    print(f"Wins: {metrics['Wins']}")
-    print(f"Losses: {metrics['Losses']}")
-    print(f"Pushes: {metrics['Pushes']}")
-    print(f"Win Rate: {metrics['Win_Rate'] * 100:.0f}%")
-    print()
-    print(f"Units Won: {metrics['Units_Won_Total']:.1f}")
-    print(f"ROI: {metrics['ROI_Percent']:.1f}%")
-    print()
-    print(f"Average Edge: {metrics['Average_Edge']:.1f}")
-    print(f"Average CLV: {metrics['Average_CLV']:.1f}")
+    print(report_as_string(metrics))
+
+
+def _date_from_csv_filename(csv_path: str) -> Optional[str]:
+    """Extract YYYYMMDD from filename like predictions_YYYYMMDD_HHMM.csv. None if no match."""
+    name = Path(csv_path).name
+    m = re.match(r"predictions_(\d{8})_\d{4}\.csv", name, re.IGNORECASE)
+    return m.group(1) if m else None
 
 
 def main() -> None:
@@ -87,6 +105,7 @@ def main() -> None:
         description="Generate a performance summary from an Over Gang predictions CSV."
     )
     parser.add_argument("csv_path", help="Path to the predictions CSV file")
+    parser.add_argument("--save", action="store_true", help="Also save report to reports/daily_performance_YYYYMMDD.txt")
     args = parser.parse_args()
     csv_path = args.csv_path
 
@@ -106,6 +125,15 @@ def main() -> None:
 
     metrics = compute_metrics(df)
     print_report(metrics)
+
+    if args.save:
+        yyyymmdd = _date_from_csv_filename(csv_path)
+        filename = f"daily_performance_{yyyymmdd}.txt" if yyyymmdd else "daily_performance_unknown_date.txt"
+        reports_dir = Path("reports")
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        out_path = reports_dir / filename
+        out_path.write_text(report_as_string(metrics), encoding="utf-8")
+        print(f"\nSaved report to {out_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
