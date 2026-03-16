@@ -285,7 +285,14 @@ class VegasLines:
         if odds_map is not None:
             lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
             row = get_game_odds(away_team, home_team, odds_map)
-            line = float(row.get("total_line", 8.5))
+            raw_line = row.get("total_line")
+            if raw_line is None or raw_line == "":
+                line = 8.5
+            else:
+                try:
+                    line = float(raw_line)
+                except (TypeError, ValueError):
+                    line = 8.5
             info = dict(row)
             match_found = lookup_key in odds_map
             if match_found:
