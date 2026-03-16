@@ -20,6 +20,7 @@ from pytz import timezone, utc
 import os
 import re
 import time
+import traceback
 from zoneinfo import ZoneInfo
 import json
 import requests
@@ -1123,6 +1124,7 @@ def run_predictions():
 
         except Exception as e:
             print(f"❌ Game processing error: {e}")
+            traceback.print_exc()
             continue
 
     # Save results
