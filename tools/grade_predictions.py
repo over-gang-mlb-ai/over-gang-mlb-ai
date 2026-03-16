@@ -80,20 +80,26 @@ def main() -> None:
         final_total = df.at[i, "Final_Total"]
         try:
             if final_total is None or final_total == "" or (isinstance(final_total, str) and not final_total.strip()):
+                df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
                 continue
             ft = float(final_total)
             if pd.isna(ft):
+                df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
                 continue
         except (TypeError, ValueError):
+            df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
             continue
         bet_line = df.at[i, "Bet_Line"]
         try:
             if bet_line is None or bet_line == "" or (isinstance(bet_line, str) and not str(bet_line).strip()):
+                df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
                 continue
             bl = float(bet_line)
             if pd.isna(bl):
+                df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
                 continue
         except (TypeError, ValueError):
+            df.at[i, "Bet_Result"], df.at[i, "Units_Won"], df.at[i, "ROI"] = "", "", ""
             continue
         side = df.at[i, "Side"]
         units = df.at[i, "Units"]
