@@ -1126,7 +1126,9 @@ def run_predictions():
                 "VeloDrop_Away": round(safe_float(velo_drop_away), 1),
                 "VeloDrop_Home": round(safe_float(velo_drop_home), 1),
             })
-            fired = (confidence >= MIN_CONFIDENCE_ALERT) and has_real_total
+            is_manual_trusted = (odds_info.get("_source") == "manual_totals_csv") and has_real_total
+            fire_threshold = 0.79 if is_manual_trusted else MIN_CONFIDENCE_ALERT
+            fired = (confidence >= fire_threshold) and has_real_total
             trigger_tags = "|".join(filter(None, [
                 "high_confidence" if fired else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
@@ -1144,7 +1146,7 @@ def run_predictions():
                     game_data["No_Fire_Reason"] = "edge_too_small"
                 elif public is None or public == {} or ("League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")):
                     game_data["No_Fire_Reason"] = "data_quality_degraded"
-                elif confidence < MIN_CONFIDENCE_ALERT:
+                elif confidence < fire_threshold:
                     game_data["No_Fire_Reason"] = "confidence_below_alert_threshold"
                 else:
                     game_data["No_Fire_Reason"] = "manual_review"
@@ -1224,7 +1226,7 @@ def run_predictions():
 
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%}")
-            if confidence >= MIN_CONFIDENCE_ALERT:
+            if fired:
                 alerts.append(game_data)
 
         except Exception as e:
