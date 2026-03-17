@@ -379,6 +379,7 @@ def generate_prediction(
     home_lineup_impact=0.0,
     away_offense_mult=1.0,
     home_offense_mult=1.0,
+    has_real_total=True,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -512,6 +513,8 @@ def generate_prediction(
         confidence -= 0.02
 
     confidence = max(0.01, min(confidence, 0.99))
+    if not has_real_total:
+        confidence = min(0.59, confidence * 0.65)
 
     # Recommended units from edge size (only bet when |edge| >= threshold)
     if abs_edge < EDGE_THRESHOLD:
@@ -982,6 +985,7 @@ def run_predictions():
                 home_lineup_impact=float(home_impact),
                 away_offense_mult=away_offense_mult,
                 home_offense_mult=home_offense_mult,
+                has_real_total=bool(odds_info.get("_has_real_total", False)),
             )
 
             if proj.get("skip"):
@@ -1001,9 +1005,6 @@ def run_predictions():
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
             confidence = max(0.0, min(1.0, confidence))
-            if not bool(odds_info.get('_has_real_total', False)):
-                # Missing real totals should not yield "market-grade" confidence.
-                confidence = min(0.59, confidence * 0.65)
 
             # Optional: scale units by lineup conviction
             try:
