@@ -275,6 +275,60 @@ def _default_odds_info():
     return {"total_line": 8.5, "over_juice": -110, "under_juice": -110, "ml_home": None, "ml_away": None, "book": "", "_has_real_total": False}
 
 
+@lru_cache(maxsize=1)
+def _load_manual_totals():
+    """
+    Optional trusted manual totals override from data/manual_totals.csv.
+    Expected columns: Game, Total_Line, Over_Juice, Under_Juice, Book.
+    Returns dict: normalized 'away @ home' -> {total_line, over_juice, under_juice, book}.
+    """
+    csv_path = "data/manual_totals.csv"
+    if not os.path.exists(csv_path):
+        return {}
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"⚠️ manual_totals.csv load failed: {e}")
+        return {}
+    required = {"Game", "Total_Line", "Over_Juice", "Under_Juice", "Book"}
+    if not required.issubset(set(df.columns)):
+        print(f"⚠️ manual_totals.csv missing required columns; found {list(df.columns)}")
+        return {}
+    manual = {}
+    for _, row in df.iterrows():
+        game = str(row.get("Game") or "").strip()
+        if " @ " not in game:
+            continue
+        away_raw, home_raw = game.split(" @ ", 1)
+        away = normalize_team_name(away_raw.strip())
+        home = normalize_team_name(home_raw.strip())
+        key = f"{away} @ {home}"
+        try:
+            total_line = float(row.get("Total_Line"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            over_juice = int(row.get("Over_Juice"))
+        except (TypeError, ValueError):
+            over_juice = -110
+        try:
+            under_juice = int(row.get("Under_Juice"))
+        except (TypeError, ValueError):
+            under_juice = -110
+        book = str(row.get("Book") or "").strip()
+        manual[key] = {
+            "total_line": total_line,
+            "over_juice": over_juice,
+            "under_juice": under_juice,
+            "ml_home": None,
+            "ml_away": None,
+            "book": book,
+        }
+    if manual:
+        print(f"[ODDS] Loaded manual_totals.csv overrides for {len(manual)} games.")
+    return manual
+
+
 class VegasLines:
     @staticmethod
     def get_vegas_line(home_team, away_team, odds_map=None):
@@ -283,8 +337,26 @@ class VegasLines:
         odds_info_dict has total_line, over_juice, under_juice, ml_home, ml_away, book.
         Uses The Odds API when odds_map provided and match found; else CSV; else 8.5 + default juice/book.
         """
+        lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
+
+        # 1) Trusted manual overrides
+        manual = _load_manual_totals()
+        if manual and lookup_key in manual:
+            row = manual[lookup_key]
+            raw_line = row.get("total_line")
+            try:
+                line = float(raw_line)
+            except (TypeError, ValueError):
+                line = 8.5
+            info = dict(row)
+            info["_source"] = "manual_totals_csv"
+            info["_lookup_key"] = lookup_key
+            info["_match_found"] = True
+            info["_has_real_total"] = True
+            return (line, info)
+
+        # 2) API / merged odds map
         if odds_map is not None:
-            lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
             row = get_game_odds(away_team, home_team, odds_map)
             raw_line = row.get("total_line")
             if raw_line is None or raw_line == "":
