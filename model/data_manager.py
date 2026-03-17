@@ -288,154 +288,102 @@ class DataManager:
         if not pitcher_ids:
             raise ValueError("No pitcher IDs found from MLB rosters.")
 
-        def chunks(iterable, size):
-            it = iter(iterable)
-            while True:
-                batch = list(islice(it, size))
-                if not batch:
-                    return
-                yield batch
+        # 3) fetch season pitching stats from stats endpoint (returns ERA/WHIP/IP per player)
+        stats_base = "https://statsapi.mlb.com/api/v1/stats"
+        params = {
+            "stats": "season",
+            "group": "pitching",
+            "season": year,
+            "gameType": "R",
+            "limit": 1000,
+        }
+        print(f"[Pitcher update] Source: MLB StatsAPI stats endpoint (year={year}, roster_pitchers={len(pitcher_ids)})")
+        print(f"[Pitcher update] Request URL: {stats_base}?{urlencode(params)}")
 
+        try:
+            resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as e:
+            raise ValueError(f"MLB StatsAPI stats request failed: {e}") from e
+
+        stats_list = body.get("stats") if isinstance(body, dict) else None
+        if not isinstance(stats_list, list) or not stats_list:
+            raise ValueError(
+                "MLB StatsAPI returned no stats array (stats endpoint). Check endpoint or response shape."
+            )
+        splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+        if not isinstance(splits, list):
+            splits = []
+        total_raw_splits = len(splits)
         rows = []
-        total_raw_people = 0
-        debug_stats_logged = [False]  # one sample per run
-        debug_raw_person_logged = [False]  # first raw person even if stats empty
-        debug_request_logged = [False]  # log final request URL once per run
-        people_base = "https://statsapi.mlb.com/api/v1/people"
-        hydrate_val = f"stats(group=pitching,type=season,season={year},gameType=R)"
-        print(f"[Pitcher update] Source: MLB StatsAPI people endpoint (year={year}, pitcher_ids={len(pitcher_ids)})")
-
-        for batch in chunks(sorted(pitcher_ids), 50):
-            ids = ",".join(map(str, batch))
-            params = {
-                "personIds": ids,
-                "hydrate": hydrate_val,
-            }
-            if not debug_request_logged[0]:
-                debug_request_logged[0] = True
-                print(f"[Pitcher update] Request URL (first batch): {people_base}?{urlencode(params)}")
-            try:
-                resp = requests.get(people_base, params=params, headers=headers, timeout=20)
-                body = resp.json()
-                data = body.get("people") if isinstance(body, dict) else None
-                if not isinstance(data, list):
-                    data = []
-            except Exception as e:
-                print(f"[Pitcher update] Batch request failed: {e}")
+        for sp in splits:
+            if not isinstance(sp, dict):
                 continue
-
-            raw_count = len(data)
-            total_raw_people += raw_count
-            batch_rows_before = len(rows)
-
-            for person in data:
-                # One-time debug: first raw person (even if stats empty) to see response shape
-                if not debug_raw_person_logged[0]:
-                    debug_raw_person_logged[0] = True
-                    pid_debug = person.get("id", "?")
-                    keys_list = list(person.keys()) if isinstance(person, dict) else []
-                    stats_val = person.get("stats")
-                    stats_repr = repr(stats_val)
-                    if len(stats_repr) > 200:
-                        stats_repr = stats_repr[:200] + "..."
-                    extra_keys = ["pitchHand", "primaryNumber", "primaryPosition", "currentTeam"]
-                    has_extra = {k: k in person for k in extra_keys}
-                    print(f"[Pitcher update] DEBUG first raw person: id={pid_debug}, top_level_keys={keys_list}")
-                    print(f"[Pitcher update] DEBUG 'stats' exists={'stats' in person}, stats type={type(stats_val).__name__}, stats preview={stats_repr}")
-                    print(f"[Pitcher update] DEBUG keys present: {has_extra}")
-
-                pid = int(person["id"])
-                name_full = (person.get("fullName") or "").strip()
-                stats = person.get("stats")
-                if stats is None:
-                    stats = []
-                if not isinstance(stats, list):
-                    stats = [stats] if stats else []
-
-                # One-time debug: first person with non-empty stats
-                if stats and not debug_stats_logged[0]:
-                    debug_stats_logged[0] = True
-                    first = stats[0] if stats else {}
-                    splits_val = first.get("splits") if isinstance(first, dict) else None
-                    first_split = (splits_val[0] if isinstance(splits_val, list) and splits_val else first)
-                    stat_val = first_split.get("stat", {}) if isinstance(first_split, dict) else {}
-                    print(f"[Pitcher update] DEBUG first person with stats: id={pid}, person_keys={list(person.keys())}")
-                    print(f"[Pitcher update] DEBUG stats type={type(stats).__name__}, len(stats)={len(stats)}")
-                    if isinstance(first, dict):
-                        print(f"[Pitcher update] DEBUG first_stats_item keys={list(first.keys())}")
-                    print(f"[Pitcher update] DEBUG splits type={type(splits_val).__name__}, stat keys={list(stat_val.keys()) if isinstance(stat_val, dict) else 'n/a'}")
-
-                era = whip = ip = None
-                stats_list = stats if isinstance(stats, list) else []
-                for statgrp in stats_list:
-                    if not isinstance(statgrp, dict):
-                        continue
-                    splits = statgrp.get("splits") or statgrp.get("split") or []
-                    if not isinstance(splits, list):
-                        splits = [splits] if splits else []
-                    # Some responses put stat at group level (no splits list)
-                    if not splits and statgrp.get("stat") is not None:
-                        splits = [statgrp]
-                    for sp in splits:
-                        if not isinstance(sp, dict):
-                            continue
-                        st = sp.get("stat") or sp
-                        if not isinstance(st, dict):
-                            continue
-                        e = st.get("era") if st.get("era") is not None else st.get("ERA")
-                        w = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
-                        ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
-                        if e is not None:
-                            era = e
-                        if w is not None:
-                            whip = w
-                        if ip_raw is not None:
-                            try:
-                                if isinstance(ip_raw, (int, float)):
-                                    ip = float(ip_raw)
-                                else:
-                                    s = str(ip_raw).strip()
-                                    if "." in s:
-                                        whole, frac = s.split(".", 1)
-                                    else:
-                                        whole, frac = s, "0"
-                                    frac_dec = {"0": 0.0, "1": 1/3, "2": 2/3}.get(frac, 0.0)
-                                    ip = float(whole) + frac_dec
-                            except Exception:
-                                try:
-                                    ip = float(ip_raw)
-                                except Exception:
-                                    pass
-
-                era = float(era) if era not in (None, "") else None
-                whip = float(whip) if whip not in (None, "") else None
-
-                if any(v is not None for v in (era, whip, ip)):
-                    rows.append({
-                        "mlb_id": pid,
-                        "Name": name_full,
-                        "ERA": era,
-                        "WHIP": whip,
-                        "IP": ip
-                    })
-
-            batch_rows_added = len(rows) - batch_rows_before
-            if raw_count > 0 and batch_rows_added == 0:
-                print(f"[Pitcher update] Batch: raw_people={raw_count}, rows_with_stats=0 (check response structure)")
-
+            player = sp.get("player") or {}
+            st = sp.get("stat") or {}
+            pid = player.get("id")
+            name_full = (player.get("fullName") or "").strip()
+            if pid is None:
+                continue
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            era_raw = st.get("era") if st.get("era") is not None else st.get("ERA")
+            whip_raw = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
+            ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
+            era = None
+            if era_raw not in (None, ""):
+                try:
+                    era = float(era_raw)
+                except (TypeError, ValueError):
+                    pass
+            whip = None
+            if whip_raw not in (None, ""):
+                try:
+                    whip = float(whip_raw)
+                except (TypeError, ValueError):
+                    pass
+            ip = None
+            if ip_raw is not None and ip_raw != "":
+                try:
+                    if isinstance(ip_raw, (int, float)):
+                        ip = float(ip_raw)
+                    else:
+                        s = str(ip_raw).strip()
+                        if "." in s:
+                            whole, frac = s.split(".", 1)
+                        else:
+                            whole, frac = s, "0"
+                        frac_dec = {"0": 0.0, "1": 1/3, "2": 2/3}.get(frac, 0.0)
+                        ip = float(whole) + frac_dec
+                except Exception:
+                    try:
+                        ip = float(ip_raw)
+                    except Exception:
+                        pass
+            if any(v is not None for v in (era, whip, ip)):
+                rows.append({
+                    "mlb_id": pid,
+                    "Name": name_full,
+                    "ERA": era,
+                    "WHIP": whip,
+                    "IP": ip
+                })
         rows_after_filter = len(rows)
-        print(f"[Pitcher update] Raw people returned: {total_raw_people}, Rows with ERA/WHIP/IP: {rows_after_filter}")
+        print(f"[Pitcher update] Raw splits returned: {total_raw_splits}, Rows with ERA/WHIP/IP: {rows_after_filter}")
 
         df = pd.DataFrame(rows)
         if df.empty:
-            if total_raw_people == 0:
+            if total_raw_splits == 0:
                 raise ValueError(
-                    "MLB StatsAPI returned no pitcher rows (people endpoint returned 0 records). "
+                    "MLB StatsAPI returned no pitcher rows (stats endpoint returned 0 splits). "
                     "Check endpoint or network."
                 )
             raise ValueError(
-                f"MLB StatsAPI returned no pitcher rows (raw people: {total_raw_people}, "
-                "rows with ERA/WHIP/IP: 0). Check API response structure for stats/splits/stat."
+                f"MLB StatsAPI returned no pitcher rows (raw splits: {total_raw_splits}, "
+                "rows with ERA/WHIP/IP: 0). Check API response structure for stat/player."
             )
         return df
 
