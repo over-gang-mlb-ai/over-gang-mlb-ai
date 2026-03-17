@@ -371,6 +371,79 @@ class DataManager:
                     "WHIP": whip,
                     "IP": ip
                 })
+        # Preseason fallback: if no regular-season splits yet, retry with previous year
+        if total_raw_splits == 0 and year is not None:
+            fallback_year = year - 1
+            print(f"[Pitcher update] No regular-season splits for {year}; retrying with {fallback_year}")
+            params["season"] = fallback_year
+            print(f"[Pitcher update] Request URL: {stats_base}?{urlencode(params)}")
+            try:
+                resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
+                resp.raise_for_status()
+                body = resp.json()
+            except Exception as e:
+                raise ValueError(f"MLB StatsAPI stats request failed (fallback {fallback_year}): {e}") from e
+            stats_list = body.get("stats") if isinstance(body, dict) else None
+            if isinstance(stats_list, list) and stats_list:
+                splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+                if not isinstance(splits, list):
+                    splits = []
+                total_raw_splits = len(splits)
+                rows = []
+                for sp in splits:
+                    if not isinstance(sp, dict):
+                        continue
+                    player = sp.get("player") or {}
+                    st = sp.get("stat") or {}
+                    pid = player.get("id")
+                    name_full = (player.get("fullName") or "").strip()
+                    if pid is None:
+                        continue
+                    try:
+                        pid = int(pid)
+                    except (TypeError, ValueError):
+                        continue
+                    era_raw = st.get("era") if st.get("era") is not None else st.get("ERA")
+                    whip_raw = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
+                    ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
+                    era = None
+                    if era_raw not in (None, ""):
+                        try:
+                            era = float(era_raw)
+                        except (TypeError, ValueError):
+                            pass
+                    whip = None
+                    if whip_raw not in (None, ""):
+                        try:
+                            whip = float(whip_raw)
+                        except (TypeError, ValueError):
+                            pass
+                    ip = None
+                    if ip_raw is not None and ip_raw != "":
+                        try:
+                            if isinstance(ip_raw, (int, float)):
+                                ip = float(ip_raw)
+                            else:
+                                s = str(ip_raw).strip()
+                                if "." in s:
+                                    whole, frac = s.split(".", 1)
+                                else:
+                                    whole, frac = s, "0"
+                                frac_dec = {"0": 0.0, "1": 1/3, "2": 2/3}.get(frac, 0.0)
+                                ip = float(whole) + frac_dec
+                        except Exception:
+                            try:
+                                ip = float(ip_raw)
+                            except Exception:
+                                pass
+                    if any(v is not None for v in (era, whip, ip)):
+                        rows.append({
+                            "mlb_id": pid,
+                            "Name": name_full,
+                            "ERA": era,
+                            "WHIP": whip,
+                            "IP": ip
+                        })
         rows_after_filter = len(rows)
         print(f"[Pitcher update] Raw splits returned: {total_raw_splits}, Rows with ERA/WHIP/IP: {rows_after_filter}")
 
