@@ -453,6 +453,7 @@ def generate_prediction(
     away_offense_mult=1.0,
     home_offense_mult=1.0,
     has_real_total=True,
+    data_quality_degraded=False,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -589,6 +590,8 @@ def generate_prediction(
     if not has_real_total:
         confidence = min(0.59, confidence * 0.65)
         prediction_str = "NO BET (fallback total only)"
+    if data_quality_degraded:
+        confidence = min(confidence, 0.79)
 
     # Recommended units from edge size (only bet when |edge| >= threshold)
     if abs_edge < EDGE_THRESHOLD:
@@ -1047,6 +1050,13 @@ def run_predictions():
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
+            data_quality_degraded = (
+                public is None or public == {} or
+                "League Avg" in (away_pitcher or "") or
+                "League Avg" in (home_pitcher or "") or
+                bool(safe_get(away_stats, "LowIP", False)) or
+                bool(safe_get(home_stats, "LowIP", False))
+            )
             proj = generate_prediction(
                 away_stats=away_stats,
                 home_stats=home_stats,
@@ -1062,6 +1072,7 @@ def run_predictions():
                 away_offense_mult=away_offense_mult,
                 home_offense_mult=home_offense_mult,
                 has_real_total=bool(odds_info.get("_has_real_total", False)),
+                data_quality_degraded=data_quality_degraded,
             )
 
             if proj.get("skip"):
