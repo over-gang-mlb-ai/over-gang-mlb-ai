@@ -319,6 +319,7 @@ class DataManager:
         if not isinstance(splits, list):
             splits = []
         total_raw_splits = len(splits)
+        used_fallback = False
         rows = []
         for sp in splits:
             if not isinstance(sp, dict):
@@ -376,6 +377,7 @@ class DataManager:
                 })
         # Preseason fallback: if no regular-season splits yet, retry with previous year
         if total_raw_splits == 0 and year is not None:
+            used_fallback = True
             fallback_year = year - 1
             print(f"[Pitcher update] No regular-season splits for {year}; retrying with {fallback_year}")
             params["season"] = fallback_year
@@ -447,6 +449,11 @@ class DataManager:
                             "WHIP": whip,
                             "IP": ip
                         })
+        if used_fallback and len(rows) < MIN_PITCHER_SAVE_COUNT:
+            print("[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv")
+            raise ValueError(
+                "[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv"
+            )
         rows_after_filter = len(rows)
         print(f"[Pitcher update] Raw splits returned: {total_raw_splits}, Rows with ERA/WHIP/IP: {rows_after_filter}")
 
