@@ -1006,6 +1006,9 @@ def run_predictions():
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
             confidence = max(0.0, min(1.0, confidence))
+            has_real_total = bool(odds_info.get("_has_real_total", False))
+            if not has_real_total:
+                prediction = "NO BET (fallback total only)"
 
             # Optional: scale units by lineup conviction
             try:
@@ -1037,22 +1040,22 @@ def run_predictions():
                 "VeloDrop_Away": round(safe_float(velo_drop_away), 1),
                 "VeloDrop_Home": round(safe_float(velo_drop_home), 1),
             })
-            fired = confidence >= MIN_CONFIDENCE_ALERT
+            fired = (confidence >= MIN_CONFIDENCE_ALERT) and has_real_total
             trigger_tags = "|".join(filter(None, [
                 "high_confidence" if fired else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "odds_api" if (odds_source == "Odds API") else None,
-                "fallback_line" if (not bool(odds_info.get('_has_real_total', False))) else None,
+                "fallback_line" if (not has_real_total) else None,
             ]))
             game_data["Fired_Play"] = fired
             game_data["Trigger_Tags"] = trigger_tags
             if fired:
                 game_data["No_Fire_Reason"] = ""
             else:
-                if abs(edge) < 1.0:
-                    game_data["No_Fire_Reason"] = "edge_too_small"
-                elif not bool(odds_info.get('_has_real_total', False)):
+                if not has_real_total:
                     game_data["No_Fire_Reason"] = "fallback_line_used"
+                elif abs(edge) < 1.0:
+                    game_data["No_Fire_Reason"] = "edge_too_small"
                 elif public is None or public == {} or ("League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")):
                     game_data["No_Fire_Reason"] = "data_quality_degraded"
                 elif confidence < MIN_CONFIDENCE_ALERT:
