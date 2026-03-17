@@ -963,6 +963,8 @@ def run_predictions():
                 'Edge_Tier': '',
                 'Bet_Type': 'total',
                 'Side': '',
+                'Play_Status': '',
+                'Bettable': False,
                 'Line_Status': '',
                 'Fallback_Used': False,
                 'Data_Quality_Flag': '',
@@ -1063,6 +1065,8 @@ def run_predictions():
                     game_data["No_Fire_Reason"] = "confidence_below_alert_threshold"
                 else:
                     game_data["No_Fire_Reason"] = "manual_review"
+            game_data["Play_Status"] = "BETTABLE" if has_real_total else "PROJECTION_ONLY"
+            game_data["Bettable"] = bool(has_real_total)
             game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
             game_data["Confidence_Tier"] = "high" if confidence >= 0.85 else ("medium" if confidence >= 0.60 else "low")
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
@@ -1157,7 +1161,7 @@ def run_predictions():
             "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
             "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
             "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
-            "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side",
+            "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
             "Line_Status", "Fallback_Used", "Data_Quality_Flag",
             "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
             "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
