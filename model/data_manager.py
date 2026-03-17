@@ -9,6 +9,7 @@ from datetime import datetime
 from unidecode import unidecode
 from rapidfuzz import fuzz, process
 from itertools import islice
+from urllib.parse import urlencode
 
 # ================================
 # Paths & Config
@@ -299,17 +300,22 @@ class DataManager:
         total_raw_people = 0
         debug_stats_logged = [False]  # one sample per run
         debug_raw_person_logged = [False]  # first raw person even if stats empty
+        debug_request_logged = [False]  # log final request URL once per run
+        people_base = "https://statsapi.mlb.com/api/v1/people"
+        hydrate_val = f"stats(group=pitching,type=season,season={year},gameType=R)"
         print(f"[Pitcher update] Source: MLB StatsAPI people endpoint (year={year}, pitcher_ids={len(pitcher_ids)})")
 
         for batch in chunks(sorted(pitcher_ids), 50):
             ids = ",".join(map(str, batch))
-            url = (
-                "https://statsapi.mlb.com/api/v1/people"
-                f"?personIds={ids}"
-                f"&hydrate=stats(group=[pitching],type=[season],season={year})"
-            )
+            params = {
+                "personIds": ids,
+                "hydrate": hydrate_val,
+            }
+            if not debug_request_logged[0]:
+                debug_request_logged[0] = True
+                print(f"[Pitcher update] Request URL (first batch): {people_base}?{urlencode(params)}")
             try:
-                resp = requests.get(url, headers=headers, timeout=20)
+                resp = requests.get(people_base, params=params, headers=headers, timeout=20)
                 body = resp.json()
                 data = body.get("people") if isinstance(body, dict) else None
                 if not isinstance(data, list):
