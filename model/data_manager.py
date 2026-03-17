@@ -25,6 +25,9 @@ MIN_PITCHER_IP_EARLY = 10
 MIN_PITCHER_IP_MID = 20
 MIN_PITCHER_IP_LATE = 15
 
+# Refuse to overwrite pitcher_stats.csv if new pull has fewer than this many rows
+MIN_PITCHER_SAVE_COUNT = 100
+
 
 class DataManager:
     # ----------------------------
@@ -509,6 +512,12 @@ class DataManager:
             merged = merged.drop_duplicates(subset=["norm_name"], keep="first")
 
             out = merged[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
+            if len(out) < MIN_PITCHER_SAVE_COUNT:
+                print(f"[Pitcher update] Refusing to overwrite pitcher_stats.csv because new row count is too small: {len(out)}")
+                raise ValueError(
+                    f"Pitcher update aborted: new row count ({len(out)}) below minimum ({MIN_PITCHER_SAVE_COUNT}); "
+                    "existing file not overwritten."
+                )
             os.makedirs(DATA_DIR, exist_ok=True)
             out.to_csv(STATS_FILE, index=False)
 
