@@ -1145,12 +1145,13 @@ def run_predictions():
             traceback.print_exc()
             continue
 
-    # Save results
-    if results:
+    # Save results (only real-market totals)
+    eligible_results = [r for r in results if r.get("Total_Is_Real", False)]
+    if eligible_results:
         archive_date = datetime.now().strftime("%Y%m%d_%H%M")
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-        results_df = pd.DataFrame(results, columns=[
+        results_df = pd.DataFrame(eligible_results, columns=[
             "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
             "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
             "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
@@ -1165,10 +1166,12 @@ def run_predictions():
         csv_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
         results_df.to_csv(csv_path, index=False)
 
-        print(f"\n💾 Saved {len(results)} predictions")
+        print(f"\n💾 Saved {len(eligible_results)} predictions")
 
         # 📤 Auto-upload to Telegram
         send_telegram_file(csv_path, caption=f"📊 Over Gang Predictions for {datetime.now().strftime('%b %d')}")
+    elif results:
+        print("\nℹ️ No eligible real-market plays to export; all games were fallback/no-bet.")
 
     # Send alerts
     if alerts:
