@@ -272,7 +272,7 @@ class BullpenManager:
 # 🧠 VEGAS LINE + VELO TRACKING (The Odds API + CSV fallback)
 # ================================
 def _default_odds_info():
-    return {"total_line": 8.5, "over_juice": -110, "under_juice": -110, "ml_home": None, "ml_away": None, "book": ""}
+    return {"total_line": 8.5, "over_juice": -110, "under_juice": -110, "ml_home": None, "ml_away": None, "book": "", "_has_real_total": False}
 
 
 class VegasLines:
@@ -297,8 +297,8 @@ class VegasLines:
             info = dict(row)
             match_found = lookup_key in odds_map
             book_empty = not (row.get("book") or "").strip()
-            line_is_fallback = line == 8.5
-            is_fallback_line = book_empty or line_is_fallback
+            has_real_total = (not book_empty) and (raw_line is not None and raw_line != "")
+            is_fallback_line = not has_real_total
             if match_found:
                 source = "8.5 fallback" if is_fallback_line else "Odds API"
             else:
@@ -306,6 +306,7 @@ class VegasLines:
             info["_source"] = source
             info["_lookup_key"] = lookup_key
             info["_match_found"] = match_found
+            info["_has_real_total"] = bool(has_real_total)
             return (line, info)
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
@@ -313,6 +314,7 @@ class VegasLines:
             info["_source"] = "8.5 fallback (no odds_map, CSV missing/empty)"
             info["_lookup_key"] = ""
             info["_match_found"] = False
+            info["_has_real_total"] = False
             return (8.5, info)
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
@@ -332,6 +334,7 @@ class VegasLines:
                 info["_source"] = "CSV"
                 info["_lookup_key"] = game_key
                 info["_match_found"] = True
+                info["_has_real_total"] = True
                 return (total_current, info)
         except Exception as e:
             print(f"⚠️ Vegas line fetch failed: {e}")
@@ -339,6 +342,7 @@ class VegasLines:
         info["_source"] = "8.5 fallback (CSV read failed or no row)"
         info["_lookup_key"] = ""
         info["_match_found"] = False
+        info["_has_real_total"] = False
         return (8.5, info)
 
 class VelocityTracker:
@@ -775,6 +779,7 @@ def run_predictions():
             print(f"[ODDS]   Match found in odds_map: {odds_info.get('_match_found', '?')}")
             print(f"[ODDS]   odds_info: total_line={odds_info.get('total_line')}, over_juice={odds_info.get('over_juice')}, under_juice={odds_info.get('under_juice')}, book={repr(odds_info.get('book'))}")
             print(f"[ODDS]   Source: {odds_info.get('_source', '?')}")
+            print(f"[ODDS]   Total status: {'REAL sportsbook total' if odds_info.get('_has_real_total', False) else 'FALLBACK total (missing market totals)'}")
 
             # --- starters must be defined BEFORE we score lineups
             away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')
@@ -933,7 +938,8 @@ def run_predictions():
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
                 'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
                 'vegas_line': vegas_line,
-                'Odds_Line': odds_info.get('total_line', 8.5),
+                'Total_Is_Real': bool(odds_info.get('_has_real_total', False)),
+                'Odds_Line': odds_info.get('total_line', 8.5) if odds_info.get('_has_real_total', False) else '',
                 'Over_Juice': odds_info.get('over_juice', -110),
                 'Under_Juice': odds_info.get('under_juice', -110),
                 'Odds_Book': odds_info.get('book', ''),
@@ -941,7 +947,7 @@ def run_predictions():
                 'Odds_ML_Away': odds_info.get('ml_away'),
                 'Market_Source': odds_source if 'odds_source' in locals() else '',
                 'Captured_Book': odds_info.get('book', ''),
-                'Captured_Total': odds_info.get('total_line', 8.5),
+                'Captured_Total': odds_info.get('total_line', 8.5) if odds_info.get('_has_real_total', False) else '',
                 'Captured_ML_Home': odds_info.get('ml_home'),
                 'Captured_ML_Away': odds_info.get('ml_away'),
                 'Fired_Play': False,
@@ -995,6 +1001,9 @@ def run_predictions():
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
             confidence = max(0.0, min(1.0, confidence))
+            if not bool(odds_info.get('_has_real_total', False)):
+                # Missing real totals should not yield "market-grade" confidence.
+                confidence = min(0.59, confidence * 0.65)
 
             # Optional: scale units by lineup conviction
             try:
@@ -1031,7 +1040,7 @@ def run_predictions():
                 "high_confidence" if fired else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "odds_api" if (odds_source == "Odds API") else None,
-                "fallback_line" if (odds_info.get("book", "") == "") else None,
+                "fallback_line" if (not bool(odds_info.get('_has_real_total', False))) else None,
             ]))
             game_data["Fired_Play"] = fired
             game_data["Trigger_Tags"] = trigger_tags
@@ -1040,7 +1049,7 @@ def run_predictions():
             else:
                 if abs(edge) < 1.0:
                     game_data["No_Fire_Reason"] = "edge_too_small"
-                elif odds_info.get("book", "") == "":
+                elif not bool(odds_info.get('_has_real_total', False)):
                     game_data["No_Fire_Reason"] = "fallback_line_used"
                 elif public is None or public == {} or ("League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")):
                     game_data["No_Fire_Reason"] = "data_quality_degraded"
@@ -1053,9 +1062,9 @@ def run_predictions():
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
             game_data["Bet_Type"] = "total"
             game_data["Side"] = "over" if "OVER" in (prediction or "").upper() else ("under" if "UNDER" in (prediction or "").upper() else "")
-            line_status = "market" if odds_info.get("book", "") else "fallback"
+            line_status = "market" if bool(odds_info.get('_has_real_total', False)) else "fallback"
             game_data["Line_Status"] = line_status
-            game_data["Fallback_Used"] = odds_info.get("book", "") == ""
+            game_data["Fallback_Used"] = not bool(odds_info.get('_has_real_total', False))
             dq_parts = []
             if line_status == "fallback":
                 dq_parts.append("fallback_line")
@@ -1138,7 +1147,7 @@ def run_predictions():
         results_df = pd.DataFrame(results, columns=[
             "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
             "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
-            "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
+            "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
             "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
             "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
             "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side",
