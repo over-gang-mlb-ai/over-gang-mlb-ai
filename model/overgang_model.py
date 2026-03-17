@@ -516,6 +516,7 @@ def generate_prediction(
     confidence = max(0.01, min(confidence, 0.99))
     if not has_real_total:
         confidence = min(0.59, confidence * 0.65)
+        prediction_str = "NO BET (fallback total only)"
 
     # Recommended units from edge size (only bet when |edge| >= threshold)
     if abs_edge < EDGE_THRESHOLD:
