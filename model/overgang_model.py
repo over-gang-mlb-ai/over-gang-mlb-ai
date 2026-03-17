@@ -297,10 +297,11 @@ class VegasLines:
             info = dict(row)
             match_found = lookup_key in odds_map
             book_empty = not (row.get("book") or "").strip()
-            has_real_total = (not book_empty) and (raw_line is not None and raw_line != "")
+            book_scrambled = (row.get("book") or "").strip().lower() == "scrambled"
+            has_real_total = (not book_empty) and (raw_line is not None and raw_line != "") and (not book_scrambled)
             is_fallback_line = not has_real_total
             if match_found:
-                source = "8.5 fallback" if is_fallback_line else "Odds API"
+                source = "fallback (scrambled book)" if book_scrambled else ("8.5 fallback" if is_fallback_line else "Odds API")
             else:
                 source = "8.5 fallback (no match in odds_map)"
             info["_source"] = source
