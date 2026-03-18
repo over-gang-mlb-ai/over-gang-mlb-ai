@@ -50,6 +50,66 @@ from core.batters import Batters, LineupImpact, BATTER_DF
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
 
+# ================================
+# 🧰 FanGraphs scrape diagnostics
+# ================================
+# Monkey-patch DataManager.scrape_fangraphs_pitcher() to print actionable exception details.
+# Logging-only: the scrape behavior/return values remain the same.
+try:
+    if not getattr(DataManager, "_overgang_scrape_debug_patched", False):
+        _orig_scrape_fangraphs_pitcher = DataManager.scrape_fangraphs_pitcher
+
+        def _overgang_scrape_fangraphs_pitcher_debug(name):
+            original = name
+            normalized = DataManager.normalize_name(name)
+            alias_used = globals().get("OG_LAST_ALIAS_USED_FOR_SCRAPE", "?")
+            print(
+                "[SCRAPE DEBUG] "
+                f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
+            )
+            try:
+                print(f"🌐 Scraping FanGraphs for: {name}")
+                search_url = f"https://www.fangraphs.com/api/players/find-pitcher?q={name}"
+                res = requests.get(search_url, timeout=15)
+                results = res.json()
+                if not results:
+                    print("❌ No FanGraphs match found.")
+                    return None
+
+                best_match = results[0]
+                player_id = best_match["playerid"]
+                full_name = best_match["playername"].strip().lower()
+
+                stats_url = f"https://www.fangraphs.com/players/id/{player_id}/stats?position=P"
+                dfs = pd.read_html(stats_url)
+                stats_df = dfs[0]
+
+                current_year = str(datetime.now().year)
+                current_season = stats_df[stats_df["Season"].astype(str).str.startswith(current_year)]
+                if current_season.empty:
+                    print("⚠️ No stats found for this season.")
+                    return None
+
+                row = current_season.iloc[0]
+                xera = float(row.get("xERA", 4.50))
+                whip = float(row.get("WHIP", 1.30))
+                ip = float(row.get("IP", 0.0))
+                low_ip = ip < 60
+
+                return {"Name": full_name, "xERA": xera, "WHIP": whip, "IP": ip, "LowIP": low_ip}
+            except Exception as e:
+                print(
+                    "[SCRAPE ERROR] "
+                    f"pitcher={repr(original)} | exc_type={type(e).__name__} | exc={repr(e)}"
+                )
+                return None
+
+        DataManager.scrape_fangraphs_pitcher = staticmethod(_overgang_scrape_fangraphs_pitcher_debug)
+        DataManager._overgang_scrape_debug_patched = True
+except Exception:
+    # If anything goes wrong with patching, fail open (keep existing behavior).
+    pass
+
 try:
     BATTER_DF = Batters.load_batter_table()  # reads data/batter_stats.csv
     print(f"✅ Loaded batter table: {len(BATTER_DF)} rows")
