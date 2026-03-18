@@ -370,7 +370,13 @@ class VegasLines:
             match_found = lookup_key in odds_map
             book_empty = not (row.get("book") or "").strip()
             book_scrambled = (row.get("book") or "").strip().lower() == "scrambled"
-            has_real_total = (not book_empty) and (raw_line is not None and raw_line != "") and (not book_scrambled)
+            line_realistic = (5 <= line <= 15) if isinstance(line, (int, float)) else False
+            has_real_total = (
+                (not book_empty)
+                and (raw_line is not None and raw_line != "")
+                and (not book_scrambled)
+                and line_realistic
+            )
             is_fallback_line = not has_real_total
             if match_found:
                 source = "fallback (scrambled book)" if book_scrambled else ("8.5 fallback" if is_fallback_line else "Odds API")
