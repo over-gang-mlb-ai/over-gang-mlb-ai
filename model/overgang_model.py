@@ -1415,6 +1415,18 @@ def run_predictions():
         for match in alias_log:
             print(f"• {match}")
 
+    # Data quality summary
+    real_totals = sum(1 for r in results if r.get("Total_Is_Real"))
+    fallback_totals = sum(1 for r in results if not r.get("Total_Is_Real"))
+    projection_only = sum(1 for r in results if r.get("Play_Status") == "PROJECTION_ONLY")
+    degraded = sum(1 for r in results if (str(r.get("Data_Quality_Flag") or "").strip() != "" or r.get("No_Fire_Reason") == "data_quality_degraded"))
+    print("\n--- DATA QUALITY ---")
+    print(f"  Real totals used: {real_totals}")
+    print(f"  Fallback totals used: {fallback_totals}")
+    print(f"  Projection-only games: {projection_only}")
+    print(f"  Degraded-data games: {degraded}")
+    print("--------------------")
+
     # Final run summary
     _manual = _load_manual_totals()
     print("\n--- RUN SUMMARY ---")
