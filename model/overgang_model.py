@@ -1279,6 +1279,194 @@ def run_predictions():
     live_total_scrambled_book_keys = []
     live_total_empty_book_keys = []
 
+    # Runtime pitcher-resolution outcome logging (logging only)
+    rt_exact = 0
+    rt_alias = 0
+    rt_manual_fallback = 0
+    rt_fuzzy = 0
+    rt_scrape_success = 0
+    rt_scrape_fail = 0
+    rt_league_average = 0
+
+    _alias_reverse_runtime = locals().get("_alias_reverse", {}) or {}
+    _league_avg_clean = {"league avg away", "league avg home"}
+
+    def _low_ip_from_stats(s):
+        try:
+            return bool(s.get("LowIP", False)) if isinstance(s, dict) else bool(s["LowIP"])
+        except Exception:
+            return False
+
+    def _to_dict(s):
+        if s is None:
+            return {}
+        if isinstance(s, dict):
+            return s
+        try:
+            if isinstance(s, pd.Series):
+                return s.to_dict()
+        except Exception:
+            pass
+        try:
+            if hasattr(s, "to_dict"):
+                return s.to_dict()
+        except Exception:
+            pass
+        return {}
+
+    def _num_close(a, b, tol=1e-2):
+        try:
+            return abs(float(a) - float(b)) <= tol
+        except Exception:
+            return False
+
+    def _stats_equal(candidate, resolved):
+        cd = _to_dict(candidate)
+        rd = _to_dict(resolved)
+        if not rd:
+            return False
+        if "xERA" in cd and "xERA" in rd and not _num_close(cd.get("xERA"), rd.get("xERA"), tol=0.01):
+            return False
+        if "WHIP" in cd and "WHIP" in rd and not _num_close(cd.get("WHIP"), rd.get("WHIP"), tol=0.01):
+            return False
+        if "LowIP" in cd and "LowIP" in rd and bool(cd.get("LowIP")) != bool(rd.get("LowIP")):
+            return False
+        if "IP" in cd and "IP" in rd and cd.get("IP") is not None and rd.get("IP") is not None:
+            try:
+                if not _num_close(cd.get("IP"), rd.get("IP"), tol=0.5):
+                    return False
+            except Exception:
+                pass
+        return True
+
+    def _runtime_pitcher_path(pitcher_name_used: str, resolved_obj):
+        clean = DataManager.normalize_name(pitcher_name_used or "")
+        resolved_dict = _to_dict(resolved_obj)
+
+        # League-average sentinel shortcut
+        if clean in _league_avg_clean:
+            return "league_average"
+
+        # League-average fallback values from DataManager
+        league_fallback = {"xERA": 4.50, "WHIP": 1.30, "LowIP": True}
+        matches_league_fallback = (
+            bool(resolved_dict)
+            and _num_close(resolved_dict.get("xERA"), league_fallback["xERA"], tol=0.01)
+            and _num_close(resolved_dict.get("WHIP"), league_fallback["WHIP"], tol=0.01)
+            and bool(resolved_dict.get("LowIP", False)) is True
+        )
+
+        stats_ok = stats_df is not None and isinstance(stats_df, pd.DataFrame) and not stats_df.empty
+        manual_ok = manual_fallback_df is not None and isinstance(manual_fallback_df, pd.DataFrame) and not manual_fallback_df.empty
+
+        pitcher_key = str(pitcher_name_used or "").strip().lower()
+        exact_possible = stats_ok and clean in stats_df.index
+
+        alias_official = _alias_reverse_runtime.get(pitcher_key)
+        alias_clean = DataManager.normalize_name(alias_official) if alias_official else ""
+        alias_possible = stats_ok and bool(alias_clean) and alias_clean in stats_df.index
+
+        # Manual fallback possible check (matches DataManager keying)
+        manual_possible = manual_ok and pitcher_key in manual_fallback_df.index
+
+        # Fuzzy candidate possible check (same last-name guard)
+        fuzzy_possible = False
+        if stats_ok and not (exact_possible or alias_possible):
+            try:
+                choices = stats_df.index.tolist()
+                res = process.extractOne(clean, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+                if res:
+                    best_match, score = res[0], res[1]
+                    if clean.split()[-1] == best_match.split()[-1]:
+                        fuzzy_possible = True
+            except Exception:
+                fuzzy_possible = False
+
+        # If we got no resolved stats object, infer the most likely stage outcome from possibilities.
+        if not resolved_dict:
+            if exact_possible:
+                return "exact"
+            if alias_possible:
+                return "alias"
+            if manual_possible:
+                return "manual_fallback"
+            if fuzzy_possible:
+                return "fuzzy"
+            return "scrape_fail"
+
+        # If resolved equals exact/alias/manual/fuzzy candidates, label accordingly.
+        if exact_possible and resolved_dict:
+            try:
+                cand = stats_df.loc[clean]
+                if isinstance(cand, pd.DataFrame):
+                    cand = cand.iloc[0]
+                if _stats_equal(cand, resolved_obj):
+                    return "exact"
+            except Exception:
+                pass
+
+        if alias_possible and resolved_dict:
+            try:
+                cand = stats_df.loc[alias_clean]
+                if isinstance(cand, pd.DataFrame):
+                    cand = cand.iloc[0]
+                if _stats_equal(cand, resolved_obj):
+                    return "alias"
+            except Exception:
+                pass
+
+        if manual_possible and resolved_dict:
+            try:
+                cand = manual_fallback_df.loc[pitcher_key]
+                if isinstance(cand, pd.Series):
+                    cand = cand.to_dict()
+                if _stats_equal(cand, resolved_obj):
+                    return "manual_fallback"
+            except Exception:
+                pass
+
+        if fuzzy_possible and resolved_dict and not exact_possible and not alias_possible:
+            try:
+                choices = stats_df.index.tolist()
+                res = process.extractOne(clean, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+                if res:
+                    best_match, score = res[0], res[1]
+                    if clean.split()[-1] == best_match.split()[-1]:
+                        cand = stats_df.loc[best_match]
+                        if isinstance(cand, pd.DataFrame):
+                            cand = cand.iloc[0]
+                        if _stats_equal(cand, resolved_obj):
+                            return "fuzzy"
+            except Exception:
+                pass
+
+        # If none of the known candidate lanes match, infer scrape outcome
+        if matches_league_fallback:
+            # If we got here, this implies scrape was reached and failed (no candidate matched).
+            return "scrape_fail" if (not exact_possible and not alias_possible and not manual_possible and not fuzzy_possible) else "league_average"
+
+        return "scrape_success"
+
+    def _rt_inc(path: str):
+        nonlocal rt_exact, rt_alias, rt_manual_fallback, rt_fuzzy, rt_scrape_success, rt_scrape_fail, rt_league_average
+        if path == "exact":
+            rt_exact += 1
+        elif path == "alias":
+            rt_alias += 1
+        elif path == "manual_fallback":
+            rt_manual_fallback += 1
+        elif path == "fuzzy":
+            rt_fuzzy += 1
+        elif path == "scrape_success":
+            rt_scrape_success += 1
+        elif path == "scrape_fail":
+            rt_scrape_fail += 1
+        elif path == "league_average":
+            rt_league_average += 1
+
+    def _fallback_used_from_path(path: str) -> bool:
+        return path in {"manual_fallback", "scrape_fail", "league_average"}
+
     for game in games:
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
@@ -1377,6 +1565,11 @@ def run_predictions():
                 lineup_delta = 0.0
                 vegas_line_adj = float(vegas_line)
 
+            # Runtime game key for pitcher-resolution logging (no logic change)
+            away_norm_rt = normalize_team_name(away_team)
+            home_norm_rt = normalize_team_name(home_team)
+            game_key_rt = f"{away_norm_rt} @ {home_norm_rt}"
+
             away_stats = DataManager.match_pitcher_row(stats_df, away_pitcher, alias_log=alias_log)
             home_stats = DataManager.match_pitcher_row(stats_df, home_pitcher, alias_log=alias_log)
 
@@ -1384,6 +1577,25 @@ def run_predictions():
             for name, stats in [(away_pitcher, away_stats), (home_pitcher, home_stats)]:
                 if isinstance(stats, dict) and stats.get("LowIP", False):
                     print(f"⚠️ Using fallback stats for: {name}")
+
+            # Runtime pitcher-resolution outcome logging (logging only)
+            away_path = _runtime_pitcher_path(away_pitcher, away_stats)
+            away_low = _low_ip_from_stats(away_stats)
+            _rt_inc(away_path)
+            print(
+                "[RUNTIME PITCHER RESOLUTION] "
+                f"game={game_key_rt} | pitcher={away_pitcher} | path={away_path} | "
+                f"fallback_used={_fallback_used_from_path(away_path)} | low_ip={away_low}"
+            )
+
+            home_path = _runtime_pitcher_path(home_pitcher, home_stats)
+            home_low = _low_ip_from_stats(home_stats)
+            _rt_inc(home_path)
+            print(
+                "[RUNTIME PITCHER RESOLUTION] "
+                f"game={game_key_rt} | pitcher={home_pitcher} | path={home_path} | "
+                f"fallback_used={_fallback_used_from_path(home_path)} | low_ip={home_low}"
+            )
 
             # which hand each starter throws
             try:
@@ -1879,6 +2091,17 @@ def run_predictions():
     print(f"  Fallback pitchers: {_fmt_keys_preview(sorted(opening_fallback_pitchers_by_name))}")
     print(f"  Games missing required inputs: {_fmt_keys_preview(sorted(set(opening_games_missing_required_inputs)))}")
     print("----------------------------------")
+
+    # Runtime pitcher resolution outcome totals
+    print("\n--- RUNTIME PITCHER RESOLUTION SUMMARY ---")
+    print(f"  exact: {rt_exact}")
+    print(f"  alias: {rt_alias}")
+    print(f"  manual_fallback: {rt_manual_fallback}")
+    print(f"  fuzzy: {rt_fuzzy}")
+    print(f"  scrape_success: {rt_scrape_success}")
+    print(f"  scrape_fail: {rt_scrape_fail}")
+    print(f"  league_average: {rt_league_average}")
+    print("-------------------------------------------")
 
     # Final run summary
     _manual = _load_manual_totals()
