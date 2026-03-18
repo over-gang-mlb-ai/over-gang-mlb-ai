@@ -1091,6 +1091,185 @@ def run_predictions():
     alerts = []
     unmatched_pitchers = set()
     alias_log = []
+
+    # ================================
+    # 📅 OPENING DAY PREFLIGHT (readiness)
+    # ================================
+    trusted_total_source_map = locals().get("trusted_total_source_map", {}) or {}
+    if not isinstance(trusted_total_source_map, dict):
+        trusted_total_source_map = {}
+
+    def _is_missing_probable_pitcher(v):
+        s = str(v) if v is not None else ""
+        return (not s.strip()) or s.strip() == "TBD"
+
+    # Build alias reverse map once (variation -> official), for deterministic preflight classification.
+    _alias_reverse = {}
+    _alias_path = os.path.join(DATA_DIR, "pitcher_aliases.json")
+    if os.path.exists(_alias_path):
+        try:
+            with open(_alias_path, "r") as f:
+                _alias_map = json.load(f)
+            for _official, _variations in (_alias_map or {}).items():
+                if isinstance(_variations, list):
+                    for _a in _variations:
+                        if _a:
+                            _alias_reverse[str(_a).strip().lower()] = str(_official).strip().lower()
+                elif isinstance(_variations, str) and _variations.strip():
+                    _alias_reverse[_variations.strip().lower()] = str(_official).strip().lower()
+        except Exception:
+            _alias_reverse = {}
+
+    _league_avg_set = {"League Avg Away", "League Avg Home"}
+
+    def _would_fuzzy_match(pitcher_name_used: str) -> bool:
+        if stats_df is None or not isinstance(stats_df, pd.DataFrame) or stats_df.empty:
+            return False
+        if not pitcher_name_used:
+            return False
+        clean_name = DataManager.normalize_name(pitcher_name_used)
+        if not clean_name:
+            return False
+        choices = stats_df.index.tolist()
+        result = process.extractOne(clean_name, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+        if not result:
+            return False
+        best_match, score = result[0], result[1]
+        try:
+            return clean_name.split()[-1] == best_match.split()[-1]
+        except Exception:
+            return False
+
+    def _classify_pitcher_used(pitcher_name_used: str) -> str:
+        """
+        Deterministic preflight classification (logging only):
+        - exact: found in pitcher_stats.csv index (including fuzzy-success as "exact CSV found")
+        - alias: matched via pitcher_aliases.json to an index entry
+        - scrape: would fall through to scrape stage (no exact/alias/manual/fuzzy)
+        - league_avg: league-average sentinel pitcher (or equivalent)
+        """
+        if pitcher_name_used in _league_avg_set:
+            return "league_avg"
+
+        if stats_df is not None and isinstance(stats_df, pd.DataFrame) and not stats_df.empty:
+            clean = DataManager.normalize_name(pitcher_name_used)
+            if clean in stats_df.index:
+                return "exact"
+
+        # alias?
+        alias_official = _alias_reverse.get(str(pitcher_name_used).strip().lower())
+        if alias_official:
+            alias_clean = DataManager.normalize_name(alias_official)
+            if stats_df is not None and isinstance(stats_df, pd.DataFrame) and not stats_df.empty and alias_clean in stats_df.index:
+                return "alias"
+
+        # manual fallback pitchers?
+        if manual_fallback_df is not None and isinstance(manual_fallback_df, pd.DataFrame) and not manual_fallback_df.empty:
+            if str(pitcher_name_used).strip().lower() in manual_fallback_df.index:
+                return "scrape"
+
+        # fuzzy match success?
+        if _would_fuzzy_match(pitcher_name_used):
+            return "exact"
+
+        return "scrape"
+
+    opening_total_games = len(games) if games is not None else 0
+    opening_games_missing_probable_pitchers = 0
+    opening_exact_pitchers_found = 0
+    opening_alias_pitchers_found = 0
+    opening_scrape_fallback_pitchers = 0
+    opening_league_avg_fallback_pitchers = 0
+    opening_missing_public_betting = 0
+    opening_missing_trusted_totals = 0
+    opening_fully_ready_games = 0
+    opening_degraded_games = 0
+
+    opening_missing_pitchers_by_name = set()
+    opening_fallback_pitchers_by_name = set()
+    opening_games_missing_required_inputs = []
+
+    for game in games:
+        away_team = safe_get(game, "away_name", "Away Team")
+        home_team = safe_get(game, "home_name", "Home Team")
+        away_norm = normalize_team_name(away_team)
+        home_norm = normalize_team_name(home_team)
+        game_key = f"{away_norm} @ {home_norm}"
+
+        away_raw = safe_get(game, "away_probable_pitcher", "TBD")
+        home_raw = safe_get(game, "home_probable_pitcher", "TBD")
+        away_missing = _is_missing_probable_pitcher(away_raw)
+        home_missing = _is_missing_probable_pitcher(home_raw)
+
+        away_used = "League Avg Away" if away_missing else str(away_raw).strip()
+        home_used = "League Avg Home" if home_missing else str(home_raw).strip()
+
+        if away_missing or home_missing:
+            opening_games_missing_probable_pitchers += 1
+            if away_missing:
+                opening_missing_pitchers_by_name.add("League Avg Away")
+            if home_missing:
+                opening_missing_pitchers_by_name.add("League Avg Home")
+
+        away_type = _classify_pitcher_used(away_used)
+        home_type = _classify_pitcher_used(home_used)
+
+        if away_type == "exact":
+            opening_exact_pitchers_found += 1
+        elif away_type == "alias":
+            opening_alias_pitchers_found += 1
+        elif away_type == "scrape":
+            opening_scrape_fallback_pitchers += 1
+            opening_fallback_pitchers_by_name.add(away_used)
+        elif away_type == "league_avg":
+            opening_league_avg_fallback_pitchers += 1
+            opening_fallback_pitchers_by_name.add(away_used)
+
+        if home_type == "exact":
+            opening_exact_pitchers_found += 1
+        elif home_type == "alias":
+            opening_alias_pitchers_found += 1
+        elif home_type == "scrape":
+            opening_scrape_fallback_pitchers += 1
+            opening_fallback_pitchers_by_name.add(home_used)
+        elif home_type == "league_avg":
+            opening_league_avg_fallback_pitchers += 1
+            opening_fallback_pitchers_by_name.add(home_used)
+
+        public = public_betting_data.get(game_key) if isinstance(public_betting_data, dict) else None
+        public_missing = public is None or public == {}
+        if public_missing:
+            opening_missing_public_betting += 1
+
+        trow = trusted_total_source_map.get(game_key) if isinstance(trusted_total_source_map, dict) else None
+        trusted_exists = isinstance(trow, dict) and trow.get("total_line") is not None
+        if not trusted_exists:
+            opening_missing_trusted_totals += 1
+
+        pitchers_ready = (away_type in {"exact", "alias"}) and (home_type in {"exact", "alias"})
+        public_ready = not public_missing
+        totals_ready = trusted_exists
+        if pitchers_ready and public_ready and totals_ready:
+            opening_fully_ready_games += 1
+        else:
+            opening_degraded_games += 1
+            if (public_missing or not totals_ready or not pitchers_ready):
+                opening_games_missing_required_inputs.append(game_key)
+
+    # Print compact preflight block
+    print("\n--- OPENING DAY PREFLIGHT ---")
+    print(f"  Total games found: {opening_total_games}")
+    print(f"  Games missing probable pitchers: {opening_games_missing_probable_pitchers}")
+    print(f"  Pitchers found by exact match: {opening_exact_pitchers_found}")
+    print(f"  Pitchers found by alias match: {opening_alias_pitchers_found}")
+    print(f"  Pitchers using scrape fallback: {opening_scrape_fallback_pitchers}")
+    print(f"  Pitchers using league-average fallback: {opening_league_avg_fallback_pitchers}")
+    print(f"  Missing public betting: {opening_missing_public_betting}")
+    print(f"  Missing trusted totals: {opening_missing_trusted_totals}")
+    print(f"  Games fully ready: {opening_fully_ready_games}")
+    print(f"  Games degraded: {opening_degraded_games}")
+    print("-------------------------------\n")
+
     # LIVE TOTAL BLOCKERS tracking (logging only)
     live_total_scrambled_book = 0
     live_total_empty_book = 0
@@ -1684,6 +1863,22 @@ def run_predictions():
         if api_real_n == 0:
             _fa_missing.append("no API/market real totals")
         print("[FULL AUTO CHECK]", "; ".join(_fa_missing) if _fa_missing else "see preflight mode")
+
+    # Opening Day readiness end-of-run summary
+    def _fmt_keys_preview(keys_list, limit=12):
+        _keys = list(keys_list or [])
+        _n = len(_keys)
+        if _n == 0:
+            return ""
+        if _n <= limit:
+            return ", ".join(_keys)
+        return ", ".join(_keys[:limit]) + f"... (+{_n - limit} more)"
+
+    print("\n--- OPENING DAY READINESS ---")
+    print(f"  Missing pitchers: {_fmt_keys_preview(sorted(opening_missing_pitchers_by_name))}")
+    print(f"  Fallback pitchers: {_fmt_keys_preview(sorted(opening_fallback_pitchers_by_name))}")
+    print(f"  Games missing required inputs: {_fmt_keys_preview(sorted(set(opening_games_missing_required_inputs)))}")
+    print("----------------------------------")
 
     # Final run summary
     _manual = _load_manual_totals()
