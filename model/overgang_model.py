@@ -81,7 +81,11 @@ try:
                     "Referer": "https://www.fangraphs.com/",
                 }
                 res = requests.get(search_url, headers=headers, timeout=15)
+                print(f"[SCRAPE HTTP] status={res.status_code} | url={search_url}")
                 raw = res.json()
+                # When API returns error payload (e.g. dict with only Message), log it.
+                if isinstance(raw, dict) and "Message" in raw:
+                    print(f"[SCRAPE MESSAGE] {raw.get('Message')}")
                 # Compact debug: response shape (one line).
                 if isinstance(raw, dict):
                     print(f"[SCRAPE RESPONSE] type=dict | keys={list(raw.keys())}")
@@ -103,6 +107,27 @@ try:
                         results = results[0] if results else []
                 else:
                     results = []
+                # If find-pitcher returned error Message (no player list), try generic player search endpoint.
+                if not results and isinstance(raw, dict) and "Message" in raw:
+                    alt_url = f"https://www.fangraphs.com/api/players/search?q={q_encoded}"
+                    print(f"[SCRAPE FALLBACK] trying search endpoint: {alt_url}")
+                    res2 = requests.get(alt_url, headers=headers, timeout=15)
+                    print(f"[SCRAPE HTTP] status={res2.status_code} | url={alt_url}")
+                    raw2 = res2.json() if res2.ok else None
+                    if isinstance(raw2, dict) and "Message" in raw2:
+                        print(f"[SCRAPE MESSAGE] {raw2.get('Message')}")
+                    if isinstance(raw2, list) and len(raw2) > 0:
+                        # Filter to pitchers (position P) if possible; else take first match.
+                        pit = [r for r in raw2 if isinstance(r, dict) and str(r.get("position", "")).upper() == "P"]
+                        results = pit if pit else raw2
+                        raw = raw2
+                    elif isinstance(raw2, dict):
+                        results = (
+                            raw2.get("players") or raw2.get("player") or raw2.get("data") or raw2.get("results")
+                            or raw2.get("Players") or raw2.get("Player") or []
+                        )
+                        if isinstance(results, list) and results:
+                            raw = raw2
                 if not results:
                     print("❌ No FanGraphs match found.")
                     return None
@@ -111,8 +136,12 @@ try:
                 if not isinstance(best_match, dict):
                     print("❌ No FanGraphs match found.")
                     return None
-                player_id = best_match["playerid"]
-                full_name = best_match["playername"].strip().lower()
+                # find-pitcher uses playerid/playername; search endpoint may use id/name or camelCase.
+                player_id = best_match.get("playerid") or best_match.get("playerId") or best_match.get("id")
+                full_name = (best_match.get("playername") or best_match.get("playerName") or best_match.get("name") or "").strip().lower()
+                if not player_id:
+                    print("❌ No FanGraphs match found (no player id in response).")
+                    return None
 
                 stats_url = f"https://www.fangraphs.com/players/id/{player_id}/stats?position=P"
                 dfs = pd.read_html(stats_url)
