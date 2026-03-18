@@ -1010,6 +1010,8 @@ def run_predictions():
     live_total_unrealistic_total = 0
     live_total_missing_total_line = 0
     live_total_real_total_pass = 0
+    live_total_scrambled_book_keys = []
+    live_total_empty_book_keys = []
 
     for game in games:
         try:
@@ -1028,8 +1030,14 @@ def run_predictions():
             if odds_info.get("_match_found", False) and _src in {"Odds API", "8.5 fallback", "fallback (scrambled book)"}:
                 if odds_info.get("_blocker_scrambled_book"):
                     live_total_scrambled_book += 1
+                    k = odds_info.get("_lookup_key")
+                    if k:
+                        live_total_scrambled_book_keys.append(k)
                 elif odds_info.get("_blocker_empty_book"):
                     live_total_empty_book += 1
+                    k = odds_info.get("_lookup_key")
+                    if k:
+                        live_total_empty_book_keys.append(k)
                 elif odds_info.get("_blocker_unrealistic_total"):
                     live_total_unrealistic_total += 1
                 elif odds_info.get("_blocker_missing_total_line"):
@@ -1537,6 +1545,18 @@ def run_predictions():
     print(f"  missing_total_line: {live_total_missing_total_line}")
     print(f"  real_total_pass: {live_total_real_total_pass}")
     print("-----------------------------")
+
+    # LIVE TOTAL BLOCKER GAMES (compact listing)
+    def _fmt_keys(keys_list):
+        _n = len(keys_list)
+        if _n <= 8:
+            return ", ".join(keys_list)
+        return ", ".join(keys_list[:8]) + f"... (+{_n - 8} more)"
+
+    print("\n--- LIVE TOTAL BLOCKER GAMES ---")
+    print(f"  Empty book: {_fmt_keys(live_total_empty_book_keys)}")
+    print(f"  Scrambled book: {_fmt_keys(live_total_scrambled_book_keys)}")
+    print("-------------------------------")
 
     # Auto fire status (one line)
     _pf_mode = preflight.get("mode", "projection_only")
