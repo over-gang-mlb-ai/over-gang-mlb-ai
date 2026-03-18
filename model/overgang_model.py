@@ -24,6 +24,7 @@ import traceback
 from zoneinfo import ZoneInfo
 import json
 import requests
+from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from unidecode import unidecode
 from rapidfuzz import fuzz, process
@@ -68,15 +69,35 @@ try:
                 f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
             )
             try:
-                print(f"🌐 Scraping FanGraphs for: {name}")
-                search_url = f"https://www.fangraphs.com/api/players/find-pitcher?q={name}"
-                res = requests.get(search_url, timeout=15)
+                # Use normalized (ASCII) name for search: API often matches on lowercase/ASCII (e.g. "martin perez").
+                # URL-encode the query so spaces/special chars don't break the request.
+                query = (normalized or name or "").strip() or (name or "")
+                q_encoded = quote_plus(query)
+                search_url = f"https://www.fangraphs.com/api/players/find-pitcher?q={q_encoded}"
+                print(f"[SCRAPE SEARCH] url={search_url}")
+                # FanGraphs often returns empty/403 without browser-like headers.
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://www.fangraphs.com/",
+                }
+                res = requests.get(search_url, headers=headers, timeout=15)
                 raw = res.json()
-                # API may return a list of players or a dict (e.g. {"players": [...]}); [0] on a dict raises KeyError(0).
+                # Compact debug: response shape (one line).
+                if isinstance(raw, dict):
+                    print(f"[SCRAPE RESPONSE] type=dict | keys={list(raw.keys())}")
+                elif isinstance(raw, list):
+                    print(f"[SCRAPE RESPONSE] type=list | len={len(raw)}" + (f" | first_keys={list(raw[0].keys())}" if raw and isinstance(raw[0], dict) else ""))
+                else:
+                    print(f"[SCRAPE RESPONSE] type={type(raw).__name__}")
+                # API may return a list of players or a dict; [0] on a dict raises KeyError(0).
                 if isinstance(raw, list):
                     results = raw
                 elif isinstance(raw, dict):
-                    results = raw.get("players") or raw.get("data") or raw.get("results") or raw.get("Players") or []
+                    results = (
+                        raw.get("players") or raw.get("player") or raw.get("data") or raw.get("results")
+                        or raw.get("Players") or raw.get("Player") or raw.get("playerList") or raw.get("PlayerList")
+                        or []
+                    )
                     if not isinstance(results, list):
                         results = [v for v in raw.values() if isinstance(v, list) and len(v) > 0]
                         results = results[0] if results else []
