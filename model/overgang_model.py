@@ -1485,6 +1485,33 @@ def run_predictions():
     else:
         print("[AUTO FIRE STATUS] NOT READY")
 
+    # Full auto check (one line)
+    if _pf_mode == "full_auto":
+        print("[FULL AUTO CHECK] All requirements satisfied")
+    else:
+        _fa_missing = []
+        _g_n = len(games) if games else 0
+        _o_n = len(odds_map) if (odds_map is not None and isinstance(odds_map, dict)) else 0
+        if stats_df is None or (isinstance(stats_df, pd.DataFrame) and stats_df.empty):
+            _fa_missing.append("pitcher data missing")
+        if _g_n == 0:
+            _fa_missing.append("no games")
+        _bp = getattr(BullpenManager, "BULLPEN_CSV", os.path.join("data", "bullpen_stats.csv"))
+        try:
+            _bp_ok = os.path.exists(_bp) and os.path.getsize(_bp) > 0
+            _bp_n = len(pd.read_csv(_bp)) if _bp_ok else 0
+        except Exception:
+            _bp_ok, _bp_n = False, 0
+        if not _bp_ok or _bp_n == 0:
+            _fa_missing.append("bullpen missing")
+        if not public_betting_data or not isinstance(public_betting_data, dict) or len(public_betting_data) == 0:
+            _fa_missing.append("public betting missing")
+        if _g_n > 0 and (_o_n == 0 or _o_n < max(1, _g_n - 1)):
+            _fa_missing.append("odds coverage incomplete")
+        if api_real_n == 0:
+            _fa_missing.append("no API/market real totals")
+        print("[FULL AUTO CHECK]", "; ".join(_fa_missing) if _fa_missing else "see preflight mode")
+
     # Final run summary
     _manual = _load_manual_totals()
     print("\n--- RUN SUMMARY ---")
