@@ -1339,113 +1339,64 @@ def run_predictions():
                 pass
         return True
 
-    def _runtime_pitcher_path(pitcher_name_used: str, resolved_obj):
+    def _runtime_pitcher_path(pitcher_name_used: str, resolved_obj, alias_used: bool = False):
+        """
+        Runtime classification of the *actual* resolution lane, based on:
+        - whether alias mapping triggered for this specific call (alias_used flag)
+        - which lane would be chosen by the same DataManager.match_pitcher_row decision order
+        - only using returned-object metadata to detect scrape_success (scraped dict includes 'Name')
+        """
         clean = DataManager.normalize_name(pitcher_name_used or "")
         resolved_dict = _to_dict(resolved_obj)
 
-        # League-average sentinel shortcut
+        # League-average sentinel shortcut (direct support in DataManager)
         if clean in _league_avg_clean:
             return "league_average"
-
-        # League-average fallback values from DataManager
-        league_fallback = {"xERA": 4.50, "WHIP": 1.30, "LowIP": True}
-        matches_league_fallback = (
-            bool(resolved_dict)
-            and _num_close(resolved_dict.get("xERA"), league_fallback["xERA"], tol=0.01)
-            and _num_close(resolved_dict.get("WHIP"), league_fallback["WHIP"], tol=0.01)
-            and bool(resolved_dict.get("LowIP", False)) is True
-        )
 
         stats_ok = stats_df is not None and isinstance(stats_df, pd.DataFrame) and not stats_df.empty
         manual_ok = manual_fallback_df is not None and isinstance(manual_fallback_df, pd.DataFrame) and not manual_fallback_df.empty
 
         pitcher_key = str(pitcher_name_used or "").strip().lower()
-        exact_possible = stats_ok and clean in stats_df.index
-
         alias_official = _alias_reverse_runtime.get(pitcher_key)
         alias_clean = DataManager.normalize_name(alias_official) if alias_official else ""
-        alias_possible = stats_ok and bool(alias_clean) and alias_clean in stats_df.index
 
-        # Manual fallback possible check (matches DataManager keying)
+        # DataManager applies alias mapping by swapping clean_name before direct/fuzzy matches.
+        effective_clean = alias_clean if (alias_used and alias_clean) else clean
+
+        exact_possible = stats_ok and effective_clean in stats_df.index
+        alias_possible = bool(alias_used and alias_clean) and stats_ok and alias_clean in stats_df.index
+
+        # Manual fallback key is based on the original input name (DataManager uses pitcher_name.lower()).
         manual_possible = manual_ok and pitcher_key in manual_fallback_df.index
 
-        # Fuzzy candidate possible check (same last-name guard)
+        # Fuzzy match attempt outcome prediction (same last-name guard).
         fuzzy_possible = False
-        if stats_ok and not (exact_possible or alias_possible):
+        if stats_ok and not exact_possible:
             try:
                 choices = stats_df.index.tolist()
-                res = process.extractOne(clean, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+                res = process.extractOne(effective_clean, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
                 if res:
                     best_match, score = res[0], res[1]
-                    if clean.split()[-1] == best_match.split()[-1]:
+                    if effective_clean.split()[-1] == best_match.split()[-1]:
                         fuzzy_possible = True
             except Exception:
                 fuzzy_possible = False
 
-        # If we got no resolved stats object, infer the most likely stage outcome from possibilities.
-        if not resolved_dict:
-            if exact_possible:
-                return "exact"
-            if alias_possible:
-                return "alias"
-            if manual_possible:
-                return "manual_fallback"
-            if fuzzy_possible:
-                return "fuzzy"
-            return "scrape_fail"
+        # Now decide the lane:
+        if alias_possible:
+            return "alias"
+        if exact_possible:
+            return "exact"
+        if manual_possible:
+            return "manual_fallback"
+        if fuzzy_possible:
+            return "fuzzy"
 
-        # If resolved equals exact/alias/manual/fuzzy candidates, label accordingly.
-        if exact_possible and resolved_dict:
-            try:
-                cand = stats_df.loc[clean]
-                if isinstance(cand, pd.DataFrame):
-                    cand = cand.iloc[0]
-                if _stats_equal(cand, resolved_obj):
-                    return "exact"
-            except Exception:
-                pass
-
-        if alias_possible and resolved_dict:
-            try:
-                cand = stats_df.loc[alias_clean]
-                if isinstance(cand, pd.DataFrame):
-                    cand = cand.iloc[0]
-                if _stats_equal(cand, resolved_obj):
-                    return "alias"
-            except Exception:
-                pass
-
-        if manual_possible and resolved_dict:
-            try:
-                cand = manual_fallback_df.loc[pitcher_key]
-                if isinstance(cand, pd.Series):
-                    cand = cand.to_dict()
-                if _stats_equal(cand, resolved_obj):
-                    return "manual_fallback"
-            except Exception:
-                pass
-
-        if fuzzy_possible and resolved_dict and not exact_possible and not alias_possible:
-            try:
-                choices = stats_df.index.tolist()
-                res = process.extractOne(clean, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
-                if res:
-                    best_match, score = res[0], res[1]
-                    if clean.split()[-1] == best_match.split()[-1]:
-                        cand = stats_df.loc[best_match]
-                        if isinstance(cand, pd.DataFrame):
-                            cand = cand.iloc[0]
-                        if _stats_equal(cand, resolved_obj):
-                            return "fuzzy"
-            except Exception:
-                pass
-
-        # If none of the known candidate lanes match, infer scrape outcome
-        if matches_league_fallback:
-            # If we got here, this implies scrape was reached and failed (no candidate matched).
-            return "scrape_fail" if (not exact_possible and not alias_possible and not manual_possible and not fuzzy_possible) else "league_average"
-
-        return "scrape_success"
+        # Scrape stage (DataManager attempts scraping right before final league-average fallback).
+        # scrape_success returns a dict containing 'Name'; scrape_fail returns the league-average fallback dict.
+        if isinstance(resolved_dict, dict) and resolved_dict.get("Name"):
+            return "scrape_success"
+        return "scrape_fail"
 
     def _rt_inc(path: str):
         nonlocal rt_exact, rt_alias, rt_manual_fallback, rt_fuzzy, rt_scrape_success, rt_scrape_fail, rt_league_average
@@ -1570,8 +1521,13 @@ def run_predictions():
             home_norm_rt = normalize_team_name(home_team)
             game_key_rt = f"{away_norm_rt} @ {home_norm_rt}"
 
+            _alias_len_before_away = len(alias_log)
             away_stats = DataManager.match_pitcher_row(stats_df, away_pitcher, alias_log=alias_log)
+            away_alias_used = len(alias_log) > _alias_len_before_away
+
+            _alias_len_before_home = len(alias_log)
             home_stats = DataManager.match_pitcher_row(stats_df, home_pitcher, alias_log=alias_log)
+            home_alias_used = len(alias_log) > _alias_len_before_home
 
             # 🧠 Log fallback usage if LowIP
             for name, stats in [(away_pitcher, away_stats), (home_pitcher, home_stats)]:
@@ -1579,7 +1535,7 @@ def run_predictions():
                     print(f"⚠️ Using fallback stats for: {name}")
 
             # Runtime pitcher-resolution outcome logging (logging only)
-            away_path = _runtime_pitcher_path(away_pitcher, away_stats)
+            away_path = _runtime_pitcher_path(away_pitcher, away_stats, alias_used=away_alias_used)
             away_low = _low_ip_from_stats(away_stats)
             _rt_inc(away_path)
             print(
@@ -1588,7 +1544,7 @@ def run_predictions():
                 f"fallback_used={_fallback_used_from_path(away_path)} | low_ip={away_low}"
             )
 
-            home_path = _runtime_pitcher_path(home_pitcher, home_stats)
+            home_path = _runtime_pitcher_path(home_pitcher, home_stats, alias_used=home_alias_used)
             home_low = _low_ip_from_stats(home_stats)
             _rt_inc(home_path)
             print(
