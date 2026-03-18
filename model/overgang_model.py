@@ -773,6 +773,78 @@ def safe_lineup_impacts(lineup_obj, away_lineup, home_lineup, away_pitcher_hand,
     return away_impact, home_impact, away_scope, home_scope
 
 # ================================
+# 🔍 PREFLIGHT (validation scaffold)
+# ================================
+def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
+    """
+    Inspect already-loaded data and print a preflight summary.
+    Returns dict: ok, mode, warnings, issues.
+    Does not block execution.
+    """
+    warnings = []
+    issues = []
+    try:
+        pitcher_ok = stats_df is not None and not (isinstance(stats_df, pd.DataFrame) and stats_df.empty)
+        pitcher_status = "ok" if pitcher_ok else "missing or empty"
+        pitcher_n = len(stats_df) if isinstance(stats_df, pd.DataFrame) else 0
+
+        batter_ok = BATTER_DF is not None and not (isinstance(BATTER_DF, pd.DataFrame) and BATTER_DF.empty)
+        batter_status = "ok" if batter_ok else "missing or empty"
+        batter_n = len(BATTER_DF) if isinstance(BATTER_DF, pd.DataFrame) else 0
+
+        bullpen_path = getattr(BullpenManager, "BULLPEN_CSV", os.path.join("data", "bullpen_stats.csv"))
+        bullpen_exists = os.path.exists(bullpen_path) and os.path.getsize(bullpen_path) > 0
+        try:
+            bf = pd.read_csv(bullpen_path) if bullpen_exists else pd.DataFrame()
+            bullpen_n = len(bf) if not bf.empty else 0
+        except Exception:
+            bullpen_n = 0
+        bullpen_status = "ok" if (bullpen_exists and bullpen_n > 0) else "missing or empty"
+
+        games_n = len(games) if games is not None else 0
+        games_status = f"{games_n} games" if games_n else "no games"
+
+        public_ok = public_betting_data is not None and isinstance(public_betting_data, dict) and len(public_betting_data) > 0
+        public_status = "loaded" if public_ok else "empty or missing"
+        public_n = len(public_betting_data) if isinstance(public_betting_data, dict) else 0
+
+        odds_ok = odds_map is not None and isinstance(odds_map, dict) and len(odds_map) > 0
+        odds_status = "placeholder" if not odds_ok else f"{len(odds_map)} games"
+        odds_n = len(odds_map) if isinstance(odds_map, dict) else 0
+
+        proceed_mode = "placeholder"
+
+        if not pitcher_ok:
+            issues.append("pitcher data missing or empty")
+        if not batter_ok:
+            warnings.append("batter data missing or empty")
+        if not bullpen_exists or bullpen_n == 0:
+            warnings.append("bullpen data missing or empty")
+        if games_n == 0:
+            issues.append("no games for slate")
+        if not public_ok:
+            warnings.append("public betting empty or missing")
+
+        ok = len(issues) == 0
+        mode = "run" if ok else proceed_mode
+
+        print("\n--- PREFLIGHT ---")
+        print(f"  Pitcher data:   {pitcher_status} (n={pitcher_n})")
+        print(f"  Batter data:   {batter_status} (n={batter_n})")
+        print(f"  Bullpen data:  {bullpen_status} (n={bullpen_n})")
+        print(f"  Games found:   {games_status}")
+        print(f"  Public betting: {public_status} (n={public_n})")
+        print(f"  Odds status:   {odds_status} (n={odds_n})")
+        print(f"  Proceed mode:  {proceed_mode}")
+        print("-----------------\n")
+
+        return {"ok": ok, "mode": mode, "warnings": warnings, "issues": issues}
+    except Exception as e:
+        warnings.append(f"preflight error: {e}")
+        return {"ok": True, "mode": "run", "warnings": warnings, "issues": issues}
+
+
+# ================================
 # 🔍 CORE LOGIC
 # ================================
 def run_predictions():
@@ -839,6 +911,8 @@ def run_predictions():
         if not games:
             print("⚠️ No games scheduled today")
             return
+
+        run_preflight_checks(stats_df, games, public_betting_data, odds_map)
 
     except Exception as e:
         print(f"❌ Schedule API error: {e}")
