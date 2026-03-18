@@ -1458,6 +1458,20 @@ def run_predictions():
     print(f"  Fallback pitcher stats used: {fallback_pitcher}")
     print("------------------------")
 
+    # Market path summary
+    def _is_manual_trusted(r):
+        src = str(r.get("Market_Source") or "")
+        book = str(r.get("Odds_Book") or "")
+        return src == "manual_totals_csv" or book == "Manual"
+    manual_trusted_n = sum(1 for r in results if _is_manual_trusted(r))
+    api_real_n = sum(1 for r in results if r.get("Total_Is_Real") and not _is_manual_trusted(r))
+    fallback_n = sum(1 for r in results if not r.get("Total_Is_Real"))
+    print("\n--- MARKET PATH ---")
+    print(f"  Manual trusted totals: {manual_trusted_n}")
+    print(f"  API/market real totals: {api_real_n}")
+    print(f"  Fallback totals: {fallback_n}")
+    print("-------------------")
+
     # Final run summary
     _manual = _load_manual_totals()
     print("\n--- RUN SUMMARY ---")
