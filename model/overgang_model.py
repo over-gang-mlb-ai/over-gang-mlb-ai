@@ -71,12 +71,25 @@ try:
                 print(f"🌐 Scraping FanGraphs for: {name}")
                 search_url = f"https://www.fangraphs.com/api/players/find-pitcher?q={name}"
                 res = requests.get(search_url, timeout=15)
-                results = res.json()
+                raw = res.json()
+                # API may return a list of players or a dict (e.g. {"players": [...]}); [0] on a dict raises KeyError(0).
+                if isinstance(raw, list):
+                    results = raw
+                elif isinstance(raw, dict):
+                    results = raw.get("players") or raw.get("data") or raw.get("results") or raw.get("Players") or []
+                    if not isinstance(results, list):
+                        results = [v for v in raw.values() if isinstance(v, list) and len(v) > 0]
+                        results = results[0] if results else []
+                else:
+                    results = []
                 if not results:
                     print("❌ No FanGraphs match found.")
                     return None
 
                 best_match = results[0]
+                if not isinstance(best_match, dict):
+                    print("❌ No FanGraphs match found.")
+                    return None
                 player_id = best_match["playerid"]
                 full_name = best_match["playername"].strip().lower()
 
