@@ -949,6 +949,9 @@ def run_predictions():
         elif mode == "stop":
             print("[PREFLIGHT] Mode = STOP | critical inputs missing")
         if mode == "stop":
+            issues = preflight.get("issues", [])
+            if issues:
+                print("[PREFLIGHT] Stop reason:", "; ".join(issues))
             print("[PREFLIGHT] STOP engaged | exiting before game processing")
             return
 
