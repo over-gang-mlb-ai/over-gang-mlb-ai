@@ -948,6 +948,9 @@ def run_predictions():
             print("[PREFLIGHT] Mode = PROJECTION ONLY | fallback environment, no trusted market path")
         elif mode == "stop":
             print("[PREFLIGHT] Mode = STOP | critical inputs missing")
+        if mode == "stop":
+            print("[PREFLIGHT] STOP engaged | exiting before game processing")
+            return
 
     except Exception as e:
         print(f"❌ Schedule API error: {e}")
