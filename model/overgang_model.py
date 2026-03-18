@@ -780,6 +780,7 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
     Inspect already-loaded data and print a preflight summary.
     Returns dict: ok, mode, warnings, issues.
     Does not block execution.
+    Modes: full_auto | manual_test | projection_only | stop
     """
     warnings = []
     issues = []
@@ -799,7 +800,8 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
             bullpen_n = len(bf) if not bf.empty else 0
         except Exception:
             bullpen_n = 0
-        bullpen_status = "ok" if (bullpen_exists and bullpen_n > 0) else "missing or empty"
+        bullpen_ok = bullpen_exists and bullpen_n > 0
+        bullpen_status = "ok" if bullpen_ok else "missing or empty"
 
         games_n = len(games) if games is not None else 0
         games_status = f"{games_n} games" if games_n else "no games"
@@ -808,25 +810,48 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         public_status = "loaded" if public_ok else "empty or missing"
         public_n = len(public_betting_data) if isinstance(public_betting_data, dict) else 0
 
-        odds_ok = odds_map is not None and isinstance(odds_map, dict) and len(odds_map) > 0
-        odds_status = "placeholder" if not odds_ok else f"{len(odds_map)} games"
-        odds_n = len(odds_map) if isinstance(odds_map, dict) else 0
+        odds_n = len(odds_map) if (odds_map is not None and isinstance(odds_map, dict)) else 0
+        odds_ok = odds_n > 0
+        odds_coverage_ok = games_n > 0 and odds_n >= max(1, games_n - 1)
+        odds_status = f"{odds_n} games" if odds_ok else "empty or missing"
 
-        proceed_mode = "placeholder"
+        manual_totals = _load_manual_totals()
+        manual_loaded = isinstance(manual_totals, dict) and len(manual_totals) >= 1
 
         if not pitcher_ok:
             issues.append("pitcher data missing or empty")
         if not batter_ok:
             warnings.append("batter data missing or empty")
-        if not bullpen_exists or bullpen_n == 0:
+        if not bullpen_ok:
             warnings.append("bullpen data missing or empty")
         if games_n == 0:
             issues.append("no games for slate")
         if not public_ok:
             warnings.append("public betting empty or missing")
 
-        ok = len(issues) == 0
-        mode = "run" if ok else proceed_mode
+        if not pitcher_ok or games_n == 0:
+            mode = "stop"
+            if not pitcher_ok:
+                issues.append("run mode stop: missing pitcher data")
+            if games_n == 0:
+                issues.append("run mode stop: no games for slate")
+        elif (
+            pitcher_ok
+            and bullpen_ok
+            and public_ok
+            and odds_ok
+            and odds_coverage_ok
+        ):
+            mode = "full_auto"
+            warnings.append("all systems go; full auto mode")
+        elif pitcher_ok and bullpen_ok and manual_loaded and (not public_ok or not odds_coverage_ok):
+            mode = "manual_test"
+            warnings.append("manual_totals loaded; public or odds partial — manual_test mode")
+        else:
+            mode = "projection_only"
+            warnings.append("odds weak/fallback and no trusted manual totals — projection_only mode")
+
+        ok = mode != "stop"
 
         print("\n--- PREFLIGHT ---")
         print(f"  Pitcher data:   {pitcher_status} (n={pitcher_n})")
@@ -835,13 +860,14 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         print(f"  Games found:   {games_status}")
         print(f"  Public betting: {public_status} (n={public_n})")
         print(f"  Odds status:   {odds_status} (n={odds_n})")
-        print(f"  Proceed mode:  {proceed_mode}")
+        print(f"  Manual totals: {'loaded' if manual_loaded else 'none'} ({len(manual_totals) if isinstance(manual_totals, dict) else 0} rows)")
+        print(f"  Proceed mode:  {mode}")
         print("-----------------\n")
 
         return {"ok": ok, "mode": mode, "warnings": warnings, "issues": issues}
     except Exception as e:
         warnings.append(f"preflight error: {e}")
-        return {"ok": True, "mode": "run", "warnings": warnings, "issues": issues}
+        return {"ok": True, "mode": "projection_only", "warnings": warnings, "issues": issues}
 
 
 # ================================
