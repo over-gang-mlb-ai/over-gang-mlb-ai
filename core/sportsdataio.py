@@ -279,6 +279,27 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
         under_payout = row.get("UnderPayout")
         home_ml = row.get("HomeMoneyLine")
         away_ml = row.get("AwayMoneyLine")
+        sportsbook_id = (
+            row.get("SportsbookId")
+            or row.get("SportsbookID")
+            or row.get("Sportsbookid")
+            or row.get("Sportsbook_id")
+            or ""
+        )
+        sportsbook_url = (
+            row.get("SportsbookURL")
+            or row.get("SportsbookUrl")
+            or row.get("Sportsbookurl")
+            or row.get("Sportsbook_url")
+            or ""
+        )
+        odd_type = (
+            row.get("OddType")
+            or row.get("OddTypeName")
+            or row.get("Odd_Type")
+            or row.get("odd_type")
+            or ""
+        )
 
         try:
             total_line = float(over_under) if over_under is not None else DEFAULT_TOTAL
@@ -305,7 +326,16 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
             "ml_home": int(home_ml) if home_ml is not None else None,
             "ml_away": int(away_ml) if away_ml is not None else None,
             "book": book_name or "",
+            # Preserve sportsbook identity metadata for debugging / future trust rules.
+            "sportsbook_id": str(sportsbook_id) if sportsbook_id is not None else "",
+            "sportsbook_url": str(sportsbook_url) if sportsbook_url is not None else "",
+            "odd_type": str(odd_type) if odd_type is not None else "",
         }
+        print(
+            "[SDIO NORMALIZED] "
+            f"key={game_key} | total_line={result[game_key].get('total_line')} | book={repr(result[game_key].get('book'))} | "
+            f"sportsbook_id={repr(result[game_key].get('sportsbook_id'))} | odd_type={repr(result[game_key].get('odd_type'))}"
+        )
 
     print(f"[SportsDataIO] Number of normalized games in final odds map: {len(result)}")
     sample_keys = list(result.keys())[:3]
@@ -362,6 +392,9 @@ def get_game_odds(away_team, home_team, odds_map=None, target_date_yyyy_mm_dd=No
             "ml_home": row.get("ml_home"),
             "ml_away": row.get("ml_away"),
             "book": row.get("book") or "",
+            "sportsbook_id": row.get("sportsbook_id") or "",
+            "sportsbook_url": row.get("sportsbook_url") or "",
+            "odd_type": row.get("odd_type") or "",
         }
     return {
         "total_line": DEFAULT_TOTAL,
@@ -370,4 +403,7 @@ def get_game_odds(away_team, home_team, odds_map=None, target_date_yyyy_mm_dd=No
         "ml_home": None,
         "ml_away": None,
         "book": "",
+        "sportsbook_id": "",
+        "sportsbook_url": "",
+        "odd_type": "",
     }
