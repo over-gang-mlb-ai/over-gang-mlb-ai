@@ -359,6 +359,7 @@ class VegasLines:
         if odds_map is not None:
             row = get_game_odds(away_team, home_team, odds_map)
             raw_line = row.get("total_line")
+            raw_line_missing = raw_line is None or raw_line == ""
             if raw_line is None or raw_line == "":
                 line = 8.5
             else:
@@ -387,6 +388,12 @@ class VegasLines:
             info["_match_found"] = match_found
             info["_has_real_total"] = bool(has_real_total)
             if match_found:
+                # Lightweight reason flags for LIVE TOTAL BLOCKERS logging (no classification behavior change)
+                info["_blocker_scrambled_book"] = bool(book_scrambled)
+                info["_blocker_empty_book"] = bool(book_empty and not book_scrambled)
+                info["_blocker_missing_total_line"] = bool(raw_line_missing and (not book_empty) and (not book_scrambled))
+                info["_blocker_unrealistic_total"] = bool((not raw_line_missing) and (not line_realistic) and (not book_empty) and (not book_scrambled))
+                info["_blocker_real_total_pass"] = bool(has_real_total)
                 print(
                     "[LIVE TOTAL CHECK] "
                     f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
@@ -997,6 +1004,12 @@ def run_predictions():
     alerts = []
     unmatched_pitchers = set()
     alias_log = []
+    # LIVE TOTAL BLOCKERS tracking (logging only)
+    live_total_scrambled_book = 0
+    live_total_empty_book = 0
+    live_total_unrealistic_total = 0
+    live_total_missing_total_line = 0
+    live_total_real_total_pass = 0
 
     for game in games:
         try:
@@ -1009,6 +1022,20 @@ def run_predictions():
             print(f"[ODDS]   odds_info: total_line={odds_info.get('total_line')}, over_juice={odds_info.get('over_juice')}, under_juice={odds_info.get('under_juice')}, book={repr(odds_info.get('book'))}")
             print(f"[ODDS]   Source: {odds_info.get('_source', '?')}")
             print(f"[ODDS]   Total status: {'REAL sportsbook total' if odds_info.get('_has_real_total', False) else 'FALLBACK total (missing market totals)'}")
+
+            # LIVE TOTAL BLOCKERS tracking: only count odds_map/API rows (exclude manual_totals_csv + no-match default fallback)
+            _src = str(odds_info.get("_source", ""))
+            if odds_info.get("_match_found", False) and _src in {"Odds API", "8.5 fallback", "fallback (scrambled book)"}:
+                if odds_info.get("_blocker_scrambled_book"):
+                    live_total_scrambled_book += 1
+                elif odds_info.get("_blocker_empty_book"):
+                    live_total_empty_book += 1
+                elif odds_info.get("_blocker_unrealistic_total"):
+                    live_total_unrealistic_total += 1
+                elif odds_info.get("_blocker_missing_total_line"):
+                    live_total_missing_total_line += 1
+                elif odds_info.get("_blocker_real_total_pass"):
+                    live_total_real_total_pass += 1
 
             # --- starters must be defined BEFORE we score lineups
             away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')
@@ -1501,6 +1528,15 @@ def run_predictions():
     print(f"  API/market real totals: {api_real_n}")
     print(f"  Fallback totals: {fallback_n}")
     print("-------------------")
+
+    # LIVE TOTAL BLOCKERS summary
+    print("\n--- LIVE TOTAL BLOCKERS ---")
+    print(f"  scrambled_book: {live_total_scrambled_book}")
+    print(f"  empty_book: {live_total_empty_book}")
+    print(f"  unrealistic_total: {live_total_unrealistic_total}")
+    print(f"  missing_total_line: {live_total_missing_total_line}")
+    print(f"  real_total_pass: {live_total_real_total_pass}")
+    print("-----------------------------")
 
     # Auto fire status (one line)
     _pf_mode = preflight.get("mode", "projection_only")
