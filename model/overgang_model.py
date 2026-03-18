@@ -938,7 +938,16 @@ def run_predictions():
             print("⚠️ No games scheduled today")
             return
 
-        run_preflight_checks(stats_df, games, public_betting_data, odds_map)
+        preflight = run_preflight_checks(stats_df, games, public_betting_data, odds_map)
+        mode = preflight.get("mode", "projection_only")
+        if mode == "full_auto":
+            print("[PREFLIGHT] Mode = FULL AUTO | live market conditions look ready")
+        elif mode == "manual_test":
+            print("[PREFLIGHT] Mode = MANUAL TEST | trusted manual totals active; public/odds incomplete")
+        elif mode == "projection_only":
+            print("[PREFLIGHT] Mode = PROJECTION ONLY | fallback environment, no trusted market path")
+        elif mode == "stop":
+            print("[PREFLIGHT] Mode = STOP | critical inputs missing")
 
     except Exception as e:
         print(f"❌ Schedule API error: {e}")
