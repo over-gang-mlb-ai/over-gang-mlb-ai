@@ -932,25 +932,78 @@ def run_predictions():
         public_betting_data = load_public_betting_data()
         target_date_str = today_mt.strftime("%Y-%m-%d")
         print("[ODDS] Trying SportsDataIO first...")
-        odds_map = fetch_mlb_odds_by_date(target_date_str)
-        print(f"[ODDS] SportsDataIO odds_map size: {len(odds_map)}")
+        sdio_map = fetch_mlb_odds_by_date(target_date_str)
+        print(f"[ODDS] SportsDataIO odds_map size: {len(sdio_map)}")
         odds_source = "none"
-        if odds_map:
+        odds_api_map = {}
+        if sdio_map:
             odds_source = "SportsDataIO"
-            print("[ODDS] Backfilling missing games from Odds API...")
-            odds_api_map = fetch_mlb_odds(target_date=target_date_str)
-            backfill_count = 0
-            for k, v in (odds_api_map or {}).items():
-                if k not in odds_map:
-                    odds_map[k] = v
-                    backfill_count += 1
-            print(f"[ODDS] Odds API backfill size: {backfill_count}")
-            print(f"[ODDS] Combined odds_map size after backfill: {len(odds_map)}")
+            print("[ODDS] Fetching Odds API for trusted-total lane...")
+            odds_api_map = fetch_mlb_odds(target_date=target_date_str) or {}
         else:
             print("[ODDS] Falling back to Odds API...")
-            odds_map = fetch_mlb_odds(target_date=target_date_str)
-            if odds_map:
+            odds_api_map = fetch_mlb_odds(target_date=target_date_str) or {}
+            if odds_api_map:
                 odds_source = "Odds API"
+
+        def _is_trusted_total_row(row):
+            if not isinstance(row, dict):
+                return False
+            raw = row.get("total_line")
+            try:
+                total = float(raw)
+            except (TypeError, ValueError):
+                return False
+            if total < 5 or total > 15:
+                return False
+            book = str(row.get("book") or "").strip()
+            if not book:
+                return False
+            if book.lower().strip() == "scrambled":
+                return False
+            return True
+
+        # Trusted real-total lane (Odds API preferred; SportsDataIO only if truly trusted)
+        trusted_total_source_map = {}
+        for k, v in (odds_api_map or {}).items():
+            if _is_trusted_total_row(v):
+                trusted_total_source_map[k] = dict(v)
+                trusted_total_source_map[k]["_trusted_source"] = "Odds API"
+
+        for k, v in (sdio_map or {}).items():
+            if k in trusted_total_source_map:
+                continue
+            if _is_trusted_total_row(v):
+                trusted_total_source_map[k] = dict(v)
+                trusted_total_source_map[k]["_trusted_source"] = "SportsDataIO"
+
+        # SportsDataIO fallback metadata lane (keep ml/juice metadata; remove weak totals)
+        odds_map = dict(sdio_map or {})
+        for k in list(odds_map.keys()):
+            if k not in trusted_total_source_map:
+                row = dict(odds_map.get(k, {}))
+                row["total_line"] = None
+                row["book"] = ""
+                odds_map[k] = row
+
+        # Overlay trusted totals on top of fallback metadata
+        for k, v in trusted_total_source_map.items():
+            base = dict(odds_map.get(k, {}))
+            base.update({
+                "total_line": v.get("total_line"),
+                "over_juice": v.get("over_juice"),
+                "under_juice": v.get("under_juice"),
+                "book": v.get("book") or "",
+                "sportsbook_id": v.get("sportsbook_id", ""),
+                "sportsbook_url": v.get("sportsbook_url", ""),
+                "odd_type": v.get("odd_type", ""),
+            })
+            if base.get("ml_home") is None and v.get("ml_home") is not None:
+                base["ml_home"] = v.get("ml_home")
+            if base.get("ml_away") is None and v.get("ml_away") is not None:
+                base["ml_away"] = v.get("ml_away")
+            odds_map[k] = base
+
         print(f"[ODDS] Final odds source: {odds_source}")
 
         # Keep only games that are actually TODAY in MT
@@ -965,6 +1018,28 @@ def run_predictions():
         print(f"✅ Found {len(games)} games for {today_mt} MT")
         for g in games:
             print("•", f"{g['away_name']} @ {g['home_name']}")
+
+        # Trusted total lane visibility (per slate game)
+        for g in games:
+            away_norm = normalize_team_name(safe_get(g, "away_name", ""))
+            home_norm = normalize_team_name(safe_get(g, "home_name", ""))
+            game_key = f"{away_norm} @ {home_norm}"
+            trow = trusted_total_source_map.get(game_key)
+            if trow is not None and trow != {}:
+                t_source = trow.get("_trusted_source", "trusted")
+                t_total = trow.get("total_line")
+                t_book = trow.get("book") or ""
+                t_ok = True
+            else:
+                t_source = "none"
+                t_total = None
+                t_book = ""
+                t_ok = False
+            # One compact line per slate game
+            print(
+                "[TRUSTED TOTAL SOURCE] "
+                f"key={game_key} | source={t_source} | total={t_total} | book={t_book} | trusted={t_ok}"
+            )
 
         # Manual totals freshness check (slate matching only; logging visibility)
         manual_totals = _load_manual_totals()
