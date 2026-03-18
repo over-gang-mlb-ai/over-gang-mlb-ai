@@ -948,6 +948,10 @@ def run_predictions():
             print("[PREFLIGHT] Mode = PROJECTION ONLY | fallback environment, no trusted market path")
         elif mode == "stop":
             print("[PREFLIGHT] Mode = STOP | critical inputs missing")
+        if mode != "stop":
+            warnings = preflight.get("warnings", [])
+            if warnings:
+                print("[PREFLIGHT] Warnings:", "; ".join(warnings))
         if mode == "stop":
             issues = preflight.get("issues", [])
             if issues:
