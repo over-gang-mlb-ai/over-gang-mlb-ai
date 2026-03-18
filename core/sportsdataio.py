@@ -259,65 +259,110 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
     # For each game, choose single book by priority.
     result = {}
     for game_key, book_rows in by_game.items():
-        best_row = None
-        best_rank = len(BOOK_PRIORITY) + 1
+        # Two independent "best" selections:
+        # - best_row_ml: best row for moneyline/spread metadata (by priority)
+        # - best_row_total: best row for trusted total candidates only
+        best_row_ml = None
+        best_rank_ml = len(BOOK_PRIORITY) + 1
+        best_row_total = None
+        best_rank_total = len(BOOK_PRIORITY) + 1
+
         for book_key, book_name, row in book_rows:
             try:
                 rank = BOOK_PRIORITY.index(book_key)
             except ValueError:
                 rank = len(BOOK_PRIORITY)
-            if rank < best_rank:
-                best_rank = rank
-                best_row = (book_name, row)
 
-        if best_row is None:
-            best_row = (book_rows[0][1], book_rows[0][2])
+            # Moneyline metadata fallback selection
+            if rank < best_rank_ml:
+                best_rank_ml = rank
+                best_row_ml = (book_name, row)
 
-        book_name, row = best_row
-        over_under = row.get("OverUnder")
-        over_payout = row.get("OverPayout")
-        under_payout = row.get("UnderPayout")
-        home_ml = row.get("HomeMoneyLine")
-        away_ml = row.get("AwayMoneyLine")
-        sportsbook_id = (
-            row.get("SportsbookId")
-            or row.get("SportsbookID")
-            or row.get("Sportsbookid")
-            or row.get("Sportsbook_id")
-            or ""
-        )
-        sportsbook_url = (
-            row.get("SportsbookURL")
-            or row.get("SportsbookUrl")
-            or row.get("Sportsbookurl")
-            or row.get("Sportsbook_url")
-            or ""
-        )
-        odd_type = (
-            row.get("OddType")
-            or row.get("OddTypeName")
-            or row.get("Odd_Type")
-            or row.get("odd_type")
-            or ""
-        )
+            # Trusted total-row selection
+            _book = (book_name or "").strip()
+            if not _book:
+                continue
+            if _book.lower() == "scrambled":
+                continue
 
-        try:
-            total_line = float(over_under) if over_under is not None else DEFAULT_TOTAL
-        except (TypeError, ValueError):
-            total_line = DEFAULT_TOTAL
-        try:
-            over_juice = int(over_payout) if over_payout is not None else DEFAULT_JUICE
-        except (TypeError, ValueError):
-            over_juice = DEFAULT_JUICE
-        try:
-            under_juice = int(under_payout) if under_payout is not None else DEFAULT_JUICE
-        except (TypeError, ValueError):
-            under_juice = DEFAULT_JUICE
+            over_under = row.get("OverUnder")
+            try:
+                total_candidate = float(over_under)
+            except (TypeError, ValueError):
+                continue
+            if total_candidate < 5 or total_candidate > 15:
+                continue
 
-        if total_line is not None and (total_line < 5 or total_line > 15):
-            print(f"[SportsDataIO] Ignoring unrealistic total line: {total_line}")
+            if rank < best_rank_total:
+                best_rank_total = rank
+                best_row_total = (book_name, row)
+
+        if best_row_ml is None and book_rows:
+            best_row_ml = (book_rows[0][1], book_rows[0][2])
+
+        ml_book_name, ml_row = best_row_ml if best_row_ml is not None else ("", {})
+
+        trusted_total_row = best_row_total is not None
+        if trusted_total_row:
+            picked_book_name, total_row = best_row_total
+            picked_over_under = total_row.get("OverUnder")
+            picked_total = float(picked_over_under)
+            over_payout = total_row.get("OverPayout")
+            under_payout = total_row.get("UnderPayout")
+
+            try:
+                over_juice = int(over_payout) if over_payout is not None else DEFAULT_JUICE
+            except (TypeError, ValueError):
+                over_juice = DEFAULT_JUICE
+            try:
+                under_juice = int(under_payout) if under_payout is not None else DEFAULT_JUICE
+            except (TypeError, ValueError):
+                under_juice = DEFAULT_JUICE
+
+            # Preserve sportsbook identity metadata from trusted total-row only.
+            sportsbook_id = (
+                total_row.get("SportsbookId")
+                or total_row.get("SportsbookID")
+                or total_row.get("Sportsbookid")
+                or total_row.get("Sportsbook_id")
+                or ""
+            )
+            sportsbook_url = (
+                total_row.get("SportsbookURL")
+                or total_row.get("SportsbookUrl")
+                or total_row.get("Sportsbookurl")
+                or total_row.get("Sportsbook_url")
+                or ""
+            )
+            odd_type = (
+                total_row.get("OddType")
+                or total_row.get("OddTypeName")
+                or total_row.get("Odd_Type")
+                or total_row.get("odd_type")
+                or ""
+            )
+
+            total_line = picked_total
+            book_name = picked_book_name or ""
+        else:
+            # No trusted total row exists for this game.
+            # Keep total_line as None and avoid populating book from non-trusted sources.
             total_line = None
+            over_juice = DEFAULT_JUICE
+            under_juice = DEFAULT_JUICE
             book_name = ""
+            sportsbook_id = ""
+            sportsbook_url = ""
+            odd_type = ""
+
+        picked_total_dbg = total_line if total_line is not None else None
+        print(
+            "[SDIO TOTAL PICK] "
+            f"key={game_key} | picked_total={picked_total_dbg} | picked_book={repr(book_name)} | trusted_total_row={trusted_total_row}"
+        )
+
+        home_ml = ml_row.get("HomeMoneyLine") if isinstance(ml_row, dict) else None
+        away_ml = ml_row.get("AwayMoneyLine") if isinstance(ml_row, dict) else None
 
         result[game_key] = {
             "total_line": total_line,
