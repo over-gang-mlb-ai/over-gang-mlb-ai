@@ -1276,6 +1276,8 @@ def run_predictions():
                 dq_parts.append("fallback_pitcher")
             if public is None or public == {}:
                 dq_parts.append("missing_public_data")
+            if safe_get(away_stats, "LowIP", False) or safe_get(home_stats, "LowIP", False):
+                dq_parts.append("low_ip")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
             # 💵 MONEYLINE PREDICTION
@@ -1426,6 +1428,17 @@ def run_predictions():
     print(f"  Projection-only games: {projection_only}")
     print(f"  Degraded-data games: {degraded}")
     print("--------------------")
+
+    # Degraded reasons summary
+    dq_flag = lambda r, key: (str(r.get("Data_Quality_Flag") or "") or "").find(key) >= 0
+    missing_public = sum(1 for r in results if dq_flag(r, "missing_public_data"))
+    low_ip_flags = sum(1 for r in results if dq_flag(r, "low_ip"))
+    fallback_pitcher = sum(1 for r in results if dq_flag(r, "fallback_pitcher"))
+    print("\n--- DEGRADED REASONS ---")
+    print(f"  Missing public betting: {missing_public}")
+    print(f"  Low-IP starter flags: {low_ip_flags}")
+    print(f"  Fallback pitcher stats used: {fallback_pitcher}")
+    print("------------------------")
 
     # Final run summary
     _manual = _load_manual_totals()
