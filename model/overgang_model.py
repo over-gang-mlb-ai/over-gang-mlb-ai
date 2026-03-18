@@ -1472,6 +1472,19 @@ def run_predictions():
     print(f"  Fallback totals: {fallback_n}")
     print("-------------------")
 
+    # Auto fire status (one line)
+    _pf_mode = preflight.get("mode", "projection_only")
+    if _pf_mode == "full_auto" and api_real_n > 0:
+        print("[AUTO FIRE STATUS] LIVE AUTO READY")
+    elif _pf_mode == "manual_test":
+        print("[AUTO FIRE STATUS] MANUAL TEST ONLY")
+    elif _pf_mode == "projection_only":
+        print("[AUTO FIRE STATUS] PROJECTION ONLY")
+    elif _pf_mode == "stop":
+        print("[AUTO FIRE STATUS] STOP")
+    else:
+        print("[AUTO FIRE STATUS] NOT READY")
+
     # Final run summary
     _manual = _load_manual_totals()
     print("\n--- RUN SUMMARY ---")
