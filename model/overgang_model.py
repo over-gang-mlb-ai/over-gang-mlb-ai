@@ -394,6 +394,18 @@ class VegasLines:
                 info["_blocker_missing_total_line"] = bool(raw_line_missing and (not book_empty) and (not book_scrambled))
                 info["_blocker_unrealistic_total"] = bool((not raw_line_missing) and (not line_realistic) and (not book_empty) and (not book_scrambled))
                 info["_blocker_real_total_pass"] = bool(has_real_total)
+                if book_empty:
+                    _raw_detail = {}
+                    if isinstance(odds_map, dict):
+                        _raw_detail = odds_map.get(lookup_key) or {}
+                    _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
+                    _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
+                    _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
+                    print(
+                        "[EMPTY BOOK DETAIL] "
+                        f"key={lookup_key} | sportsbook_id={repr(_sportsbook_id)} | sportsbook_url={repr(_sportsbook_url)} | "
+                        f"odd_type={repr(_odd_type)} | source={source}"
+                    )
                 print(
                     "[LIVE TOTAL CHECK] "
                     f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
