@@ -1415,6 +1415,16 @@ def run_predictions():
         for match in alias_log:
             print(f"• {match}")
 
+    # Final run summary
+    _manual = _load_manual_totals()
+    print("\n--- RUN SUMMARY ---")
+    print(f"  Mode: {preflight.get('mode', 'projection_only')}")
+    print(f"  Games processed: {len(results)}")
+    print(f"  Bettable plays saved: {len(eligible_results)}")
+    print(f"  Alerts sent: {len(alerts)}")
+    print(f"  Manual totals loaded: {len(_manual)}")
+    print("-------------------")
+
 # ================================
 # 🚀 ENTRY POINT
 # ================================
