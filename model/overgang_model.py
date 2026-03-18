@@ -386,6 +386,13 @@ class VegasLines:
             info["_lookup_key"] = lookup_key
             info["_match_found"] = match_found
             info["_has_real_total"] = bool(has_real_total)
+            if match_found:
+                print(
+                    "[LIVE TOTAL CHECK] "
+                    f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
+                    f"book={repr(row.get('book'))} | source={source} | realistic={line_realistic} | "
+                    f"scrambled={book_scrambled} | _has_real_total={bool(has_real_total)}"
+                )
             return (line, info)
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
