@@ -947,6 +947,23 @@ def run_predictions():
         for g in games:
             print("•", f"{g['away_name']} @ {g['home_name']}")
 
+        # Manual totals freshness check (slate matching only; logging visibility)
+        manual_totals = _load_manual_totals()
+        manual_n = len(manual_totals) if isinstance(manual_totals, dict) else 0
+        slate_keys = {
+            f"{normalize_team_name(safe_get(g, 'away_name', ''))} @ {normalize_team_name(safe_get(g, 'home_name', ''))}"
+            for g in games
+        }
+        manual_keys = set(manual_totals.keys()) if isinstance(manual_totals, dict) else set()
+        matched_keys = sorted(slate_keys.intersection(manual_keys))
+        matched_n = len(matched_keys)
+        unmatched_n = manual_n - matched_n
+        print(
+            f"[MANUAL TOTALS CHECK] manual rows loaded: {manual_n} | matched today: {matched_n} | unmatched manual: {unmatched_n}"
+        )
+        if matched_n > 0:
+            print(f"[MANUAL TOTALS MATCHES] " + "; ".join(matched_keys))
+
         if not games:
             print("⚠️ No games scheduled today")
             return
