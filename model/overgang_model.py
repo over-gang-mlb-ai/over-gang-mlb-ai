@@ -1272,11 +1272,19 @@ def run_predictions():
             dq_parts = []
             if line_status == "fallback":
                 dq_parts.append("fallback_line")
-            if "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
+            # Fallback pitcher stats: synthetic league-avg starters or any starter on LowIP / league-avg row from matcher
+            _away_low = bool(safe_get(away_stats, "LowIP", False))
+            _home_low = bool(safe_get(home_stats, "LowIP", False))
+            if (
+                "League Avg" in (away_pitcher or "")
+                or "League Avg" in (home_pitcher or "")
+                or _away_low
+                or _home_low
+            ):
                 dq_parts.append("fallback_pitcher")
             if public is None or public == {}:
                 dq_parts.append("missing_public_data")
-            if safe_get(away_stats, "LowIP", False) or safe_get(home_stats, "LowIP", False):
+            if _away_low or _home_low:
                 dq_parts.append("low_ip")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
