@@ -22,6 +22,7 @@ import re
 import time
 import traceback
 from zoneinfo import ZoneInfo
+import io
 import json
 import requests
 from urllib.parse import quote_plus
@@ -51,6 +52,60 @@ from core.batters import Batters, LineupImpact, BATTER_DF
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
 
+# Chadwick register cache for redirect-safe FG id lookup (avoids playerid_lookup 308/empty issues).
+_CHADWICK_REGISTER_CACHE = None
+_CHADWICK_BASE = "https://raw.githubusercontent.com/chadwickbureau/register/master/data"
+
+def _resolve_fangraphs_id_from_chadwick(name):
+    """Resolve key_fangraphs from Chadwick register with redirect-safe fetch. Returns int or None."""
+    global _CHADWICK_REGISTER_CACHE
+    parts = (name or "").strip().split()
+    if not parts:
+        return None
+    last = parts[-1]
+    first = " ".join(parts[:-1]) if len(parts) > 1 else ""
+    last_norm = (unidecode(last).lower().strip() if last else "")
+    first_norm = (unidecode(first).lower().strip() if first else "")
+
+    if _CHADWICK_REGISTER_CACHE is None:
+        dfs = []
+        for suffix in "0 1 2 3 4 5 6 7 8 9 a b c d e f".split():
+            try:
+                url = f"{_CHADWICK_BASE}/people-{suffix}.csv"
+                r = requests.get(url, timeout=15, allow_redirects=True)
+                r.raise_for_status()
+                df = pd.read_csv(io.BytesIO(r.content), low_memory=False)
+                if not df.empty and "name_last" in df.columns:
+                    dfs.append(df)
+            except Exception:
+                continue
+        if not dfs:
+            return None
+        _CHADWICK_REGISTER_CACHE = pd.concat(dfs, ignore_index=True)
+
+    df = _CHADWICK_REGISTER_CACHE
+    if df.empty or "key_fangraphs" not in df.columns or "name_last" not in df.columns:
+        return None
+    if "name_first" not in df.columns:
+        return None
+    name_first_col = "name_first"
+
+    df = df.copy()
+    df["_last_n"] = df["name_last"].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
+    df["_first_n"] = df[name_first_col].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
+    exact = df[(df["_last_n"] == last_norm) & (df["_first_n"] == first_norm)]
+    if exact.empty:
+        return None
+    with_fg = exact[exact["key_fangraphs"].notna() & (exact["key_fangraphs"].astype(str).str.strip() != "")]
+    row = with_fg.iloc[0] if not with_fg.empty else exact.iloc[0]
+    try:
+        k = row["key_fangraphs"]
+        if pd.isna(k) or k == "" or (isinstance(k, float) and pd.isna(k)):
+            return None
+        return int(float(k))
+    except (ValueError, TypeError):
+        return None
+
 # ================================
 # 🧰 FanGraphs scrape diagnostics
 # ================================
@@ -69,26 +124,11 @@ try:
                 f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
             )
             try:
-                # Lookup via Chadwick (pybaseball): FG API find-pitcher/search endpoints are dead (404).
-                parts = (name or "").strip().split()
-                if not parts:
-                    print("❌ No FanGraphs match found (empty name).")
+                # Lookup via Chadwick register with redirect-safe fetch (avoids playerid_lookup 308/empty).
+                player_id = _resolve_fangraphs_id_from_chadwick(name)
+                if player_id is None:
+                    print("❌ No FanGraphs match found (Chadwick register).")
                     return None
-                last = parts[-1]
-                first = " ".join(parts[:-1]) if len(parts) > 1 else ""
-                lookup_df = playerid_lookup(last, first)
-                if lookup_df.empty or "key_fangraphs" not in lookup_df.columns:
-                    print("❌ No FanGraphs match found (Chadwick lookup empty or no key_fangraphs).")
-                    return None
-                valid = lookup_df[lookup_df["key_fangraphs"].notna()]
-                if valid.empty:
-                    valid = lookup_df
-                row0 = valid.iloc[0]
-                player_id = row0["key_fangraphs"]
-                if pd.isna(player_id) or player_id == "":
-                    print("❌ No FanGraphs match found (no key_fangraphs).")
-                    return None
-                player_id = int(player_id)
                 full_name = (normalized or name or "").strip().lower()
 
                 stats_url = f"https://www.fangraphs.com/players/id/{player_id}/stats?position=P"
