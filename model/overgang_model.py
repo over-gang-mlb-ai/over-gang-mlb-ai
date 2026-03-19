@@ -138,6 +138,9 @@ try:
         _orig_scrape_fangraphs_pitcher = DataManager.scrape_fangraphs_pitcher
 
         def _overgang_scrape_fangraphs_pitcher_debug(name):
+            # OG_TEST_SCRAPER: isolated direct scrape tests only (not used by live match_pitcher_row).
+            if os.getenv("OG_TEST_SCRAPER") != "1":
+                return None
             original = name
             normalized = DataManager.normalize_name(name)
             alias_used = globals().get("OG_LAST_ALIAS_USED_FOR_SCRAPE", "?")
@@ -146,11 +149,6 @@ try:
                 f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
             )
             try:
-                # Live runtime path: scraper fallback disabled (no external FanGraphs/Chadwick lookup).
-                # Keep scraper reachable only for explicit local testing.
-                if os.getenv("OG_TEST_SCRAPER") != "1":
-                    return None
-
                 # Lookup via Chadwick register with redirect-safe fetch (avoids playerid_lookup 308/empty).
                 player_id = _resolve_fangraphs_id_from_chadwick(name)
                 if player_id is None:
@@ -222,6 +220,104 @@ MIN_PITCHER_IP_LATE = 15
 NAME_MATCH_THRESHOLD = 85
 FATIGUE_THRESHOLD = 4.25
 VELOCITY_DROP_THRESHOLD = -1.5
+
+# ================================
+# Live predictor: match_pitcher_row without FanGraphs scrape (league-average fallback directly)
+# ================================
+try:
+    if not getattr(DataManager, "_overgang_match_pitcher_no_scrape", False):
+
+        def _overgang_match_pitcher_row_no_scrape(df: pd.DataFrame, pitcher_name: str, alias_log=None):
+            """Same resolution order as model.data_manager.DataManager.match_pitcher_row except no scrape step."""
+            print(f"🔎 match_pitcher_row() called with: {pitcher_name}")
+            if df.empty or not pitcher_name:
+                return None
+
+            print(f"📋 DataFrame index sample: {list(df.index)[:10]}")
+            print(f"🎯 Trying to match: {pitcher_name} → {DataManager.normalize_name(pitcher_name)}")
+            clean_name = DataManager.normalize_name(pitcher_name)
+            print(f"🎯 Trying to match: {pitcher_name} → {clean_name}")
+
+            if clean_name in {"league avg away", "league avg home"}:
+                if clean_name in df.index:
+                    row = df.loc[clean_name]
+                    if isinstance(row, dict):
+                        row = pd.Series(row, name=clean_name)
+                    for k, v in {"xERA": 4.20, "WHIP": 1.30, "IP": 150.0, "LowIP": False}.items():
+                        if k not in row.index:
+                            row[k] = v
+                    return row[["xERA", "WHIP", "IP", "LowIP"]]
+                return pd.Series({"xERA": 4.20, "WHIP": 1.30, "IP": 150.0, "LowIP": False}, name=clean_name)
+
+            alias_file = os.path.join(DATA_DIR, "pitcher_aliases.json")
+            if os.path.exists(alias_file):
+                try:
+                    with open(alias_file, "r") as f:
+                        alias_map = json.load(f)
+
+                    alias_key = pitcher_name.strip().lower()
+                    reversed_aliases = {}
+                    for official, variations in alias_map.items():
+                        if isinstance(variations, list):
+                            for a in variations:
+                                reversed_aliases[a.lower()] = official.lower()
+                        elif isinstance(variations, str) and variations.strip():
+                            reversed_aliases[variations.lower()] = official.lower()
+
+                    if alias_key in reversed_aliases:
+                        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
+                        print(f"🔁 Alias matched: {pitcher_name} → {clean_name}")
+                        if alias_log is not None:
+                            alias_log.append(f"{pitcher_name} → {clean_name}")
+                except Exception as e:
+                    print(f"⚠️ Alias file error: {e}")
+
+            if clean_name in df.index:
+                row = df.loc[clean_name]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                if row.isnull().any():
+                    print(f"🚫 Skipping '{clean_name}' due to NaN values:\n{row}")
+                    return None
+                return row
+
+            choices = df.index.tolist()
+            result = process.extractOne(clean_name, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+            if result:
+                best_match, score = result[0], result[1]
+                if clean_name.split()[-1] == best_match.split()[-1]:
+                    print(f"🟨 Fuzzy matched: {pitcher_name} → {best_match} ({score}%)")
+                    return df.loc[best_match]
+                print(f"⛔ Reject fuzzy match due to last-name mismatch: {pitcher_name} → {best_match}")
+
+            manual_fallback_path = os.path.join(DATA_DIR, "manual_fallback_pitchers.csv")
+            if os.path.exists(manual_fallback_path):
+                try:
+                    fdf = pd.read_csv(manual_fallback_path)
+                    fdf.set_index(fdf["Name"].str.lower(), inplace=True)
+                    key = pitcher_name.lower()
+                    if key in fdf.index:
+                        print(f"📦 Using manual fallback for: {pitcher_name}")
+                        return fdf.loc[key].to_dict()
+                except Exception as e:
+                    print(f"⚠️ Failed to load manual fallback for {pitcher_name}: {e}")
+
+            print(f"⚠️ Falling back to league average for: {pitcher_name}")
+            try:
+                from model.overgang_model import send_telegram_alert  # type: ignore
+
+                send_telegram_alert(
+                    f"⚠️ *Over Gang Alert*: No pitcher match for `{pitcher_name}`, using *league average* ⚾"
+                )
+            except Exception:
+                pass
+
+            return {"xERA": 4.50, "WHIP": 1.30, "LowIP": True}
+
+        DataManager.match_pitcher_row = staticmethod(_overgang_match_pitcher_row_no_scrape)
+        DataManager._overgang_match_pitcher_no_scrape = True
+except Exception:
+    pass
 
 # ================================
 # 📐 PROJECTION MODEL CONSTANTS (true expected runs)
@@ -1283,7 +1379,7 @@ def run_predictions():
         Deterministic preflight classification (logging only):
         - exact: found in pitcher_stats.csv index (including fuzzy-success as "exact CSV found")
         - alias: matched via pitcher_aliases.json to an index entry
-        - scrape: would fall through to scrape stage (no exact/alias/manual/fuzzy)
+        - league_average: would use league-average dict fallback (no live scrape)
         - league_avg: league-average sentinel pitcher (or equivalent)
         """
         if pitcher_name_used in _league_avg_set:
@@ -1304,13 +1400,13 @@ def run_predictions():
         # manual fallback pitchers?
         if manual_fallback_df is not None and isinstance(manual_fallback_df, pd.DataFrame) and not manual_fallback_df.empty:
             if str(pitcher_name_used).strip().lower() in manual_fallback_df.index:
-                return "scrape"
+                return "manual_fallback"
 
         # fuzzy match success?
         if _would_fuzzy_match(pitcher_name_used):
             return "exact"
 
-        return "scrape"
+        return "league_average"
 
     opening_total_games = len(games) if games is not None else 0
     opening_games_missing_probable_pitchers = 0
@@ -1356,8 +1452,10 @@ def run_predictions():
             opening_exact_pitchers_found += 1
         elif away_type == "alias":
             opening_alias_pitchers_found += 1
-        elif away_type == "scrape":
-            opening_scrape_fallback_pitchers += 1
+        elif away_type == "manual_fallback":
+            pass
+        elif away_type == "league_average":
+            opening_league_avg_fallback_pitchers += 1
             opening_fallback_pitchers_by_name.add(away_used)
         elif away_type == "league_avg":
             opening_league_avg_fallback_pitchers += 1
@@ -1367,8 +1465,10 @@ def run_predictions():
             opening_exact_pitchers_found += 1
         elif home_type == "alias":
             opening_alias_pitchers_found += 1
-        elif home_type == "scrape":
-            opening_scrape_fallback_pitchers += 1
+        elif home_type == "manual_fallback":
+            pass
+        elif home_type == "league_average":
+            opening_league_avg_fallback_pitchers += 1
             opening_fallback_pitchers_by_name.add(home_used)
         elif home_type == "league_avg":
             opening_league_avg_fallback_pitchers += 1
@@ -1400,7 +1500,7 @@ def run_predictions():
     print(f"  Games missing probable pitchers: {opening_games_missing_probable_pitchers}")
     print(f"  Pitchers found by exact match: {opening_exact_pitchers_found}")
     print(f"  Pitchers found by alias match: {opening_alias_pitchers_found}")
-    print(f"  Pitchers using scrape fallback: {opening_scrape_fallback_pitchers}")
+    print(f"  Live scrape fallback pitchers: {opening_scrape_fallback_pitchers} (disabled)")
     print(f"  Pitchers using league-average fallback: {opening_league_avg_fallback_pitchers}")
     print(f"  Missing public betting: {opening_missing_public_betting}")
     print(f"  Missing trusted totals: {opening_missing_trusted_totals}")
@@ -1530,11 +1630,11 @@ def run_predictions():
         if fuzzy_possible:
             return "fuzzy"
 
-        # Scrape stage (DataManager attempts scraping right before final league-average fallback).
-        # scrape_success returns a dict containing 'Name'; scrape_fail returns the league-average fallback dict.
+        # Live predictor: no scrape in match_pitcher_row; unresolved -> league-average dict (no Name key).
+        # OG_TEST_SCRAPER direct scrape returns dict with Name; would not appear from match_pitcher_row in live.
         if isinstance(resolved_dict, dict) and resolved_dict.get("Name"):
             return "scrape_success"
-        return "scrape_fail"
+        return "league_average"
 
     def _rt_inc(path: str):
         nonlocal rt_exact, rt_alias, rt_manual_fallback, rt_fuzzy, rt_scrape_success, rt_scrape_fail, rt_league_average
@@ -1554,7 +1654,7 @@ def run_predictions():
             rt_league_average += 1
 
     def _fallback_used_from_path(path: str) -> bool:
-        return path in {"manual_fallback", "scrape_fail", "league_average"}
+        return path in {"manual_fallback", "league_average"}
 
     for game in games:
         try:
