@@ -30,7 +30,7 @@ from unidecode import unidecode
 from rapidfuzz import fuzz, process
 from functools import lru_cache
 from statsapi import schedule
-from pybaseball import pitching_stats, statcast_pitcher
+from pybaseball import pitching_stats, statcast_pitcher, playerid_lookup
 import numpy as np
 import subprocess
 import sys
@@ -69,79 +69,27 @@ try:
                 f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
             )
             try:
-                # Use normalized (ASCII) name for search: API often matches on lowercase/ASCII (e.g. "martin perez").
-                # URL-encode the query so spaces/special chars don't break the request.
-                query = (normalized or name or "").strip() or (name or "")
-                q_encoded = quote_plus(query)
-                search_url = f"https://www.fangraphs.com/api/players/find-pitcher?q={q_encoded}"
-                print(f"[SCRAPE SEARCH] url={search_url}")
-                # FanGraphs often returns empty/403 without browser-like headers.
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": "https://www.fangraphs.com/",
-                }
-                res = requests.get(search_url, headers=headers, timeout=15)
-                print(f"[SCRAPE HTTP] status={res.status_code} | url={search_url}")
-                raw = res.json()
-                # When API returns error payload (e.g. dict with only Message), log it.
-                if isinstance(raw, dict) and "Message" in raw:
-                    print(f"[SCRAPE MESSAGE] {raw.get('Message')}")
-                # Compact debug: response shape (one line).
-                if isinstance(raw, dict):
-                    print(f"[SCRAPE RESPONSE] type=dict | keys={list(raw.keys())}")
-                elif isinstance(raw, list):
-                    print(f"[SCRAPE RESPONSE] type=list | len={len(raw)}" + (f" | first_keys={list(raw[0].keys())}" if raw and isinstance(raw[0], dict) else ""))
-                else:
-                    print(f"[SCRAPE RESPONSE] type={type(raw).__name__}")
-                # API may return a list of players or a dict; [0] on a dict raises KeyError(0).
-                if isinstance(raw, list):
-                    results = raw
-                elif isinstance(raw, dict):
-                    results = (
-                        raw.get("players") or raw.get("player") or raw.get("data") or raw.get("results")
-                        or raw.get("Players") or raw.get("Player") or raw.get("playerList") or raw.get("PlayerList")
-                        or []
-                    )
-                    if not isinstance(results, list):
-                        results = [v for v in raw.values() if isinstance(v, list) and len(v) > 0]
-                        results = results[0] if results else []
-                else:
-                    results = []
-                # If find-pitcher returned error Message (no player list), try generic player search endpoint.
-                if not results and isinstance(raw, dict) and "Message" in raw:
-                    alt_url = f"https://www.fangraphs.com/api/players/search?q={q_encoded}"
-                    print(f"[SCRAPE FALLBACK] trying search endpoint: {alt_url}")
-                    res2 = requests.get(alt_url, headers=headers, timeout=15)
-                    print(f"[SCRAPE HTTP] status={res2.status_code} | url={alt_url}")
-                    raw2 = res2.json() if res2.ok else None
-                    if isinstance(raw2, dict) and "Message" in raw2:
-                        print(f"[SCRAPE MESSAGE] {raw2.get('Message')}")
-                    if isinstance(raw2, list) and len(raw2) > 0:
-                        # Filter to pitchers (position P) if possible; else take first match.
-                        pit = [r for r in raw2 if isinstance(r, dict) and str(r.get("position", "")).upper() == "P"]
-                        results = pit if pit else raw2
-                        raw = raw2
-                    elif isinstance(raw2, dict):
-                        results = (
-                            raw2.get("players") or raw2.get("player") or raw2.get("data") or raw2.get("results")
-                            or raw2.get("Players") or raw2.get("Player") or []
-                        )
-                        if isinstance(results, list) and results:
-                            raw = raw2
-                if not results:
-                    print("❌ No FanGraphs match found.")
+                # Lookup via Chadwick (pybaseball): FG API find-pitcher/search endpoints are dead (404).
+                parts = (name or "").strip().split()
+                if not parts:
+                    print("❌ No FanGraphs match found (empty name).")
                     return None
-
-                best_match = results[0]
-                if not isinstance(best_match, dict):
-                    print("❌ No FanGraphs match found.")
+                last = parts[-1]
+                first = " ".join(parts[:-1]) if len(parts) > 1 else ""
+                lookup_df = playerid_lookup(last, first)
+                if lookup_df.empty or "key_fangraphs" not in lookup_df.columns:
+                    print("❌ No FanGraphs match found (Chadwick lookup empty or no key_fangraphs).")
                     return None
-                # find-pitcher uses playerid/playername; search endpoint may use id/name or camelCase.
-                player_id = best_match.get("playerid") or best_match.get("playerId") or best_match.get("id")
-                full_name = (best_match.get("playername") or best_match.get("playerName") or best_match.get("name") or "").strip().lower()
-                if not player_id:
-                    print("❌ No FanGraphs match found (no player id in response).")
+                valid = lookup_df[lookup_df["key_fangraphs"].notna()]
+                if valid.empty:
+                    valid = lookup_df
+                row0 = valid.iloc[0]
+                player_id = row0["key_fangraphs"]
+                if pd.isna(player_id) or player_id == "":
+                    print("❌ No FanGraphs match found (no key_fangraphs).")
                     return None
+                player_id = int(player_id)
+                full_name = (normalized or name or "").strip().lower()
 
                 stats_url = f"https://www.fangraphs.com/players/id/{player_id}/stats?position=P"
                 dfs = pd.read_html(stats_url)
@@ -2196,4 +2144,21 @@ def run_predictions():
 # 🚀 ENTRY POINT
 # ================================
 if __name__ == "__main__":
-    run_predictions()
+    if os.getenv("OG_TEST_SCRAPER") == "1":
+        # Temporary local test: scraper only for Gerrit Cole, Martin Perez.
+        # Prints lookup URL(s), HTTP status, response shape, player id found, final stats, exact return.
+        for test_name in ["Gerrit Cole", "Martin Perez"]:
+            print("\n" + "=" * 60)
+            print(f"TEST SCRAPER: {test_name}")
+            print("=" * 60)
+            out = DataManager.scrape_fangraphs_pitcher(test_name)
+            player_id_found = out is not None
+            final_stats_returned = out is not None
+            print(f"[TEST] Player id found: {player_id_found}")
+            print(f"[TEST] Final stats returned: {final_stats_returned}")
+            print(f"[TEST] Exact returned object: {out}")
+        print("\n" + "=" * 60)
+        print("OG_TEST_SCRAPER done.")
+        print("=" * 60)
+    else:
+        run_predictions()
