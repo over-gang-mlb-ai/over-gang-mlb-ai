@@ -53,12 +53,11 @@ from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
 
 # Chadwick register cache for redirect-safe FG id lookup (avoids playerid_lookup 308/empty issues).
-_CHADWICK_REGISTER_CACHE = None
 _CHADWICK_BASE = "https://raw.githubusercontent.com/chadwickbureau/register/master/data"
+_CHADWICK_ID_CACHE = {}
 
 def _resolve_fangraphs_id_from_chadwick(name):
-    """Resolve key_fangraphs from Chadwick register with redirect-safe fetch. Returns int or None."""
-    global _CHADWICK_REGISTER_CACHE
+    """Resolve key_fangraphs from Chadwick register shard-by-shard. Returns int or None."""
     parts = (name or "").strip().split()
     if not parts:
         return None
@@ -67,44 +66,67 @@ def _resolve_fangraphs_id_from_chadwick(name):
     last_norm = (unidecode(last).lower().strip() if last else "")
     first_norm = (unidecode(first).lower().strip() if first else "")
 
-    if _CHADWICK_REGISTER_CACHE is None:
-        dfs = []
-        for suffix in "0 1 2 3 4 5 6 7 8 9 a b c d e f".split():
-            try:
-                url = f"{_CHADWICK_BASE}/people-{suffix}.csv"
-                r = requests.get(url, timeout=15, allow_redirects=True)
-                r.raise_for_status()
-                df = pd.read_csv(io.BytesIO(r.content), low_memory=False)
-                if not df.empty and "name_last" in df.columns:
-                    dfs.append(df)
-            except Exception:
+    cache_key = (first_norm, last_norm)
+    if cache_key in _CHADWICK_ID_CACHE:
+        return _CHADWICK_ID_CACHE[cache_key]
+
+    # Load one shard at a time to keep EC2 memory stable.
+    for suffix in "0 1 2 3 4 5 6 7 8 9 a b c d e f".split():
+        try:
+            url = f"{_CHADWICK_BASE}/people-{suffix}.csv"
+            r = requests.get(url, timeout=15, allow_redirects=True)
+            r.raise_for_status()
+            if not r.content:
                 continue
-        if not dfs:
-            return None
-        _CHADWICK_REGISTER_CACHE = pd.concat(dfs, ignore_index=True)
 
-    df = _CHADWICK_REGISTER_CACHE
-    if df.empty or "key_fangraphs" not in df.columns or "name_last" not in df.columns:
-        return None
-    if "name_first" not in df.columns:
-        return None
-    name_first_col = "name_first"
+            # Read only the columns we need when possible (reduces memory).
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(r.content),
+                    usecols=["name_first", "name_last", "key_fangraphs"],
+                    low_memory=False,
+                )
+            except Exception:
+                df = pd.read_csv(io.BytesIO(r.content), low_memory=False)
+                keep_cols = [c for c in ["name_first", "name_last", "key_fangraphs"] if c in df.columns]
+                if len(keep_cols) < 3:
+                    continue
+                df = df[keep_cols]
 
-    df = df.copy()
-    df["_last_n"] = df["name_last"].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
-    df["_first_n"] = df[name_first_col].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
-    exact = df[(df["_last_n"] == last_norm) & (df["_first_n"] == first_norm)]
-    if exact.empty:
-        return None
-    with_fg = exact[exact["key_fangraphs"].notna() & (exact["key_fangraphs"].astype(str).str.strip() != "")]
-    row = with_fg.iloc[0] if not with_fg.empty else exact.iloc[0]
-    try:
-        k = row["key_fangraphs"]
-        if pd.isna(k) or k == "" or (isinstance(k, float) and pd.isna(k)):
-            return None
-        return int(float(k))
-    except (ValueError, TypeError):
-        return None
+            if df.empty or "key_fangraphs" not in df.columns:
+                continue
+
+            df["_last_n"] = df["name_last"].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
+            df["_first_n"] = df["name_first"].fillna("").astype(str).str.strip().apply(lambda s: unidecode(s).lower())
+
+            exact = df[(df["_last_n"] == last_norm) & (df["_first_n"] == first_norm)]
+            if exact.empty:
+                continue
+
+            with_fg = exact[
+                exact["key_fangraphs"].notna() & (exact["key_fangraphs"].astype(str).str.strip() != "")
+            ]
+            row = with_fg.iloc[0] if not with_fg.empty else exact.iloc[0]
+
+            try:
+                k = row["key_fangraphs"]
+                if pd.isna(k) or k == "" or (isinstance(k, float) and pd.isna(k)):
+                    _CHADWICK_ID_CACHE[cache_key] = None
+                    return None
+                player_id = int(float(k))
+                _CHADWICK_ID_CACHE[cache_key] = player_id
+                return player_id
+            finally:
+                # Encourage memory release for large shard frames.
+                try:
+                    del df
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    _CHADWICK_ID_CACHE[cache_key] = None
+    return None
 
 # ================================
 # 🧰 FanGraphs scrape diagnostics
