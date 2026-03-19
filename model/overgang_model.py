@@ -146,6 +146,11 @@ try:
                 f"original={repr(original)} | normalized={repr(normalized)} | alias_used={alias_used}"
             )
             try:
+                # Live runtime path: scraper fallback disabled (no external FanGraphs/Chadwick lookup).
+                # Keep scraper reachable only for explicit local testing.
+                if os.getenv("OG_TEST_SCRAPER") != "1":
+                    return None
+
                 # Lookup via Chadwick register with redirect-safe fetch (avoids playerid_lookup 308/empty).
                 player_id = _resolve_fangraphs_id_from_chadwick(name)
                 if player_id is None:
