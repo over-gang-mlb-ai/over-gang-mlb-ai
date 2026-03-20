@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import io
 import json
 import requests
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 from bs4 import BeautifulSoup
 from unidecode import unidecode
 from rapidfuzz import fuzz, process
@@ -289,6 +289,138 @@ def _pitcher_resolvable_locally_without_league_average(
             return True
 
     return False
+
+
+def _rows_from_mlb_stat_splits(splits):
+    """Parse MLB StatsAPI season pitching splits → list of {mlb_id, Name, ERA, WHIP, IP} (same as DataManager)."""
+    rows = []
+    if not isinstance(splits, list):
+        return rows
+    for sp in splits:
+        if not isinstance(sp, dict):
+            continue
+        player = sp.get("player") or {}
+        st = sp.get("stat") or {}
+        pid = player.get("id")
+        name_full = (player.get("fullName") or "").strip()
+        if pid is None:
+            continue
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        era_raw = st.get("era") if st.get("era") is not None else st.get("ERA")
+        whip_raw = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
+        ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
+        era = None
+        if era_raw not in (None, ""):
+            try:
+                era = float(era_raw)
+            except (TypeError, ValueError):
+                pass
+        whip = None
+        if whip_raw not in (None, ""):
+            try:
+                whip = float(whip_raw)
+            except (TypeError, ValueError):
+                pass
+        ip = None
+        if ip_raw is not None and ip_raw != "":
+            try:
+                if isinstance(ip_raw, (int, float)):
+                    ip = float(ip_raw)
+                else:
+                    s = str(ip_raw).strip()
+                    if "." in s:
+                        whole, frac = s.split(".", 1)
+                    else:
+                        whole, frac = s, "0"
+                    frac_dec = {"0": 0.0, "1": 1 / 3, "2": 2 / 3}.get(frac, 0.0)
+                    ip = float(whole) + frac_dec
+            except Exception:
+                try:
+                    ip = float(ip_raw)
+                except Exception:
+                    pass
+        if any(v is not None for v in (era, whip, ip)):
+            rows.append({"mlb_id": pid, "Name": name_full, "ERA": era, "WHIP": whip, "IP": ip})
+    return rows
+
+
+def _mlb_statsapi_season_pitching_for_targeted_backfill(year: int) -> pd.DataFrame:
+    """
+    MLB StatsAPI season pitching pull only — same endpoint/parsing as DataManager._mlb_pitching_stats_by_id
+    but does NOT apply full-file SAFE MODE (no abort when prior-year fallback yields few rows).
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    stats_base = "https://statsapi.mlb.com/api/v1/stats"
+    params = {
+        "stats": "season",
+        "group": "pitching",
+        "season": year,
+        "gameType": "R",
+        "limit": 1000,
+    }
+    print(
+        "[Targeted backfill] Independent resolver: MLB StatsAPI season pitching "
+        f"(year={year}; not calling DataManager._mlb_pitching_stats_by_id / full SAFE MODE path)"
+    )
+    print(f"[Targeted backfill] GET {stats_base}?{urlencode(params)}")
+    try:
+        resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as e:
+        print(f"[Targeted backfill] MLB stats request failed: {e}")
+        return pd.DataFrame()
+
+    stats_list = body.get("stats") if isinstance(body, dict) else None
+    if not isinstance(stats_list, list) or not stats_list:
+        print("[Targeted backfill] MLB stats response missing stats array")
+        return pd.DataFrame()
+
+    splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+    if not isinstance(splits, list):
+        splits = []
+    total_raw_splits = len(splits)
+    rows = _rows_from_mlb_stat_splits(splits)
+
+    if total_raw_splits == 0 and year is not None:
+        fallback_year = year - 1
+        print(f"[Targeted backfill] No regular-season splits for {year}; retrying season={fallback_year}")
+        params["season"] = fallback_year
+        print(f"[Targeted backfill] GET {stats_base}?{urlencode(params)}")
+        try:
+            resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as e:
+            print(f"[Targeted backfill] MLB stats fallback request failed: {e}")
+            return pd.DataFrame()
+        stats_list = body.get("stats") if isinstance(body, dict) else None
+        if isinstance(stats_list, list) and stats_list:
+            splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+            if not isinstance(splits, list):
+                splits = []
+            total_raw_splits = len(splits)
+            rows = _rows_from_mlb_stat_splits(splits)
+        print(
+            f"[Targeted backfill] Prior-year retry: {total_raw_splits} splits, {len(rows)} parseable rows "
+            "(full-file SAFE MODE minimum does not apply to this targeted lane)"
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        print(
+            f"[Targeted backfill] No pitcher rows from season endpoint "
+            f"(raw_splits={total_raw_splits})"
+        )
+    else:
+        print(
+            f"[Targeted backfill] Season stats frame: {len(df)} rows "
+            f"(raw_splits={total_raw_splits}) for probable name matching"
+        )
+    return df
 
 
 def _merge_mlb_savant_for_probable_backfill(mlb_df: pd.DataFrame) -> pd.DataFrame:
@@ -1538,11 +1670,12 @@ def run_predictions():
     # Targeted MLB StatsAPI backfill for today's unresolved probables (no FanGraphs; no full-file replace).
     _unresolved_before = list(_unresolved_names)
     if _unresolved_before:
-        print("--- TARGETED PROBABLE-PITCHER BACKFILL (MLB StatsAPI) ---")
-        print(f"  Unresolved before backfill ({len(_unresolved_before)}): {', '.join(_unresolved_before)}")
+        _n_attempt = len(_unresolved_before)
+        print("--- TARGETED PROBABLE-PITCHER BACKFILL (independent MLB resolver) ---")
+        print(f"  Targeted resolver attempted {_n_attempt} name(s): {', '.join(_unresolved_before)}")
         try:
             _yr = datetime.now().year
-            _mlb_pull = DataManager._mlb_pitching_stats_by_id(_yr)
+            _mlb_pull = _mlb_statsapi_season_pitching_for_targeted_backfill(_yr)
             _merged_pull = _merge_mlb_savant_for_probable_backfill(_mlb_pull)
             _rows_to_file = []
             _seen_norm = set()
@@ -1581,8 +1714,9 @@ def run_predictions():
                     _pn, stats_df, manual_fallback_df, _alias_audit
                 )
             ]
+            _m_ok = len(_backfilled_probables)
             print(
-                f"  Successfully backfilled ({len(_backfilled_probables)}): "
+                f"  Successfully resolved {_m_ok} of {_n_attempt} attempted: "
                 f"{', '.join(_backfilled_probables) if _backfilled_probables else '(none)'}"
             )
             _still_unresolved = [
@@ -1592,17 +1726,18 @@ def run_predictions():
                     _nm, stats_df, manual_fallback_df, _alias_audit
                 )
             ]
-            print(f"  Still unresolved after backfill ({len(_still_unresolved)}): "
+            _k_remain = len(_still_unresolved)
+            print(f"  Unresolved {_k_remain} name(s) remain (league-average fallback if still missing at match time): "
                   f"{', '.join(_still_unresolved) if _still_unresolved else '(none)'}")
             if _still_unresolved:
                 print("  Still unresolved names:")
                 for _su in _still_unresolved:
                     print(f"    - {_su}")
         except Exception as _tbe:
-            print(f"  Targeted backfill skipped or failed: {_tbe}")
+            print(f"  Targeted resolver error (independent path; full-file SAFE MODE unchanged): {_tbe}")
+            print(f"  Successfully resolved 0 of {_n_attempt} attempted: (none)")
             print(
-                f"  Successfully backfilled (0): (none)\n"
-                f"  Still unresolved after backfill ({len(_unresolved_before)}): {', '.join(_unresolved_before)}"
+                f"  Unresolved {_n_attempt} name(s) remain: {', '.join(_unresolved_before)}"
             )
             if _unresolved_before:
                 print("  Still unresolved names:")
@@ -1610,7 +1745,7 @@ def run_predictions():
                     print(f"    - {_su}")
         print("---------------------------------------------------------\n")
     else:
-        print("--- TARGETED PROBABLE-PITCHER BACKFILL (MLB StatsAPI) ---\n"
+        print("--- TARGETED PROBABLE-PITCHER BACKFILL (independent MLB resolver) ---\n"
               "  Skipped: no unresolved probable pitchers.\n"
               "---------------------------------------------------------\n")
 
