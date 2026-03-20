@@ -221,6 +221,76 @@ NAME_MATCH_THRESHOLD = 85
 FATIGUE_THRESHOLD = 4.25
 VELOCITY_DROP_THRESHOLD = -1.5
 
+
+def _build_pitcher_alias_reversed_dict():
+    """Variation (lower) -> official (lower); same as match_pitcher_row alias step."""
+    alias_file = os.path.join(DATA_DIR, "pitcher_aliases.json")
+    reversed_aliases = {}
+    if not os.path.exists(alias_file):
+        return reversed_aliases
+    try:
+        with open(alias_file, "r") as f:
+            alias_map = json.load(f)
+        for official, variations in (alias_map or {}).items():
+            if isinstance(variations, list):
+                for a in variations:
+                    if a:
+                        reversed_aliases[a.lower()] = official.lower()
+            elif isinstance(variations, str) and variations.strip():
+                reversed_aliases[variations.lower()] = official.lower()
+    except Exception:
+        pass
+    return reversed_aliases
+
+
+def _pitcher_resolvable_locally_without_league_average(
+    pitcher_name: str,
+    stats_df: pd.DataFrame,
+    manual_fallback_df: pd.DataFrame,
+    reversed_aliases: dict,
+) -> bool:
+    """
+    True if local resolution would yield real data (not the league-average dict).
+    Order: league sentinels, alias, direct CSV index (non-null row), fuzzy+last-name guard, manual_fallback CSV.
+    """
+    if not pitcher_name or not str(pitcher_name).strip():
+        return False
+    pn = str(pitcher_name).strip()
+    if not pn or pn.strip().upper() == "TBD":
+        return False
+
+    clean_name = DataManager.normalize_name(pitcher_name)
+    if clean_name in {"league avg away", "league avg home"}:
+        return True
+
+    alias_key = pn.lower()
+    if reversed_aliases and alias_key in reversed_aliases:
+        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
+
+    if isinstance(stats_df, pd.DataFrame) and not stats_df.empty:
+        if clean_name in stats_df.index:
+            row = stats_df.loc[clean_name]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            if not row.isnull().any():
+                return True
+        choices = stats_df.index.tolist()
+        result = process.extractOne(clean_name, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+        if result:
+            best_match, score = result[0], result[1]
+            try:
+                if clean_name.split()[-1] == best_match.split()[-1]:
+                    return True
+            except Exception:
+                pass
+
+    if manual_fallback_df is not None and isinstance(manual_fallback_df, pd.DataFrame) and not manual_fallback_df.empty:
+        if pn.lower() in manual_fallback_df.index:
+            return True
+
+    return False
+
+
 # ================================
 # Live predictor: match_pitcher_row without FanGraphs scrape (league-average fallback directly)
 # ================================
@@ -1325,6 +1395,36 @@ def run_predictions():
     alerts = []
     unmatched_pitchers = set()
     alias_log = []
+
+    # --- Local pitcher_stats preflight: who is missing before game processing (no scraper) ---
+    _alias_audit = _build_pitcher_alias_reversed_dict()
+    _probable_pitchers = set()
+    for _g in games:
+        for _pk in ("away_probable_pitcher", "home_probable_pitcher"):
+            _raw = safe_get(_g, _pk, "TBD")
+            _s = str(_raw) if _raw is not None else ""
+            if (not _s.strip()) or _s.strip() == "TBD":
+                continue
+            _probable_pitchers.add(_s.strip())
+    _probable_sorted = sorted(_probable_pitchers, key=lambda x: x.lower())
+    _resolved_names = []
+    _unresolved_names = []
+    for _nm in _probable_sorted:
+        if _pitcher_resolvable_locally_without_league_average(
+            _nm, stats_df, manual_fallback_df, _alias_audit
+        ):
+            _resolved_names.append(_nm)
+        else:
+            _unresolved_names.append(_nm)
+    print("\n--- LOCAL PITCHER STATS PREFLIGHT ---")
+    print(f"  Probable pitchers checked: {len(_probable_sorted)}")
+    print(f"  Resolved locally (CSV / alias / fuzzy / manual): {len(_resolved_names)}")
+    print(f"  Unresolved (league-average fallback at runtime): {len(_unresolved_names)}")
+    if _unresolved_names:
+        print("  Unresolved names:")
+        for _u in _unresolved_names:
+            print(f"    - {_u}")
+    print("-------------------------------------\n")
 
     # ================================
     # 📅 OPENING DAY PREFLIGHT (readiness)
