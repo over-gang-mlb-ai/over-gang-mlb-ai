@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import io
 import json
 import requests
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from unidecode import unidecode
 from rapidfuzz import fuzz, process
@@ -291,197 +291,205 @@ def _pitcher_resolvable_locally_without_league_average(
     return False
 
 
-def _rows_from_mlb_stat_splits(splits):
-    """Parse MLB StatsAPI season pitching splits → list of {mlb_id, Name, ERA, WHIP, IP} (same as DataManager)."""
-    rows = []
-    if not isinstance(splits, list):
-        return rows
-    for sp in splits:
-        if not isinstance(sp, dict):
-            continue
-        player = sp.get("player") or {}
-        st = sp.get("stat") or {}
-        pid = player.get("id")
-        name_full = (player.get("fullName") or "").strip()
-        if pid is None:
-            continue
-        try:
-            pid = int(pid)
-        except (TypeError, ValueError):
-            continue
-        era_raw = st.get("era") if st.get("era") is not None else st.get("ERA")
-        whip_raw = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
-        ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
-        era = None
-        if era_raw not in (None, ""):
-            try:
-                era = float(era_raw)
-            except (TypeError, ValueError):
-                pass
-        whip = None
-        if whip_raw not in (None, ""):
-            try:
-                whip = float(whip_raw)
-            except (TypeError, ValueError):
-                pass
-        ip = None
-        if ip_raw is not None and ip_raw != "":
-            try:
-                if isinstance(ip_raw, (int, float)):
-                    ip = float(ip_raw)
-                else:
-                    s = str(ip_raw).strip()
-                    if "." in s:
-                        whole, frac = s.split(".", 1)
-                    else:
-                        whole, frac = s, "0"
-                    frac_dec = {"0": 0.0, "1": 1 / 3, "2": 2 / 3}.get(frac, 0.0)
-                    ip = float(whole) + frac_dec
-            except Exception:
-                try:
-                    ip = float(ip_raw)
-                except Exception:
-                    pass
-        if any(v is not None for v in (era, whip, ip)):
-            rows.append({"mlb_id": pid, "Name": name_full, "ERA": era, "WHIP": whip, "IP": ip})
-    return rows
-
-
-def _mlb_statsapi_season_pitching_for_targeted_backfill(year: int) -> pd.DataFrame:
-    """
-    MLB StatsAPI season pitching pull only — same endpoint/parsing as DataManager._mlb_pitching_stats_by_id
-    but does NOT apply full-file SAFE MODE (no abort when prior-year fallback yields few rows).
-    """
-    headers = {"User-Agent": "Mozilla/5.0"}
-    stats_base = "https://statsapi.mlb.com/api/v1/stats"
-    params = {
-        "stats": "season",
-        "group": "pitching",
-        "season": year,
-        "gameType": "R",
-        "limit": 1000,
-    }
-    print(
-        "[Targeted backfill] Independent resolver: MLB StatsAPI season pitching "
-        f"(year={year}; not calling DataManager._mlb_pitching_stats_by_id / full SAFE MODE path)"
-    )
-    print(f"[Targeted backfill] GET {stats_base}?{urlencode(params)}")
+def _pitch_row_from_mlb_stat_split(sp: dict):
+    """One MLB StatsAPI season pitching split → {mlb_id, Name, ERA, WHIP, IP} or None."""
+    if not isinstance(sp, dict):
+        return None
+    player = sp.get("player") or {}
+    st = sp.get("stat") or {}
+    pid = player.get("id")
+    name_full = (player.get("fullName") or "").strip()
+    if pid is None:
+        return None
     try:
-        resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    era_raw = st.get("era") if st.get("era") is not None else st.get("ERA")
+    whip_raw = st.get("whip") if st.get("whip") is not None else st.get("WHIP")
+    ip_raw = st.get("inningsPitched") if st.get("inningsPitched") is not None else st.get("ip") or st.get("IP")
+    era = None
+    if era_raw not in (None, ""):
+        try:
+            era = float(era_raw)
+        except (TypeError, ValueError):
+            pass
+    whip = None
+    if whip_raw not in (None, ""):
+        try:
+            whip = float(whip_raw)
+        except (TypeError, ValueError):
+            pass
+    ip = None
+    if ip_raw is not None and ip_raw != "":
+        try:
+            if isinstance(ip_raw, (int, float)):
+                ip = float(ip_raw)
+            else:
+                s = str(ip_raw).strip()
+                if "." in s:
+                    whole, frac = s.split(".", 1)
+                else:
+                    whole, frac = s, "0"
+                frac_dec = {"0": 0.0, "1": 1 / 3, "2": 2 / 3}.get(frac, 0.0)
+                ip = float(whole) + frac_dec
+        except Exception:
+            try:
+                ip = float(ip_raw)
+            except Exception:
+                pass
+    if not any(v is not None for v in (era, whip, ip)):
+        return None
+    return {"mlb_id": pid, "Name": name_full, "ERA": era, "WHIP": whip, "IP": ip}
+
+
+def _is_mlb_pitcher_person(p: dict) -> bool:
+    pos = p.get("primaryPosition") or {}
+    return pos.get("code") == "1" or pos.get("abbreviation") == "P"
+
+
+def _mlb_targeted_resolve_pitcher_id(probable_name: str):
+    """
+    Resolve probable display name → (mlb_id, full_name) via MLB StatsAPI people/search?names=...
+    Does not use FanGraphs or full-file pitcher refresh.
+    """
+    if not probable_name or not str(probable_name).strip():
+        return None, None
+    headers = {"User-Agent": "Mozilla/5.0"}
+    search_url = "https://statsapi.mlb.com/api/v1/people/search"
+    try:
+        resp = requests.get(
+            search_url, params={"names": str(probable_name).strip()}, headers=headers, timeout=15
+        )
         resp.raise_for_status()
         body = resp.json()
     except Exception as e:
-        print(f"[Targeted backfill] MLB stats request failed: {e}")
-        return pd.DataFrame()
-
-    stats_list = body.get("stats") if isinstance(body, dict) else None
-    if not isinstance(stats_list, list) or not stats_list:
-        print("[Targeted backfill] MLB stats response missing stats array")
-        return pd.DataFrame()
-
-    splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
-    if not isinstance(splits, list):
-        splits = []
-    total_raw_splits = len(splits)
-    rows = _rows_from_mlb_stat_splits(splits)
-
-    if total_raw_splits == 0 and year is not None:
-        fallback_year = year - 1
-        print(f"[Targeted backfill] No regular-season splits for {year}; retrying season={fallback_year}")
-        params["season"] = fallback_year
-        print(f"[Targeted backfill] GET {stats_base}?{urlencode(params)}")
-        try:
-            resp = requests.get(stats_base, params=params, headers=headers, timeout=25)
-            resp.raise_for_status()
-            body = resp.json()
-        except Exception as e:
-            print(f"[Targeted backfill] MLB stats fallback request failed: {e}")
-            return pd.DataFrame()
-        stats_list = body.get("stats") if isinstance(body, dict) else None
-        if isinstance(stats_list, list) and stats_list:
-            splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
-            if not isinstance(splits, list):
-                splits = []
-            total_raw_splits = len(splits)
-            rows = _rows_from_mlb_stat_splits(splits)
-        print(
-            f"[Targeted backfill] Prior-year retry: {total_raw_splits} splits, {len(rows)} parseable rows "
-            "(full-file SAFE MODE minimum does not apply to this targeted lane)"
-        )
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        print(
-            f"[Targeted backfill] No pitcher rows from season endpoint "
-            f"(raw_splits={total_raw_splits})"
-        )
-    else:
-        print(
-            f"[Targeted backfill] Season stats frame: {len(df)} rows "
-            f"(raw_splits={total_raw_splits}) for probable name matching"
-        )
-    return df
-
-
-def _merge_mlb_savant_for_probable_backfill(mlb_df: pd.DataFrame) -> pd.DataFrame:
-    """Same MLB + Savant merge and LowIP rules as DataManager.update_pitcher_stats (no full-file write)."""
-    if mlb_df is None or mlb_df.empty:
-        return pd.DataFrame()
-    current_year = datetime.now().year
-    month = datetime.now().month
-    if month < 6:
-        min_ip = MIN_PITCHER_IP_EARLY
-    elif month < 8:
-        min_ip = MIN_PITCHER_IP_MID
-    else:
-        min_ip = MIN_PITCHER_IP_LATE
-    try:
-        savant_df = DataManager._savant_xera_by_id(current_year)
-    except Exception as e:
-        print(f"[Targeted backfill] Savant xERA unavailable ({e}); using ERA for xERA.")
-        savant_df = pd.DataFrame(columns=["player_id", "xERA"])
-        savant_df["player_id"] = pd.Series(dtype=int)
-        savant_df["xERA"] = pd.Series(dtype=float)
-    merged = mlb_df.merge(savant_df, left_on="mlb_id", right_on="player_id", how="left")
-    merged["xERA"] = merged["xERA"].where(~merged["xERA"].isna(), merged["ERA"])
-    merged["xERA"] = merged["xERA"].fillna(4.25)
-    merged["Name"] = merged["Name"].astype(str).str.strip()
-    merged["norm_name"] = merged["Name"].apply(DataManager.normalize_name)
-    merged["IP"] = pd.to_numeric(merged["IP"], errors="coerce")
-    merged["WHIP"] = pd.to_numeric(merged["WHIP"], errors="coerce")
-    merged["xERA"] = pd.to_numeric(merged["xERA"], errors="coerce")
-    merged["LowIP"] = merged["IP"] < float(min_ip)
-    merged = merged.sort_values(["norm_name", "IP"], ascending=[True, False])
-    merged = merged.drop_duplicates(subset=["norm_name"], keep="first")
-    return merged
-
-
-def _find_backfill_row_for_probable(merged: pd.DataFrame, probable_name: str):
-    """Match probable starter to merged MLB+Savant row (exact norm_name, else fuzzy + last-name guard)."""
-    if merged is None or merged.empty or not probable_name:
-        return None
+        print(f"[Targeted backfill] MLB id lookup failed for '{probable_name}': {e}")
+        return None, None
+    people = body.get("people") if isinstance(body, dict) else None
+    if not isinstance(people, list) or not people:
+        print(f"[Targeted backfill] MLB search returned no people for '{probable_name}'")
+        return None, None
+    pitchers = [p for p in people if isinstance(p, dict) and _is_mlb_pitcher_person(p)]
     norm_t = DataManager.normalize_name(probable_name)
     if not norm_t:
-        return None
-    hit = merged.loc[merged["norm_name"] == norm_t]
-    if not hit.empty:
-        return hit.iloc[0]
-    choices = merged["norm_name"].dropna().astype(str).unique().tolist()
-    if not choices:
-        return None
-    res = process.extractOne(norm_t, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
-    if not res:
-        return None
-    best, _sc = res[0], res[1]
+        return None, None
+
+    def _pick_id_name(candidate_list):
+        if len(candidate_list) == 1:
+            p = candidate_list[0]
+            try:
+                return int(p["id"]), (p.get("fullName") or "").strip() or probable_name
+            except (KeyError, TypeError, ValueError):
+                return None, None
+        choices = []
+        rows = []
+        for p in candidate_list:
+            fn = (p.get("fullName") or "").strip()
+            if not fn:
+                continue
+            nn = DataManager.normalize_name(fn)
+            if not nn:
+                continue
+            choices.append(nn)
+            rows.append(p)
+        if not choices:
+            return None, None
+        res = process.extractOne(norm_t, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+        if not res:
+            return None, None
+        best_nn, _sc = res[0], res[1]
+        try:
+            idx = res[2] if len(res) > 2 else choices.index(best_nn)
+        except (ValueError, IndexError):
+            return None, None
+        try:
+            if norm_t.split()[-1] != best_nn.split()[-1]:
+                return None, None
+        except Exception:
+            return None, None
+        p = rows[idx]
+        try:
+            return int(p["id"]), (p.get("fullName") or "").strip() or probable_name
+        except (KeyError, TypeError, ValueError):
+            return None, None
+
+    if not pitchers:
+        print(
+            f"[Targeted backfill] MLB search: no primaryPosition=P in results for '{probable_name}' "
+            f"({len(people)} hit(s))"
+        )
+        return None, None
+    return _pick_id_name(pitchers)
+
+
+def _mlb_targeted_fetch_player_season_pitching(player_id: int, season_year: int):
+    """
+    GET /people/{id}/stats season pitching for one player. Returns best split row dict or None.
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = f"https://statsapi.mlb.com/api/v1/people/{int(player_id)}/stats"
+    params = {"stats": "season", "group": "pitching", "season": season_year, "gameType": "R"}
     try:
-        if norm_t.split()[-1] != best.split()[-1]:
-            return None
-    except Exception:
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as e:
+        print(f"[Targeted backfill] Per-player stats request failed id={player_id} year={season_year}: {e}")
         return None
-    hit = merged.loc[merged["norm_name"] == best]
-    if hit.empty:
+    stats_list = body.get("stats") if isinstance(body, dict) else None
+    if not isinstance(stats_list, list) or not stats_list:
         return None
-    return hit.iloc[0]
+    splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+    if not isinstance(splits, list) or not splits:
+        return None
+    parsed = []
+    for sp in splits:
+        row = _pitch_row_from_mlb_stat_split(sp)
+        if row is not None:
+            parsed.append(row)
+    if not parsed:
+        return None
+    # Multiple splits (e.g. traded): keep row with most IP for a single representative line.
+    best = max(parsed, key=lambda r: float(r["IP"]) if r.get("IP") is not None else -1.0)
+    return best
+
+
+def _targeted_pitcher_csv_row_from_mlb_row(mlb_row: dict, savant_df: pd.DataFrame, min_ip: float) -> dict:
+    """Apply Savant xERA + LowIP (same semantics as update_pitcher_stats merge) for one pitcher."""
+    mlb_id = int(mlb_row["mlb_id"])
+    display = (mlb_row.get("Name") or "").strip()
+    norm_name = DataManager.normalize_name(display)
+    era = mlb_row.get("ERA")
+    whip = mlb_row.get("WHIP")
+    ip_val = mlb_row.get("IP")
+    try:
+        ip_f = float(ip_val) if ip_val is not None and pd.notna(ip_val) else 0.0
+    except (TypeError, ValueError):
+        ip_f = 0.0
+    xera = np.nan
+    if savant_df is not None and not savant_df.empty and "player_id" in savant_df.columns:
+        sub = savant_df.loc[savant_df["player_id"] == mlb_id]
+        if not sub.empty:
+            xera = sub.iloc[0].get("xERA")
+    if pd.isna(xera):
+        xera = float(era) if era is not None and pd.notna(era) else 4.25
+    else:
+        try:
+            xera = float(xera)
+        except (TypeError, ValueError):
+            xera = float(era) if era is not None and pd.notna(era) else 4.25
+    try:
+        whip_f = float(whip) if whip is not None and pd.notna(whip) else 1.30
+    except (TypeError, ValueError):
+        whip_f = 1.30
+    return {
+        "Name": norm_name,
+        "xERA": float(xera),
+        "WHIP": float(whip_f),
+        "IP": ip_f,
+        "LowIP": bool(ip_f < float(min_ip)),
+    }
 
 
 def _upsert_pitcher_stats_rows(new_rows: list) -> None:
@@ -1673,35 +1681,69 @@ def run_predictions():
         _n_attempt = len(_unresolved_before)
         print("--- TARGETED PROBABLE-PITCHER BACKFILL (independent MLB resolver) ---")
         print(f"  Targeted resolver attempted {_n_attempt} name(s): {', '.join(_unresolved_before)}")
+        print(
+            "  [Per-player lane] No global season leaderboard; each name → MLB id → "
+            "/people/{id}/stats (current year, else prior year)."
+        )
         try:
             _yr = datetime.now().year
-            _mlb_pull = _mlb_statsapi_season_pitching_for_targeted_backfill(_yr)
-            _merged_pull = _merge_mlb_savant_for_probable_backfill(_mlb_pull)
+            _mo = datetime.now().month
+            if _mo < 6:
+                _min_ip_tb = MIN_PITCHER_IP_EARLY
+            elif _mo < 8:
+                _min_ip_tb = MIN_PITCHER_IP_MID
+            else:
+                _min_ip_tb = MIN_PITCHER_IP_LATE
+            try:
+                _savant_tb = DataManager._savant_xera_by_id(_yr)
+            except Exception as _se:
+                print(f"[Targeted backfill] Savant xERA unavailable ({_se}); using ERA for xERA.")
+                _savant_tb = pd.DataFrame(columns=["player_id", "xERA"])
+                _savant_tb["player_id"] = pd.Series(dtype=int)
+                _savant_tb["xERA"] = pd.Series(dtype=float)
             _rows_to_file = []
             _seen_norm = set()
+            _id_ok = 0
+            _stat_ok = 0
             for _pn in _unresolved_before:
-                _hit = _find_backfill_row_for_probable(_merged_pull, _pn)
-                if _hit is None:
+                print(f"  [Targeted backfill] Lookup MLB id for probable: '{_pn}'")
+                _pid, _pfull = _mlb_targeted_resolve_pitcher_id(_pn)
+                if _pid is None:
+                    print(f"    → no MLB pitcher id resolved for '{_pn}'")
                     continue
-                _nk = str(_hit["norm_name"]).strip()
+                _id_ok += 1
+                print(f"    → MLB id {_pid} ({_pfull})")
+                _raw_row = None
+                _used_season = None
+                for _try_y in (_yr, _yr - 1):
+                    _raw_row = _mlb_targeted_fetch_player_season_pitching(_pid, _try_y)
+                    if _raw_row is not None:
+                        _used_season = _try_y
+                        break
+                if _raw_row is None:
+                    print(f"    → no season pitching stats for id={_pid} (tried {_yr}, {_yr - 1})")
+                    continue
+                _stat_ok += 1
+                print(
+                    f"    → season pitching OK (season={_used_season}, "
+                    f"IP={_raw_row.get('IP')}, ERA={_raw_row.get('ERA')}, WHIP={_raw_row.get('WHIP')})"
+                )
+                _csv_r = _targeted_pitcher_csv_row_from_mlb_row(_raw_row, _savant_tb, _min_ip_tb)
+                _nk = str(_csv_r.get("Name") or "").strip()
                 if not _nk or _nk in _seen_norm:
+                    if _nk and _nk in _seen_norm:
+                        print(f"    → skip duplicate norm Name upsert: {_nk}")
                     continue
                 _seen_norm.add(_nk)
-                try:
-                    _ip = float(_hit["IP"]) if pd.notna(_hit.get("IP")) else 0.0
-                except (TypeError, ValueError):
-                    _ip = 0.0
-                _rows_to_file.append(
-                    {
-                        "Name": _nk,
-                        "xERA": float(_hit["xERA"]),
-                        "WHIP": float(_hit["WHIP"]),
-                        "IP": _ip,
-                        "LowIP": bool(_hit["LowIP"]),
-                    }
-                )
+                _rows_to_file.append(_csv_r)
+            print(
+                f"  Per-player summary: MLB id resolved {_id_ok}/{_n_attempt}, "
+                f"successful stat pulls {_stat_ok}/{_n_attempt}, "
+                f"rows queued for upsert {len(_rows_to_file)}"
+            )
             if _rows_to_file:
                 _upsert_pitcher_stats_rows(_rows_to_file)
+                print(f"  Upserted {len(_rows_to_file)} pitcher row(s) into {STATS_FILE}")
                 try:
                     stats_df = DataManager.load_pitcher_stats()
                 except Exception:
