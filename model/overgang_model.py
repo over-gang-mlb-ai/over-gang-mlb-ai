@@ -291,6 +291,115 @@ def _pitcher_resolvable_locally_without_league_average(
     return False
 
 
+def _merge_mlb_savant_for_probable_backfill(mlb_df: pd.DataFrame) -> pd.DataFrame:
+    """Same MLB + Savant merge and LowIP rules as DataManager.update_pitcher_stats (no full-file write)."""
+    if mlb_df is None or mlb_df.empty:
+        return pd.DataFrame()
+    current_year = datetime.now().year
+    month = datetime.now().month
+    if month < 6:
+        min_ip = MIN_PITCHER_IP_EARLY
+    elif month < 8:
+        min_ip = MIN_PITCHER_IP_MID
+    else:
+        min_ip = MIN_PITCHER_IP_LATE
+    try:
+        savant_df = DataManager._savant_xera_by_id(current_year)
+    except Exception as e:
+        print(f"[Targeted backfill] Savant xERA unavailable ({e}); using ERA for xERA.")
+        savant_df = pd.DataFrame(columns=["player_id", "xERA"])
+        savant_df["player_id"] = pd.Series(dtype=int)
+        savant_df["xERA"] = pd.Series(dtype=float)
+    merged = mlb_df.merge(savant_df, left_on="mlb_id", right_on="player_id", how="left")
+    merged["xERA"] = merged["xERA"].where(~merged["xERA"].isna(), merged["ERA"])
+    merged["xERA"] = merged["xERA"].fillna(4.25)
+    merged["Name"] = merged["Name"].astype(str).str.strip()
+    merged["norm_name"] = merged["Name"].apply(DataManager.normalize_name)
+    merged["IP"] = pd.to_numeric(merged["IP"], errors="coerce")
+    merged["WHIP"] = pd.to_numeric(merged["WHIP"], errors="coerce")
+    merged["xERA"] = pd.to_numeric(merged["xERA"], errors="coerce")
+    merged["LowIP"] = merged["IP"] < float(min_ip)
+    merged = merged.sort_values(["norm_name", "IP"], ascending=[True, False])
+    merged = merged.drop_duplicates(subset=["norm_name"], keep="first")
+    return merged
+
+
+def _find_backfill_row_for_probable(merged: pd.DataFrame, probable_name: str):
+    """Match probable starter to merged MLB+Savant row (exact norm_name, else fuzzy + last-name guard)."""
+    if merged is None or merged.empty or not probable_name:
+        return None
+    norm_t = DataManager.normalize_name(probable_name)
+    if not norm_t:
+        return None
+    hit = merged.loc[merged["norm_name"] == norm_t]
+    if not hit.empty:
+        return hit.iloc[0]
+    choices = merged["norm_name"].dropna().astype(str).unique().tolist()
+    if not choices:
+        return None
+    res = process.extractOne(norm_t, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+    if not res:
+        return None
+    best, _sc = res[0], res[1]
+    try:
+        if norm_t.split()[-1] != best.split()[-1]:
+            return None
+    except Exception:
+        return None
+    hit = merged.loc[merged["norm_name"] == best]
+    if hit.empty:
+        return None
+    return hit.iloc[0]
+
+
+def _upsert_pitcher_stats_rows(new_rows: list) -> None:
+    """Merge rows into data/pitcher_stats.csv without replacing the whole file (preserves SAFE MODE intent)."""
+    if not new_rows:
+        return
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(STATS_FILE):
+        df = pd.read_csv(STATS_FILE)
+    else:
+        df = pd.DataFrame(columns=["Name", "xERA", "WHIP", "IP", "LowIP"])
+    for c in ("Name", "xERA", "WHIP", "IP", "LowIP"):
+        if c not in df.columns:
+            df[c] = np.nan if c != "Name" else ""
+    df["Name"] = df["Name"].astype(str)
+    for nr in new_rows:
+        norm_key = DataManager.normalize_name(str(nr.get("Name", "")))
+        if not norm_key:
+            continue
+        norms = df["Name"].apply(lambda x: DataManager.normalize_name(str(x)))
+        mask = norms == norm_key
+        if mask.any():
+            ix = int(df.index[mask][0])
+            df.at[ix, "Name"] = norm_key
+            df.at[ix, "xERA"] = nr["xERA"]
+            df.at[ix, "WHIP"] = nr["WHIP"]
+            df.at[ix, "IP"] = nr["IP"]
+            df.at[ix, "LowIP"] = bool(nr["LowIP"])
+        else:
+            df = pd.concat(
+                [
+                    df,
+                    pd.DataFrame(
+                        [
+                            {
+                                "Name": norm_key,
+                                "xERA": nr["xERA"],
+                                "WHIP": nr["WHIP"],
+                                "IP": nr["IP"],
+                                "LowIP": bool(nr["LowIP"]),
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+    df.to_csv(STATS_FILE, index=False)
+    print(f"[Targeted backfill] Wrote {len(new_rows)} pitcher row(s) into {STATS_FILE} (upsert)")
+
+
 # ================================
 # Live predictor: match_pitcher_row without FanGraphs scrape (league-average fallback directly)
 # ================================
@@ -1419,12 +1528,91 @@ def run_predictions():
     print("\n--- LOCAL PITCHER STATS PREFLIGHT ---")
     print(f"  Probable pitchers checked: {len(_probable_sorted)}")
     print(f"  Resolved locally (CSV / alias / fuzzy / manual): {len(_resolved_names)}")
-    print(f"  Unresolved (league-average fallback at runtime): {len(_unresolved_names)}")
+    print(f"  Unresolved before targeted MLB backfill: {len(_unresolved_names)}")
     if _unresolved_names:
-        print("  Unresolved names:")
+        print("  Unresolved names (pre-backfill):")
         for _u in _unresolved_names:
             print(f"    - {_u}")
     print("-------------------------------------\n")
+
+    # Targeted MLB StatsAPI backfill for today's unresolved probables (no FanGraphs; no full-file replace).
+    _unresolved_before = list(_unresolved_names)
+    if _unresolved_before:
+        print("--- TARGETED PROBABLE-PITCHER BACKFILL (MLB StatsAPI) ---")
+        print(f"  Unresolved before backfill ({len(_unresolved_before)}): {', '.join(_unresolved_before)}")
+        try:
+            _yr = datetime.now().year
+            _mlb_pull = DataManager._mlb_pitching_stats_by_id(_yr)
+            _merged_pull = _merge_mlb_savant_for_probable_backfill(_mlb_pull)
+            _rows_to_file = []
+            _seen_norm = set()
+            for _pn in _unresolved_before:
+                _hit = _find_backfill_row_for_probable(_merged_pull, _pn)
+                if _hit is None:
+                    continue
+                _nk = str(_hit["norm_name"]).strip()
+                if not _nk or _nk in _seen_norm:
+                    continue
+                _seen_norm.add(_nk)
+                try:
+                    _ip = float(_hit["IP"]) if pd.notna(_hit.get("IP")) else 0.0
+                except (TypeError, ValueError):
+                    _ip = 0.0
+                _rows_to_file.append(
+                    {
+                        "Name": _nk,
+                        "xERA": float(_hit["xERA"]),
+                        "WHIP": float(_hit["WHIP"]),
+                        "IP": _ip,
+                        "LowIP": bool(_hit["LowIP"]),
+                    }
+                )
+            if _rows_to_file:
+                _upsert_pitcher_stats_rows(_rows_to_file)
+                try:
+                    stats_df = DataManager.load_pitcher_stats()
+                except Exception:
+                    pass
+            # Names that were unresolved pre-backfill but now resolve locally (ground truth after CSV upsert).
+            _backfilled_probables = [
+                _pn
+                for _pn in _unresolved_before
+                if _pitcher_resolvable_locally_without_league_average(
+                    _pn, stats_df, manual_fallback_df, _alias_audit
+                )
+            ]
+            print(
+                f"  Successfully backfilled ({len(_backfilled_probables)}): "
+                f"{', '.join(_backfilled_probables) if _backfilled_probables else '(none)'}"
+            )
+            _still_unresolved = [
+                _nm
+                for _nm in _probable_sorted
+                if not _pitcher_resolvable_locally_without_league_average(
+                    _nm, stats_df, manual_fallback_df, _alias_audit
+                )
+            ]
+            print(f"  Still unresolved after backfill ({len(_still_unresolved)}): "
+                  f"{', '.join(_still_unresolved) if _still_unresolved else '(none)'}")
+            if _still_unresolved:
+                print("  Still unresolved names:")
+                for _su in _still_unresolved:
+                    print(f"    - {_su}")
+        except Exception as _tbe:
+            print(f"  Targeted backfill skipped or failed: {_tbe}")
+            print(
+                f"  Successfully backfilled (0): (none)\n"
+                f"  Still unresolved after backfill ({len(_unresolved_before)}): {', '.join(_unresolved_before)}"
+            )
+            if _unresolved_before:
+                print("  Still unresolved names:")
+                for _su in _unresolved_before:
+                    print(f"    - {_su}")
+        print("---------------------------------------------------------\n")
+    else:
+        print("--- TARGETED PROBABLE-PITCHER BACKFILL (MLB StatsAPI) ---\n"
+              "  Skipped: no unresolved probable pitchers.\n"
+              "---------------------------------------------------------\n")
 
     # ================================
     # 📅 OPENING DAY PREFLIGHT (readiness)
