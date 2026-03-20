@@ -1673,6 +1673,10 @@ def run_predictions():
         print("  Unresolved names (pre-backfill):")
         for _u in _unresolved_names:
             print(f"    - {_u}")
+        print(
+            "  Note: next step tries MLB id + per-player reg-season stats only; "
+            "logs label no-id vs no-MLB-season-stats (spring/no-debut) vs upsert success."
+        )
     print("-------------------------------------\n")
 
     # Targeted MLB StatsAPI backfill for today's unresolved probables (no FanGraphs; no full-file replace).
@@ -1705,11 +1709,17 @@ def run_predictions():
             _seen_norm = set()
             _id_ok = 0
             _stat_ok = 0
+            _tb_no_mlb_pitcher_id = []
+            _tb_id_no_reg_season_stats = []  # (probable_name, mlb_id, api_full_name)
             for _pn in _unresolved_before:
                 print(f"  [Targeted backfill] Lookup MLB id for probable: '{_pn}'")
                 _pid, _pfull = _mlb_targeted_resolve_pitcher_id(_pn)
                 if _pid is None:
-                    print(f"    → no MLB pitcher id resolved for '{_pn}'")
+                    _tb_no_mlb_pitcher_id.append(_pn)
+                    print(
+                        f"    → CLASS: no_MLB_pitcher_id — MLB search did not yield a P match for '{_pn}' "
+                        "(bad string / non-roster / lookup miss; not a scraper failure)"
+                    )
                     continue
                 _id_ok += 1
                 print(f"    → MLB id {_pid} ({_pfull})")
@@ -1721,7 +1731,12 @@ def run_predictions():
                         _used_season = _try_y
                         break
                 if _raw_row is None:
-                    print(f"    → no season pitching stats for id={_pid} (tried {_yr}, {_yr - 1})")
+                    _tb_id_no_reg_season_stats.append((_pn, _pid, _pfull or ""))
+                    print(
+                        f"    → CLASS: no_MLB_reg_season_pitching_stats — id={_pid} "
+                        f"(tried seasons {_yr}, {_yr - 1}); "
+                        "typical spring: prospect / no MLB line yet — league-average fallback expected, not a data bug"
+                    )
                     continue
                 _stat_ok += 1
                 print(
@@ -1732,14 +1747,26 @@ def run_predictions():
                 _nk = str(_csv_r.get("Name") or "").strip()
                 if not _nk or _nk in _seen_norm:
                     if _nk and _nk in _seen_norm:
-                        print(f"    → skip duplicate norm Name upsert: {_nk}")
+                        print(
+                            f"    → CLASS: stats_ok_duplicate_pitcher — skip upsert (norm '{_nk}' already queued); "
+                            "if name still fails local match, check alias/schedule spelling"
+                        )
                     continue
                 _seen_norm.add(_nk)
                 _rows_to_file.append(_csv_r)
+            print("  --- Targeted backfill classification (attempted probables) ---")
             print(
-                f"  Per-player summary: MLB id resolved {_id_ok}/{_n_attempt}, "
-                f"successful stat pulls {_stat_ok}/{_n_attempt}, "
-                f"rows queued for upsert {len(_rows_to_file)}"
+                f"  No MLB pitcher id: {len(_tb_no_mlb_pitcher_id)}/{_n_attempt} — "
+                f"{', '.join(_tb_no_mlb_pitcher_id) if _tb_no_mlb_pitcher_id else '(none)'}"
+            )
+            print(
+                f"  MLB id OK, no reg-season pitching stats ({_yr}/{_yr - 1}): "
+                f"{len(_tb_id_no_reg_season_stats)}/{_n_attempt} — "
+                f"{', '.join(f'{a} (id {b})' for a, b, _c in _tb_id_no_reg_season_stats) if _tb_id_no_reg_season_stats else '(none)'}"
+            )
+            print(
+                f"  Per-player counts: id resolved {_id_ok}/{_n_attempt}, "
+                f"stat pulls OK {_stat_ok}/{_n_attempt}, rows queued for upsert {len(_rows_to_file)}"
             )
             if _rows_to_file:
                 _upsert_pitcher_stats_rows(_rows_to_file)
@@ -1758,7 +1785,7 @@ def run_predictions():
             ]
             _m_ok = len(_backfilled_probables)
             print(
-                f"  Successfully resolved {_m_ok} of {_n_attempt} attempted: "
+                f"  Resolved locally after targeted backfill (upsert/CSV): {_m_ok}/{_n_attempt} — "
                 f"{', '.join(_backfilled_probables) if _backfilled_probables else '(none)'}"
             )
             _still_unresolved = [
@@ -1769,12 +1796,27 @@ def run_predictions():
                 )
             ]
             _k_remain = len(_still_unresolved)
-            print(f"  Unresolved {_k_remain} name(s) remain (league-average fallback if still missing at match time): "
+            print(f"  Slate still unresolved (league-average at match time): {_k_remain} — "
                   f"{', '.join(_still_unresolved) if _still_unresolved else '(none)'}")
             if _still_unresolved:
                 print("  Still unresolved names:")
                 for _su in _still_unresolved:
                     print(f"    - {_su}")
+            _no_id_set = set(_tb_no_mlb_pitcher_id)
+            _no_stats_set = {t[0] for t in _tb_id_no_reg_season_stats}
+            _still_from_tb = [n for n in _still_unresolved if n in _unresolved_before]
+            if _still_from_tb:
+                print("  Reasons for targeted-list names still on league-average path:")
+                for _sn in _still_from_tb:
+                    if _sn in _no_id_set:
+                        print(f"    - {_sn}: no_MLB_pitcher_id")
+                    elif _sn in _no_stats_set:
+                        print(
+                            f"    - {_sn}: no_MLB_reg_season_pitching_stats "
+                            f"(expected spring / no MLB line — not a scraper issue)"
+                        )
+                    else:
+                        print(f"    - {_sn}: other (see per-name lines above; e.g. duplicate norm / edge match)")
         except Exception as _tbe:
             print(f"  Targeted resolver error (independent path; full-file SAFE MODE unchanged): {_tbe}")
             print(f"  Successfully resolved 0 of {_n_attempt} attempted: (none)")
