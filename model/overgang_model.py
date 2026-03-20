@@ -221,6 +221,9 @@ NAME_MATCH_THRESHOLD = 85
 FATIGUE_THRESHOLD = 4.25
 VELOCITY_DROP_THRESHOLD = -1.5
 
+# Session-only: schedule probable (lower) → pitcher_stats index key for targeted MLB id + no reg-season-stat cases.
+RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES = {}
+
 
 def _build_pitcher_alias_reversed_dict():
     """Variation (lower) -> official (lower); same as match_pitcher_row alias step."""
@@ -259,13 +262,15 @@ def _pitcher_resolvable_locally_without_league_average(
     if not pn or pn.strip().upper() == "TBD":
         return False
 
-    clean_name = DataManager.normalize_name(pitcher_name)
+    alias_key = pn.lower()
+    if RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES and alias_key in RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES:
+        clean_name = DataManager.normalize_name(RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES[alias_key])
+    elif reversed_aliases and alias_key in reversed_aliases:
+        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
+    else:
+        clean_name = DataManager.normalize_name(pitcher_name)
     if clean_name in {"league avg away", "league avg home"}:
         return True
-
-    alias_key = pn.lower()
-    if reversed_aliases and alias_key in reversed_aliases:
-        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
 
     if isinstance(stats_df, pd.DataFrame) and not stats_df.empty:
         if clean_name in stats_df.index:
@@ -289,6 +294,41 @@ def _pitcher_resolvable_locally_without_league_average(
             return True
 
     return False
+
+
+def _local_pitcher_stats_index_key(pitcher_name: str, stats_df: pd.DataFrame, reversed_aliases: dict):
+    """
+    If pitcher_stats.csv (stats_df index) already has a usable row for this name, return the index key.
+    Same alias + fuzzy + last-name rules as _pitcher_resolvable_locally_without_league_average (no manual CSV).
+    """
+    if not pitcher_name or not str(pitcher_name).strip():
+        return None
+    pn = str(pitcher_name).strip()
+    if pn.upper() == "TBD":
+        return None
+    if not isinstance(stats_df, pd.DataFrame) or stats_df.empty:
+        return None
+    alias_key = pn.lower()
+    if reversed_aliases and alias_key in reversed_aliases:
+        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
+    else:
+        clean_name = DataManager.normalize_name(pitcher_name)
+    if clean_name in stats_df.index:
+        row = stats_df.loc[clean_name]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        if not row.isnull().any():
+            return clean_name
+    choices = stats_df.index.tolist()
+    result = process.extractOne(clean_name, choices, scorer=fuzz.WRatio, score_cutoff=NAME_MATCH_THRESHOLD)
+    if result:
+        best_match, score = result[0], result[1]
+        try:
+            if clean_name.split()[-1] == best_match.split()[-1]:
+                return best_match
+        except Exception:
+            pass
+    return None
 
 
 def _pitch_row_from_mlb_stat_split(sp: dict):
@@ -568,28 +608,34 @@ try:
                     return row[["xERA", "WHIP", "IP", "LowIP"]]
                 return pd.Series({"xERA": 4.20, "WHIP": 1.30, "IP": 150.0, "LowIP": False}, name=clean_name)
 
-            alias_file = os.path.join(DATA_DIR, "pitcher_aliases.json")
-            if os.path.exists(alias_file):
-                try:
-                    with open(alias_file, "r") as f:
-                        alias_map = json.load(f)
+            alias_key = pitcher_name.strip().lower()
+            if alias_key in RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES:
+                clean_name = DataManager.normalize_name(RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES[alias_key])
+                print(f"🔁 Targeted local-recovery alias: {pitcher_name} → {clean_name}")
+                if alias_log is not None:
+                    alias_log.append(f"{pitcher_name} → {clean_name} [targeted_local_recovery]")
+            else:
+                alias_file = os.path.join(DATA_DIR, "pitcher_aliases.json")
+                if os.path.exists(alias_file):
+                    try:
+                        with open(alias_file, "r") as f:
+                            alias_map = json.load(f)
 
-                    alias_key = pitcher_name.strip().lower()
-                    reversed_aliases = {}
-                    for official, variations in alias_map.items():
-                        if isinstance(variations, list):
-                            for a in variations:
-                                reversed_aliases[a.lower()] = official.lower()
-                        elif isinstance(variations, str) and variations.strip():
-                            reversed_aliases[variations.lower()] = official.lower()
+                        reversed_aliases = {}
+                        for official, variations in alias_map.items():
+                            if isinstance(variations, list):
+                                for a in variations:
+                                    reversed_aliases[a.lower()] = official.lower()
+                            elif isinstance(variations, str) and variations.strip():
+                                reversed_aliases[variations.lower()] = official.lower()
 
-                    if alias_key in reversed_aliases:
-                        clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
-                        print(f"🔁 Alias matched: {pitcher_name} → {clean_name}")
-                        if alias_log is not None:
-                            alias_log.append(f"{pitcher_name} → {clean_name}")
-                except Exception as e:
-                    print(f"⚠️ Alias file error: {e}")
+                        if alias_key in reversed_aliases:
+                            clean_name = DataManager.normalize_name(reversed_aliases[alias_key])
+                            print(f"🔁 Alias matched: {pitcher_name} → {clean_name}")
+                            if alias_log is not None:
+                                alias_log.append(f"{pitcher_name} → {clean_name}")
+                    except Exception as e:
+                        print(f"⚠️ Alias file error: {e}")
 
             if clean_name in df.index:
                 row = df.loc[clean_name]
@@ -1646,6 +1692,7 @@ def run_predictions():
     alias_log = []
 
     # --- Local pitcher_stats preflight: who is missing before game processing (no scraper) ---
+    RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES.clear()
     _alias_audit = _build_pitcher_alias_reversed_dict()
     _probable_pitchers = set()
     for _g in games:
@@ -1735,7 +1782,7 @@ def run_predictions():
                     print(
                         f"    → CLASS: no_MLB_reg_season_pitching_stats — id={_pid} "
                         f"(tried seasons {_yr}, {_yr - 1}); "
-                        "typical spring: prospect / no MLB line yet — league-average fallback expected, not a data bug"
+                        "will try local pitcher_stats row next (API name / schedule name); else league average"
                     )
                     continue
                 _stat_ok += 1
@@ -1754,20 +1801,6 @@ def run_predictions():
                     continue
                 _seen_norm.add(_nk)
                 _rows_to_file.append(_csv_r)
-            print("  --- Targeted backfill classification (attempted probables) ---")
-            print(
-                f"  No MLB pitcher id: {len(_tb_no_mlb_pitcher_id)}/{_n_attempt} — "
-                f"{', '.join(_tb_no_mlb_pitcher_id) if _tb_no_mlb_pitcher_id else '(none)'}"
-            )
-            print(
-                f"  MLB id OK, no reg-season pitching stats ({_yr}/{_yr - 1}): "
-                f"{len(_tb_id_no_reg_season_stats)}/{_n_attempt} — "
-                f"{', '.join(f'{a} (id {b})' for a, b, _c in _tb_id_no_reg_season_stats) if _tb_id_no_reg_season_stats else '(none)'}"
-            )
-            print(
-                f"  Per-player counts: id resolved {_id_ok}/{_n_attempt}, "
-                f"stat pulls OK {_stat_ok}/{_n_attempt}, rows queued for upsert {len(_rows_to_file)}"
-            )
             if _rows_to_file:
                 _upsert_pitcher_stats_rows(_rows_to_file)
                 print(f"  Upserted {len(_rows_to_file)} pitcher row(s) into {STATS_FILE}")
@@ -1775,6 +1808,57 @@ def run_predictions():
                     stats_df = DataManager.load_pitcher_stats()
                 except Exception:
                     pass
+            # Final local tier: MLB id + no reg-season stats — try existing pitcher_stats row via API/schedule name.
+            _tb_local_recovered = []
+            for _pn_lr, _pid_lr, _pfull_lr in _tb_id_no_reg_season_stats:
+                if _pitcher_resolvable_locally_without_league_average(
+                    _pn_lr, stats_df, manual_fallback_df, _alias_audit
+                ):
+                    continue
+                _hit_key = None
+                _hit_via = None
+                for _cand, _via in ((_pfull_lr, "mlb_api_fullName"), (_pn_lr, "schedule_name")):
+                    if not _cand or not str(_cand).strip():
+                        continue
+                    _k2 = _local_pitcher_stats_index_key(_cand, stats_df, _alias_audit)
+                    if _k2 is not None:
+                        _hit_key, _hit_via = _k2, _via
+                        break
+                if _hit_key is not None:
+                    RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES[_pn_lr.strip().lower()] = _hit_key
+                    _tb_local_recovered.append((_pn_lr, _hit_key, _hit_via, _pid_lr))
+                    print(
+                        f"  [Targeted backfill] CLASS: local_existing_row_recovery — "
+                        f"schedule '{_pn_lr}' → pitcher_stats index '{_hit_key}' "
+                        f"(via {_hit_via}; MLB id {_pid_lr}; not an MLB stat upsert)"
+                    )
+            _tb_id_no_reg_still = [
+                t for t in _tb_id_no_reg_season_stats if t[0] not in {x[0] for x in _tb_local_recovered}
+            ]
+            print("  --- Targeted backfill classification (attempted probables) ---")
+            print(
+                f"  No MLB pitcher id: {len(_tb_no_mlb_pitcher_id)}/{_n_attempt} — "
+                f"{', '.join(_tb_no_mlb_pitcher_id) if _tb_no_mlb_pitcher_id else '(none)'}"
+            )
+            print(
+                f"  MLB id OK, no reg-season pitching stats ({_yr}/{_yr - 1}) — pre-local check: "
+                f"{len(_tb_id_no_reg_season_stats)}/{_n_attempt} — "
+                f"{', '.join(f'{a} (id {b})' for a, b, _c in _tb_id_no_reg_season_stats) if _tb_id_no_reg_season_stats else '(none)'}"
+            )
+            print(
+                f"  Local CSV recovery (existing pitcher_stats row; runtime alias only): "
+                f"{len(_tb_local_recovered)}/{_n_attempt} — "
+                f"{', '.join(f'{a}→{b}' for a, b, _v, _p in _tb_local_recovered) if _tb_local_recovered else '(none)'}"
+            )
+            print(
+                f"  After local recovery, still no pitcher_stats row (league average): "
+                f"{len(_tb_id_no_reg_still)}/{_n_attempt} — "
+                f"{', '.join(f'{a} (id {b})' for a, b, _c in _tb_id_no_reg_still) if _tb_id_no_reg_still else '(none)'}"
+            )
+            print(
+                f"  Per-player counts: id resolved {_id_ok}/{_n_attempt}, "
+                f"stat pulls OK {_stat_ok}/{_n_attempt}, rows queued for upsert {len(_rows_to_file)}"
+            )
             # Names that were unresolved pre-backfill but now resolve locally (ground truth after CSV upsert).
             _backfilled_probables = [
                 _pn
@@ -1785,7 +1869,7 @@ def run_predictions():
             ]
             _m_ok = len(_backfilled_probables)
             print(
-                f"  Resolved locally after targeted backfill (upsert/CSV): {_m_ok}/{_n_attempt} — "
+                f"  Resolved locally after targeted lane (MLB stat upsert + local CSV recovery): {_m_ok}/{_n_attempt} — "
                 f"{', '.join(_backfilled_probables) if _backfilled_probables else '(none)'}"
             )
             _still_unresolved = [
@@ -1803,17 +1887,20 @@ def run_predictions():
                 for _su in _still_unresolved:
                     print(f"    - {_su}")
             _no_id_set = set(_tb_no_mlb_pitcher_id)
-            _no_stats_set = {t[0] for t in _tb_id_no_reg_season_stats}
+            _no_stats_still_set = {t[0] for t in _tb_id_no_reg_still}
+            _local_rec_set = {t[0] for t in _tb_local_recovered}
             _still_from_tb = [n for n in _still_unresolved if n in _unresolved_before]
             if _still_from_tb:
                 print("  Reasons for targeted-list names still on league-average path:")
                 for _sn in _still_from_tb:
                     if _sn in _no_id_set:
                         print(f"    - {_sn}: no_MLB_pitcher_id")
-                    elif _sn in _no_stats_set:
+                    elif _sn in _local_rec_set:
+                        print(f"    - {_sn}: internal error (local recovery should have resolved; check logs)")
+                    elif _sn in _no_stats_still_set:
                         print(
-                            f"    - {_sn}: no_MLB_reg_season_pitching_stats "
-                            f"(expected spring / no MLB line — not a scraper issue)"
+                            f"    - {_sn}: no_MLB_reg_season_pitching_stats_and_no_local_row "
+                            f"(prospect / spring — league average expected)"
                         )
                     else:
                         print(f"    - {_sn}: other (see per-name lines above; e.g. duplicate norm / edge match)")
