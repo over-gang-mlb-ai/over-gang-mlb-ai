@@ -528,29 +528,76 @@ class DataManager:
             merged = merged.drop_duplicates(subset=["norm_name"], keep="first")
 
             out = merged[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
-            if len(out) < MIN_PITCHER_SAVE_COUNT:
-                if mlb_prior_year_fallback and len(out) > 0:
+            out["Name"] = out["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
+            out = out.drop_duplicates(subset="Name", keep="first")
+            refresh_n = len(out)
+
+            # Load existing canonical base (broad universe) before row-count guard and merge.
+            existing_canon = pd.DataFrame(columns=["Name", "xERA", "WHIP", "IP", "LowIP"])
+            existing_n = 0
+            if os.path.exists(STATS_FILE):
+                _ex = DataManager._read_csv_with_column_normalization(STATS_FILE)
+                if _ex is not None and not _ex.empty and "Name" in _ex.columns:
+                    for c in ("xERA", "WHIP", "IP", "LowIP"):
+                        if c not in _ex.columns:
+                            _ex[c] = pd.NA
+                    _ex["Name"] = _ex["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
+                    _ex = _ex.drop_duplicates(subset="Name", keep="last")
+                    existing_canon = _ex[["Name", "xERA", "WHIP", "IP", "LowIP"]].copy()
+                    existing_n = len(existing_canon)
+
+            # Strict row-count guard only when there is no canonical file to merge into (first bootstrap).
+            if refresh_n < MIN_PITCHER_SAVE_COUNT:
+                if mlb_prior_year_fallback and refresh_n > 0:
                     print(
                         "[Pitcher update] Final save allowed: row count below MIN_PITCHER_SAVE_COUNT "
-                        f"({len(out)} < {MIN_PITCHER_SAVE_COUNT}) but merge used accepted prior-year preseason "
-                        "MLB StatsAPI data — overwriting pitcher_stats.csv."
+                        f"({refresh_n} < {MIN_PITCHER_SAVE_COUNT}) but merge used accepted prior-year "
+                        "MLB StatsAPI data — will merge into canonical (or create baseline)."
+                    )
+                elif existing_n > 0:
+                    print(
+                        "[Pitcher update] Refresh row count below MIN_PITCHER_SAVE_COUNT "
+                        f"({refresh_n} < {MIN_PITCHER_SAVE_COUNT}); merging into existing canonical "
+                        f"({existing_n} rows) — breadth preserved."
                     )
                 else:
-                    print(f"[Pitcher update] Refusing to overwrite pitcher_stats.csv because new row count is too small: {len(out)}")
+                    print(
+                        f"[Pitcher update] Refusing initial write: new row count too small ({refresh_n}) "
+                        f"and no existing canonical at {STATS_FILE}"
+                    )
                     raise ValueError(
-                        f"Pitcher update aborted: new row count ({len(out)}) below minimum ({MIN_PITCHER_SAVE_COUNT}); "
+                        f"Pitcher update aborted: new row count ({refresh_n}) below minimum ({MIN_PITCHER_SAVE_COUNT}); "
                         "existing file not overwritten."
                     )
-            os.makedirs(DATA_DIR, exist_ok=True)
-            out.to_csv(STATS_FILE, index=False)
 
-            print(f"✅ Saved {len(out)} pitchers to {STATS_FILE} (min_ip={min_ip})")
+            # Merge: refresh rows update matching names; all other canonical rows are kept.
+            refresh_names = set(out["Name"].tolist())
+            if existing_n > 0:
+                only_in_existing = existing_canon[~existing_canon["Name"].isin(refresh_names)].copy()
+                final_out = pd.concat([out, only_in_existing], ignore_index=True)
+            else:
+                final_out = out.copy()
+            final_out = final_out.drop_duplicates(subset="Name", keep="first")
+            final_n = len(final_out)
+
+            narrow_refresh = existing_n > 0 and refresh_n < existing_n
+            print(
+                "[Pitcher update] Canonical merge: "
+                f"refresh_rows={refresh_n} | existing_canonical_rows={existing_n} | "
+                f"final_merged_rows={final_n} | "
+                f"narrow_refresh_merged_without_dropping_breadth={bool(narrow_refresh)}"
+            )
+
+            os.makedirs(DATA_DIR, exist_ok=True)
+            final_out.to_csv(STATS_FILE, index=False)
+
+            print(f"✅ Saved {final_n} pitchers to {STATS_FILE} (min_ip={min_ip})")
 
             # also save LowIP fallback file
             fallback_file = os.path.join(DATA_DIR, "pitcher_stats_lowip.csv")
-            out[out["LowIP"]].to_csv(fallback_file, index=False)
+            final_out[final_out["LowIP"]].to_csv(fallback_file, index=False)
 
-            return out.set_index("Name")
+            return final_out.set_index("Name")
 
         except Exception as e:
             print(f"❌ Update failed: {e}")
