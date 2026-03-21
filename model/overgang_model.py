@@ -955,23 +955,33 @@ class VegasLines:
 
         # 2) API / merged odds map
         if odds_map is not None:
-            row = get_game_odds(away_team, home_team, odds_map)
-            raw_line = row.get("total_line")
-            raw_line_missing = raw_line is None or raw_line == ""
-            if raw_line is None or raw_line == "":
-                line = 8.5
-            else:
-                try:
-                    line = float(raw_line)
-                except (TypeError, ValueError):
-                    line = 8.5
-            info = dict(row)
             match_found = lookup_key in odds_map
-            book_empty = not (row.get("book") or "").strip()
-            book_scrambled = (row.get("book") or "").strip().lower() == "scrambled"
+            row = get_game_odds(away_team, home_team, odds_map)
+            # get_game_odds returns DEFAULT_TOTAL when there is no map row OR when the row has no total_line.
+            # Real-total classification must use the matched map row only — never treat default 8.5 as a book line.
+            if match_found:
+                mrow = odds_map.get(lookup_key) or {}
+                raw_line = mrow.get("total_line")
+                src_for_flags = mrow
+                info = dict(row)
+                for _k in ("sportsbook_id", "sportsbook_url", "odd_type"):
+                    if _k in mrow:
+                        info[_k] = mrow.get(_k)
+            else:
+                raw_line = None
+                src_for_flags = row
+                info = dict(row)
+            raw_line_missing = raw_line is None or raw_line == ""
+            try:
+                line = float(row.get("total_line", 8.5))
+            except (TypeError, ValueError):
+                line = 8.5
+            book_empty = not (src_for_flags.get("book") or "").strip()
+            book_scrambled = (src_for_flags.get("book") or "").strip().lower() == "scrambled"
             line_realistic = (5 <= line <= 15) if isinstance(line, (int, float)) else False
             has_real_total = (
-                (raw_line is not None and raw_line != "")
+                bool(match_found)
+                and (not raw_line_missing)
                 and (not book_scrambled)
                 and line_realistic
             )
