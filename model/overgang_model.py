@@ -932,11 +932,12 @@ def _load_manual_totals():
 
 class VegasLines:
     @staticmethod
-    def get_vegas_line(home_team, away_team, odds_map=None):
+    def get_vegas_line(home_team, away_team, odds_map=None, *, emit_live_total_diagnostics=True):
         """
         Return (vegas_line_float, odds_info_dict).
         odds_info_dict has total_line, over_juice, under_juice, ml_home, ml_away, book.
         Uses The Odds API when odds_map provided and match found; else CSV; else 8.5 + default juice/book.
+        Set emit_live_total_diagnostics=False for silent classification (e.g. preflight counts) — same logic, no prints.
         """
         lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
 
@@ -1004,28 +1005,29 @@ class VegasLines:
                 info["_blocker_missing_total_line"] = bool(raw_line_missing and (not book_empty) and (not book_scrambled))
                 info["_blocker_unrealistic_total"] = bool((not raw_line_missing) and (not line_realistic) and (not book_empty) and (not book_scrambled))
                 info["_blocker_real_total_pass"] = bool(has_real_total)
-                _emit_lt_diag = lookup_key not in _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED
-                if _emit_lt_diag:
-                    _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED.add(lookup_key)
-                if _emit_lt_diag:
-                    if book_empty:
-                        _raw_detail = {}
-                        if isinstance(odds_map, dict):
-                            _raw_detail = odds_map.get(lookup_key) or {}
-                        _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
-                        _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
-                        _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
+                if emit_live_total_diagnostics:
+                    _emit_lt_diag = lookup_key not in _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED
+                    if _emit_lt_diag:
+                        _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED.add(lookup_key)
+                    if _emit_lt_diag:
+                        if book_empty:
+                            _raw_detail = {}
+                            if isinstance(odds_map, dict):
+                                _raw_detail = odds_map.get(lookup_key) or {}
+                            _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
+                            _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
+                            _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
+                            print(
+                                "[EMPTY BOOK DETAIL] "
+                                f"key={lookup_key} | sportsbook_id={repr(_sportsbook_id)} | sportsbook_url={repr(_sportsbook_url)} | "
+                                f"odd_type={repr(_odd_type)} | source={source}"
+                            )
                         print(
-                            "[EMPTY BOOK DETAIL] "
-                            f"key={lookup_key} | sportsbook_id={repr(_sportsbook_id)} | sportsbook_url={repr(_sportsbook_url)} | "
-                            f"odd_type={repr(_odd_type)} | source={source}"
+                            "[LIVE TOTAL CHECK] "
+                            f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
+                            f"book={repr(row.get('book'))} | source={source} | realistic={line_realistic} | "
+                            f"scrambled={book_scrambled} | _has_real_total={bool(has_real_total)}"
                         )
-                    print(
-                        "[LIVE TOTAL CHECK] "
-                        f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
-                        f"book={repr(row.get('book'))} | source={source} | realistic={line_realistic} | "
-                        f"scrambled={book_scrambled} | _has_real_total={bool(has_real_total)}"
-                    )
             return (line, info)
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
@@ -1615,6 +1617,7 @@ def _preflight_count_games_with_real_totals(games, odds_map):
     """
     Count slate games where VegasLines.get_vegas_line reports _has_real_total (same rule as per-game logs).
     Does not treat mere odds_map keys or default 8.5 as real market coverage.
+    Uses emit_live_total_diagnostics=False so preflight does not print per-game live-total diagnostics.
     """
     if not games:
         return 0
@@ -1623,7 +1626,9 @@ def _preflight_count_games_with_real_totals(games, odds_map):
         try:
             home_team = safe_get(g, "home_name", "")
             away_team = safe_get(g, "away_name", "")
-            _, info = VegasLines.get_vegas_line(home_team, away_team, odds_map)
+            _, info = VegasLines.get_vegas_line(
+                home_team, away_team, odds_map, emit_live_total_diagnostics=False
+            )
             if bool(info.get("_has_real_total")):
                 n += 1
         except Exception:
