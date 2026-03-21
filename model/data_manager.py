@@ -9,6 +9,7 @@ from datetime import datetime
 from unidecode import unidecode
 from rapidfuzz import fuzz, process
 from itertools import islice
+from typing import Tuple
 from urllib.parse import urlencode
 
 # ================================
@@ -256,10 +257,11 @@ class DataManager:
             raise ValueError(msg)
 
     @staticmethod
-    def _mlb_pitching_stats_by_id(year: int) -> pd.DataFrame:
+    def _mlb_pitching_stats_by_id(year: int) -> Tuple[pd.DataFrame, bool]:
         """
         Pull ERA/WHIP/IP for all active MLB pitchers via MLB StatsAPI (free).
-        Returns columns: mlb_id, Name, ERA, WHIP, IP
+        Returns (DataFrame with columns mlb_id, Name, ERA, WHIP, IP, used_prior_year_fallback).
+        used_prior_year_fallback is True when current season had 0 regular-season splits and prior year was used.
         """
         headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -475,7 +477,7 @@ class DataManager:
                 f"MLB StatsAPI returned no pitcher rows (raw splits: {total_raw_splits}, "
                 "rows with ERA/WHIP/IP: 0). Check API response structure for stat/player."
             )
-        return df
+        return df, used_fallback
 
     # ----------------------------
     # Public API
@@ -498,7 +500,7 @@ class DataManager:
             else:
                 min_ip = MIN_PITCHER_IP_LATE
 
-            mlb_df = DataManager._mlb_pitching_stats_by_id(current_year)
+            mlb_df, mlb_prior_year_fallback = DataManager._mlb_pitching_stats_by_id(current_year)
 
             try:
                 savant_df = DataManager._savant_xera_by_id(current_year)
@@ -527,11 +529,18 @@ class DataManager:
 
             out = merged[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
             if len(out) < MIN_PITCHER_SAVE_COUNT:
-                print(f"[Pitcher update] Refusing to overwrite pitcher_stats.csv because new row count is too small: {len(out)}")
-                raise ValueError(
-                    f"Pitcher update aborted: new row count ({len(out)}) below minimum ({MIN_PITCHER_SAVE_COUNT}); "
-                    "existing file not overwritten."
-                )
+                if mlb_prior_year_fallback and len(out) > 0:
+                    print(
+                        "[Pitcher update] Final save allowed: row count below MIN_PITCHER_SAVE_COUNT "
+                        f"({len(out)} < {MIN_PITCHER_SAVE_COUNT}) but merge used accepted prior-year preseason "
+                        "MLB StatsAPI data — overwriting pitcher_stats.csv."
+                    )
+                else:
+                    print(f"[Pitcher update] Refusing to overwrite pitcher_stats.csv because new row count is too small: {len(out)}")
+                    raise ValueError(
+                        f"Pitcher update aborted: new row count ({len(out)}) below minimum ({MIN_PITCHER_SAVE_COUNT}); "
+                        "existing file not overwritten."
+                    )
             os.makedirs(DATA_DIR, exist_ok=True)
             out.to_csv(STATS_FILE, index=False)
 
