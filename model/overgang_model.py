@@ -1067,6 +1067,51 @@ class VegasLines:
         return (8.5, info)
 
 
+def _sdio_pregame_over_under(row):
+    """Read Over/Under total from a PregameOdds row (field names vary by API version)."""
+    if not isinstance(row, dict):
+        return None
+    for key in (
+        "OverUnder",
+        "overUnder",
+        "OverUnderLine",
+        "GameTotal",
+        "Total",
+        "GameTotalLine",
+        "over_under",
+    ):
+        v = row.get(key)
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _sdio_collect_total_candidates(book_rows, book_priority, ou_lo, ou_hi):
+    """
+    Return list of (rank, book_name, row, ou) for non-scrambled rows with OverUnder in [ou_lo, ou_hi].
+    """
+    out = []
+    for book_key, book_name, row in book_rows:
+        if (book_name or "").strip().lower() == "scrambled":
+            continue
+        ou = _sdio_pregame_over_under(row)
+        if ou is None:
+            continue
+        if not (ou_lo <= ou <= ou_hi):
+            continue
+        try:
+            rank = book_priority.index(book_key)
+        except ValueError:
+            rank = len(book_priority)
+        out.append((rank, book_name, row, ou))
+    out.sort(key=lambda t: (t[0], str(t[1] or "")))
+    return out
+
+
 def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
     """
     SportsDataIO GameOddsByDate → same dict shape as core.sportsdataio.fetch_mlb_odds_by_date.
@@ -1074,6 +1119,8 @@ def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
     Differs only in trusted total selection: does NOT skip PregameOdds rows solely because
     Sportsbook / SportsbookName is blank when OverUnder is numeric and in range (pregame).
     Book priority still applies when book_key matches BOOK_PRIORITY; unknown books use rank fallback.
+    Numeric total_line is set from OverUnder whenever a valid candidate exists; trusted_total_row
+    reflects sportsbook metadata quality only (does not drop totals when book text is blank).
     """
     import core.sportsdataio as sio
 
@@ -1141,8 +1188,6 @@ def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
     for game_key, book_rows in by_game.items():
         best_row_ml = None
         best_rank_ml = len(BOOK_PRIORITY) + 1
-        best_row_total = None
-        best_rank_total = len(BOOK_PRIORITY) + 1
 
         for book_key, book_name, row in book_rows:
             try:
@@ -1154,33 +1199,34 @@ def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
                 best_rank_ml = rank
                 best_row_ml = (book_name, row)
 
-            # Trusted total: valid pregame OverUnder in MLB range; do not require non-empty book text.
-            _book = (book_name or "").strip()
-            if _book.lower() == "scrambled":
-                continue
-
-            over_under = row.get("OverUnder")
-            try:
-                total_candidate = float(over_under)
-            except (TypeError, ValueError):
-                continue
-            if total_candidate < 5 or total_candidate > 15:
-                continue
-
-            if rank < best_rank_total:
-                best_rank_total = rank
-                best_row_total = (book_name, row)
+        # Total: pick best book-priority row with valid numeric OverUnder (metadata optional).
+        candidates = _sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 5.0, 15.0)
+        if not candidates:
+            candidates = _sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 4.5, 16.5)
+        best_row_total = None
+        picked_ou = None
+        if candidates:
+            _r, picked_book_name, total_row, picked_ou = candidates[0]
+            best_row_total = (picked_book_name, total_row)
 
         if best_row_ml is None and book_rows:
             best_row_ml = (book_rows[0][1], book_rows[0][2])
 
         ml_book_name, ml_row = best_row_ml if best_row_ml is not None else ("", {})
 
-        trusted_total_row = best_row_total is not None
-        if trusted_total_row:
+        # Trust label: sportsbook identity present — never used to discard a valid OverUnder.
+        trusted_total_row = False
+        if best_row_total is not None:
             picked_book_name, total_row = best_row_total
-            picked_over_under = total_row.get("OverUnder")
-            picked_total = float(picked_over_under)
+            picked_total = float(picked_ou)
+            _bn = (picked_book_name or "").strip()
+            _sid = str(
+                total_row.get("SportsbookId")
+                or total_row.get("SportsbookID")
+                or total_row.get("Sportsbookid")
+                or ""
+            ).strip()
+            trusted_total_row = bool(_bn or _sid) and _bn.lower() != "scrambled"
             over_payout = total_row.get("OverPayout")
             under_payout = total_row.get("UnderPayout")
 
