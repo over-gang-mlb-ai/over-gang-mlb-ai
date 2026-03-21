@@ -47,7 +47,6 @@ from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, get_game_odds
-from core.sportsdataio import fetch_mlb_odds_by_date
 from core.batters import Batters, LineupImpact, BATTER_DF
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
@@ -972,8 +971,7 @@ class VegasLines:
             book_scrambled = (row.get("book") or "").strip().lower() == "scrambled"
             line_realistic = (5 <= line <= 15) if isinstance(line, (int, float)) else False
             has_real_total = (
-                (not book_empty)
-                and (raw_line is not None and raw_line != "")
+                (raw_line is not None and raw_line != "")
                 and (not book_scrambled)
                 and line_realistic
             )
@@ -1048,6 +1046,196 @@ class VegasLines:
         info["_match_found"] = False
         info["_has_real_total"] = False
         return (8.5, info)
+
+
+def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
+    """
+    SportsDataIO GameOddsByDate → same dict shape as core.sportsdataio.fetch_mlb_odds_by_date.
+
+    Differs only in trusted total selection: does NOT skip PregameOdds rows solely because
+    Sportsbook / SportsbookName is blank when OverUnder is numeric and in range (pregame).
+    Book priority still applies when book_key matches BOOK_PRIORITY; unknown books use rank fallback.
+    """
+    import core.sportsdataio as sio
+
+    _, game_id_to_key = sio.fetch_mlb_games_by_date(target_date_yyyy_mm_dd)
+    if not game_id_to_key:
+        print("[SportsDataIO] No games for date; returning empty odds map.")
+        return {}
+
+    if not sio.SPORTSDATAIO_API_KEY:
+        return {}
+
+    date_str = sio._date_for_api(target_date_yyyy_mm_dd)
+    if not date_str:
+        return {}
+
+    url = f"{sio.BASE_URL.rstrip('/')}{sio.ODDS_PATH}/{date_str}"
+    params = {"key": sio.SPORTSDATAIO_API_KEY}
+
+    print(f"[SportsDataIO] Odds URL (allow empty book): {url}")
+
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        print(
+            f"[SportsDataIO] Odds request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}"
+        )
+        r.raise_for_status()
+        odds_data = r.json()
+    except Exception as e:
+        print(f"[SportsDataIO] Odds request failed: {e}")
+        return {}
+
+    if not isinstance(odds_data, list):
+        print(f"[SportsDataIO] Odds response is not a list: {type(odds_data)}")
+        return {}
+
+    BOOK_PRIORITY = sio.BOOK_PRIORITY
+    DEFAULT_JUICE = sio.DEFAULT_JUICE
+
+    by_game = {}
+    for game_obj in odds_data:
+        if not isinstance(game_obj, dict):
+            continue
+        gid = game_obj.get("GameID") or game_obj.get("GameId")
+        if gid is None:
+            continue
+        gid_key = int(gid) if isinstance(gid, (int, float)) else gid
+        game_key = game_id_to_key.get(int(gid_key)) or game_id_to_key.get(str(gid_key))
+        if not game_key:
+            continue
+        pregame_odds = game_obj.get("PregameOdds") or []
+        if not pregame_odds:
+            continue
+        for row in pregame_odds:
+            if not isinstance(row, dict):
+                continue
+            book_name = (row.get("Sportsbook") or row.get("SportsbookName") or "").strip()
+            book_key = (book_name or str(row.get("SportsbookId", ""))).lower().replace(" ", "").replace(
+                "_", ""
+            )
+            if game_key not in by_game:
+                by_game[game_key] = []
+            by_game[game_key].append((book_key, book_name, row))
+
+    result = {}
+    for game_key, book_rows in by_game.items():
+        best_row_ml = None
+        best_rank_ml = len(BOOK_PRIORITY) + 1
+        best_row_total = None
+        best_rank_total = len(BOOK_PRIORITY) + 1
+
+        for book_key, book_name, row in book_rows:
+            try:
+                rank = BOOK_PRIORITY.index(book_key)
+            except ValueError:
+                rank = len(BOOK_PRIORITY)
+
+            if rank < best_rank_ml:
+                best_rank_ml = rank
+                best_row_ml = (book_name, row)
+
+            # Trusted total: valid pregame OverUnder in MLB range; do not require non-empty book text.
+            _book = (book_name or "").strip()
+            if _book.lower() == "scrambled":
+                continue
+
+            over_under = row.get("OverUnder")
+            try:
+                total_candidate = float(over_under)
+            except (TypeError, ValueError):
+                continue
+            if total_candidate < 5 or total_candidate > 15:
+                continue
+
+            if rank < best_rank_total:
+                best_rank_total = rank
+                best_row_total = (book_name, row)
+
+        if best_row_ml is None and book_rows:
+            best_row_ml = (book_rows[0][1], book_rows[0][2])
+
+        ml_book_name, ml_row = best_row_ml if best_row_ml is not None else ("", {})
+
+        trusted_total_row = best_row_total is not None
+        if trusted_total_row:
+            picked_book_name, total_row = best_row_total
+            picked_over_under = total_row.get("OverUnder")
+            picked_total = float(picked_over_under)
+            over_payout = total_row.get("OverPayout")
+            under_payout = total_row.get("UnderPayout")
+
+            try:
+                over_juice = int(over_payout) if over_payout is not None else DEFAULT_JUICE
+            except (TypeError, ValueError):
+                over_juice = DEFAULT_JUICE
+            try:
+                under_juice = int(under_payout) if under_payout is not None else DEFAULT_JUICE
+            except (TypeError, ValueError):
+                under_juice = DEFAULT_JUICE
+
+            sportsbook_id = (
+                total_row.get("SportsbookId")
+                or total_row.get("SportsbookID")
+                or total_row.get("Sportsbookid")
+                or total_row.get("Sportsbook_id")
+                or ""
+            )
+            sportsbook_url = (
+                total_row.get("SportsbookURL")
+                or total_row.get("SportsbookUrl")
+                or total_row.get("Sportsbookurl")
+                or total_row.get("Sportsbook_url")
+                or ""
+            )
+            odd_type = (
+                total_row.get("OddType")
+                or total_row.get("OddTypeName")
+                or total_row.get("Odd_Type")
+                or total_row.get("odd_type")
+                or ""
+            )
+
+            total_line = picked_total
+            book_name = picked_book_name or ""
+        else:
+            total_line = None
+            over_juice = DEFAULT_JUICE
+            under_juice = DEFAULT_JUICE
+            book_name = ""
+            sportsbook_id = ""
+            sportsbook_url = ""
+            odd_type = ""
+
+        picked_total_dbg = total_line if total_line is not None else None
+        print(
+            "[SDIO TOTAL PICK] "
+            f"key={game_key} | picked_total={picked_total_dbg} | picked_book={repr(book_name)} | trusted_total_row={trusted_total_row}"
+        )
+
+        home_ml = ml_row.get("HomeMoneyLine") if isinstance(ml_row, dict) else None
+        away_ml = ml_row.get("AwayMoneyLine") if isinstance(ml_row, dict) else None
+
+        result[game_key] = {
+            "total_line": total_line,
+            "over_juice": over_juice,
+            "under_juice": under_juice,
+            "ml_home": int(home_ml) if home_ml is not None else None,
+            "ml_away": int(away_ml) if away_ml is not None else None,
+            "book": book_name or "",
+            "sportsbook_id": str(sportsbook_id) if sportsbook_id is not None else "",
+            "sportsbook_url": str(sportsbook_url) if sportsbook_url is not None else "",
+            "odd_type": str(odd_type) if odd_type is not None else "",
+        }
+        print(
+            "[SDIO NORMALIZED] "
+            f"key={game_key} | total_line={result[game_key].get('total_line')} | book={repr(result[game_key].get('book'))} | "
+            f"sportsbook_id={repr(result[game_key].get('sportsbook_id'))} | odd_type={repr(result[game_key].get('odd_type'))}"
+        )
+
+    print(f"[SportsDataIO] Number of normalized games in final odds map: {len(result)}")
+    return result
+
 
 class VelocityTracker:
     @staticmethod
@@ -1531,7 +1719,7 @@ def run_predictions():
         public_betting_data = load_public_betting_data()
         target_date_str = today_mt.strftime("%Y-%m-%d")
         print("[ODDS] Trying SportsDataIO first...")
-        sdio_map = fetch_mlb_odds_by_date(target_date_str)
+        sdio_map = fetch_mlb_odds_by_date_allow_empty_book(target_date_str)
         print(f"[ODDS] SportsDataIO odds_map size: {len(sdio_map)}")
         odds_source = "none"
         odds_api_map = {}
@@ -1556,10 +1744,9 @@ def run_predictions():
             if total < 5 or total > 15:
                 return False
             book = str(row.get("book") or "").strip()
-            if not book:
-                return False
             if book.lower().strip() == "scrambled":
                 return False
+            # Empty book is OK (e.g. SportsDataIO PregameOdds with OverUnder + SportsbookId only).
             return True
 
         # Trusted real-total lane (Odds API preferred; SportsDataIO only if truly trusted)
