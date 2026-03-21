@@ -223,6 +223,9 @@ VELOCITY_DROP_THRESHOLD = -1.5
 # Session-only: schedule probable (lower) → pitcher_stats index key for targeted MLB id + no reg-season-stat cases.
 RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES = {}
 
+# Per run_predictions() run: suppress duplicate [EMPTY BOOK DETAIL] / [LIVE TOTAL CHECK] for same lookup_key.
+_LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED = set()
+
 
 def _build_pitcher_alias_reversed_dict():
     """Variation (lower) -> official (lower); same as match_pitcher_row alias step."""
@@ -1001,24 +1004,28 @@ class VegasLines:
                 info["_blocker_missing_total_line"] = bool(raw_line_missing and (not book_empty) and (not book_scrambled))
                 info["_blocker_unrealistic_total"] = bool((not raw_line_missing) and (not line_realistic) and (not book_empty) and (not book_scrambled))
                 info["_blocker_real_total_pass"] = bool(has_real_total)
-                if book_empty:
-                    _raw_detail = {}
-                    if isinstance(odds_map, dict):
-                        _raw_detail = odds_map.get(lookup_key) or {}
-                    _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
-                    _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
-                    _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
+                _emit_lt_diag = lookup_key not in _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED
+                if _emit_lt_diag:
+                    _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED.add(lookup_key)
+                if _emit_lt_diag:
+                    if book_empty:
+                        _raw_detail = {}
+                        if isinstance(odds_map, dict):
+                            _raw_detail = odds_map.get(lookup_key) or {}
+                        _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
+                        _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
+                        _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
+                        print(
+                            "[EMPTY BOOK DETAIL] "
+                            f"key={lookup_key} | sportsbook_id={repr(_sportsbook_id)} | sportsbook_url={repr(_sportsbook_url)} | "
+                            f"odd_type={repr(_odd_type)} | source={source}"
+                        )
                     print(
-                        "[EMPTY BOOK DETAIL] "
-                        f"key={lookup_key} | sportsbook_id={repr(_sportsbook_id)} | sportsbook_url={repr(_sportsbook_url)} | "
-                        f"odd_type={repr(_odd_type)} | source={source}"
+                        "[LIVE TOTAL CHECK] "
+                        f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
+                        f"book={repr(row.get('book'))} | source={source} | realistic={line_realistic} | "
+                        f"scrambled={book_scrambled} | _has_real_total={bool(has_real_total)}"
                     )
-                print(
-                    "[LIVE TOTAL CHECK] "
-                    f"key={lookup_key} | raw_total_line={repr(raw_line)} | parsed_line={line} | "
-                    f"book={repr(row.get('book'))} | source={source} | realistic={line_realistic} | "
-                    f"scrambled={book_scrambled} | _has_real_total={bool(has_real_total)}"
-                )
             return (line, info)
         csv_path = "data/public_betting.csv"
         if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
@@ -1730,6 +1737,7 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
 def run_predictions():
     print(f"🔮 OVER GANG PREDICTOR v4.0 (projection model) | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*50 + "\n")
+    _LIVE_TOTAL_BLOCKER_DIAG_KEYS_EMITTED.clear()
 
     if AUTO_UPDATE_DATA:
         print("🔄 AUTO UPDATE MODE: Fetching latest data")
