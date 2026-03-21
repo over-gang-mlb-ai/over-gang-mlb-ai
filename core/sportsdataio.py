@@ -38,6 +38,53 @@ BOOK_PRIORITY = (
 DEFAULT_TOTAL = 8.5
 DEFAULT_JUICE = -110
 
+
+def sdio_pregame_over_under(row):
+    """Read Over/Under total from a PregameOdds row (field names vary by API version)."""
+    if not isinstance(row, dict):
+        return None
+    for key in (
+        "OverUnder",
+        "overUnder",
+        "OverUnderLine",
+        "GameTotal",
+        "Total",
+        "GameTotalLine",
+        "over_under",
+    ):
+        v = row.get(key)
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def sdio_collect_total_candidates(book_rows, book_priority, ou_lo, ou_hi):
+    """
+    Return list of (rank, book_name, row, ou) for non-scrambled rows with OverUnder in [ou_lo, ou_hi].
+    Rows with blank Sportsbook name are still candidates if OverUnder is valid (SportsbookId may carry identity).
+    """
+    out = []
+    for book_key, book_name, row in book_rows:
+        if (book_name or "").strip().lower() == "scrambled":
+            continue
+        ou = sdio_pregame_over_under(row)
+        if ou is None:
+            continue
+        if not (ou_lo <= ou <= ou_hi):
+            continue
+        try:
+            rank = book_priority.index(book_key)
+        except ValueError:
+            rank = len(book_priority)
+        out.append((rank, book_name, row, ou))
+    out.sort(key=lambda t: (t[0], str(t[1] or "")))
+    return out
+
+
 SPORTSDATAIO_TEAM_MAP = {
     "ARI": "Arizona Diamondbacks",
     "ATL": "Atlanta Braves",
@@ -259,13 +306,9 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
     # For each game, choose single book by priority.
     result = {}
     for game_key, book_rows in by_game.items():
-        # Two independent "best" selections:
-        # - best_row_ml: best row for moneyline/spread metadata (by priority)
-        # - best_row_total: best row for trusted total candidates only
+        # best_row_ml: best row for moneyline (by BOOK_PRIORITY); total uses sdio_collect_total_candidates.
         best_row_ml = None
         best_rank_ml = len(BOOK_PRIORITY) + 1
-        best_row_total = None
-        best_rank_total = len(BOOK_PRIORITY) + 1
 
         for book_key, book_name, row in book_rows:
             try:
@@ -278,35 +321,65 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
                 best_rank_ml = rank
                 best_row_ml = (book_name, row)
 
-            # Trusted total-row selection
-            _book = (book_name or "").strip()
-            if not _book:
-                continue
-            if _book.lower() == "scrambled":
-                continue
+        # Total: do NOT require non-empty Sportsbook string — many SDIO rows have OverUnder + SportsbookId only.
+        raw_ous = []
+        for _bk, _bn, _row in book_rows[:12]:
+            ou = sdio_pregame_over_under(_row)
+            if ou is not None:
+                raw_ous.append(ou)
+        if raw_ous:
+            print(
+                "[SDIO RAW OU] "
+                f"key={game_key} | sample_ous={raw_ous[:8]}{'...' if len(raw_ous) > 8 else ''}"
+            )
 
-            over_under = row.get("OverUnder")
-            try:
-                total_candidate = float(over_under)
-            except (TypeError, ValueError):
-                continue
-            if total_candidate < 5 or total_candidate > 15:
-                continue
-
-            if rank < best_rank_total:
-                best_rank_total = rank
-                best_row_total = (book_name, row)
+        candidates = sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 5.0, 15.0)
+        if not candidates:
+            candidates = sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 4.5, 16.5)
+        best_row_total = None
+        picked_ou = None
+        if candidates:
+            _r, picked_book_name, total_row, picked_ou = candidates[0]
+            best_row_total = (picked_book_name, total_row)
+            print(
+                "[SDIO ROW SELECTED] "
+                f"key={game_key} | ou={picked_ou} | book={repr(picked_book_name or '')} | "
+                f"sportsbook_id={repr(str(total_row.get('SportsbookId') or total_row.get('SportsbookID') or ''))}"
+            )
+        else:
+            # Explain why no candidate: out of range, scrambled-only, or missing OU keys
+            reasons = []
+            if not book_rows:
+                reasons.append("no_pregame_rows")
+            else:
+                any_ou = any(sdio_pregame_over_under(r) is not None for _a, _b, r in book_rows)
+                if not any_ou:
+                    reasons.append("no_over_under_field")
+                else:
+                    reasons.append("no_ou_in_4.5_16.5_or_all_scrambled")
+            print(
+                "[SDIO TOTAL REJECT] "
+                f"key={game_key} | reasons={reasons} | raw_ous={raw_ous[:12]}"
+            )
 
         if best_row_ml is None and book_rows:
             best_row_ml = (book_rows[0][1], book_rows[0][2])
 
         ml_book_name, ml_row = best_row_ml if best_row_ml is not None else ("", {})
 
-        trusted_total_row = best_row_total is not None
-        if trusted_total_row:
+        trusted_total_row = False
+        if best_row_total is not None:
             picked_book_name, total_row = best_row_total
-            picked_over_under = total_row.get("OverUnder")
-            picked_total = float(picked_over_under)
+            picked_over_under = sdio_pregame_over_under(total_row)
+            picked_total = float(picked_over_under if picked_over_under is not None else picked_ou)
+            _bn = (picked_book_name or "").strip()
+            _sid = str(
+                total_row.get("SportsbookId")
+                or total_row.get("SportsbookID")
+                or total_row.get("Sportsbookid")
+                or ""
+            ).strip()
+            trusted_total_row = bool(_bn or _sid) and _bn.lower() != "scrambled"
             over_payout = total_row.get("OverPayout")
             under_payout = total_row.get("UnderPayout")
 
@@ -345,8 +418,7 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
             total_line = picked_total
             book_name = picked_book_name or ""
         else:
-            # No trusted total row exists for this game.
-            # Keep total_line as None and avoid populating book from non-trusted sources.
+            # No PregameOdds row passed range/scramble filters for this game.
             total_line = None
             over_juice = DEFAULT_JUICE
             under_juice = DEFAULT_JUICE
@@ -379,7 +451,8 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
         print(
             "[SDIO NORMALIZED] "
             f"key={game_key} | total_line={result[game_key].get('total_line')} | book={repr(result[game_key].get('book'))} | "
-            f"sportsbook_id={repr(result[game_key].get('sportsbook_id'))} | odd_type={repr(result[game_key].get('odd_type'))}"
+            f"sportsbook_id={repr(result[game_key].get('sportsbook_id'))} | odd_type={repr(result[game_key].get('odd_type'))} | "
+            f"trusted_total_row={trusted_total_row}"
         )
 
     print(f"[SportsDataIO] Number of normalized games in final odds map: {len(result)}")
