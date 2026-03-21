@@ -449,10 +449,17 @@ class DataManager:
                             "WHIP": whip,
                             "IP": ip
                         })
-        if used_fallback and len(rows) < MIN_PITCHER_SAVE_COUNT:
+        # SAFE MODE: only for true current-year responses (splits existed). Preseason prior-year fallback
+        # must not be rejected for having < MIN_PITCHER_SAVE_COUNT rows — empty/malformed still fails below.
+        if not used_fallback and len(rows) < MIN_PITCHER_SAVE_COUNT:
             print("[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv")
             raise ValueError(
                 "[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv"
+            )
+        if used_fallback and len(rows) > 0:
+            print(
+                "[Pitcher update] Prior-year regular-season fallback accepted "
+                f"({len(rows)} pitchers with ERA/WHIP/IP; preseason — not gated by MIN_PITCHER_SAVE_COUNT={MIN_PITCHER_SAVE_COUNT})."
             )
         rows_after_filter = len(rows)
         print(f"[Pitcher update] Raw splits returned: {total_raw_splits}, Rows with ERA/WHIP/IP: {rows_after_filter}")
