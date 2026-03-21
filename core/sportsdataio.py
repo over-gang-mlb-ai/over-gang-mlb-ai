@@ -38,20 +38,22 @@ BOOK_PRIORITY = (
 DEFAULT_TOTAL = 8.5
 DEFAULT_JUICE = -110
 
+# Explicit full-game total fields only — do not use generic "Total" (ambiguous vs other markets/stats).
+_SDIO_PREGAME_TOTAL_KEYS = (
+    "OverUnder",
+    "overUnder",
+    "OverUnderLine",
+    "GameTotal",
+    "GameTotalLine",
+    "over_under",
+)
+
 
 def sdio_pregame_over_under(row):
-    """Read Over/Under total from a PregameOdds row (field names vary by API version)."""
+    """Read Over/Under total from a PregameOdds row (explicit keys only; see _SDIO_PREGAME_TOTAL_KEYS)."""
     if not isinstance(row, dict):
         return None
-    for key in (
-        "OverUnder",
-        "overUnder",
-        "OverUnderLine",
-        "GameTotal",
-        "Total",
-        "GameTotalLine",
-        "over_under",
-    ):
+    for key in _SDIO_PREGAME_TOTAL_KEYS:
         v = row.get(key)
         if v is None or v == "":
             continue
@@ -333,9 +335,8 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
                 f"key={game_key} | sample_ous={raw_ous[:8]}{'...' if len(raw_ous) > 8 else ''}"
             )
 
+        # Same band as predictor _is_trusted_total_row (5–15): avoid picking 4.5–<5 or >15–16.5 that fail trusted overlay.
         candidates = sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 5.0, 15.0)
-        if not candidates:
-            candidates = sdio_collect_total_candidates(book_rows, BOOK_PRIORITY, 4.5, 16.5)
         best_row_total = None
         picked_ou = None
         if candidates:
@@ -347,19 +348,35 @@ def fetch_mlb_odds_by_date(target_date_yyyy_mm_dd):
                 f"sportsbook_id={repr(str(total_row.get('SportsbookId') or total_row.get('SportsbookID') or ''))}"
             )
         else:
-            # Explain why no candidate: out of range, scrambled-only, or missing OU keys
+            # Classify reject reason for logs (explicit-field totals only in sdio_pregame_over_under).
             reasons = []
             if not book_rows:
                 reasons.append("no_pregame_rows")
             else:
-                any_ou = any(sdio_pregame_over_under(r) is not None for _a, _b, r in book_rows)
-                if not any_ou:
-                    reasons.append("no_over_under_field")
+                all_scrambled = all(
+                    (bn or "").strip().lower() == "scrambled" for _bk, bn, _r in book_rows
+                )
+                any_explicit = any(sdio_pregame_over_under(r) is not None for _a, _b, r in book_rows)
+                any_in_band = False
+                if any_explicit:
+                    for _bk, _bn, r in book_rows:
+                        if (_bn or "").strip().lower() == "scrambled":
+                            continue
+                        ou = sdio_pregame_over_under(r)
+                        if ou is not None and (5.0 <= ou <= 15.0):
+                            any_in_band = True
+                            break
+                if all_scrambled:
+                    reasons.append("all_rows_scrambled_book")
+                elif not any_explicit:
+                    reasons.append("no_explicit_total_field_in_pregame_rows")
+                elif not any_in_band:
+                    reasons.append("explicit_totals_outside_5.0_15.0_or_unusable_after_filters")
                 else:
-                    reasons.append("no_ou_in_4.5_16.5_or_all_scrambled")
+                    reasons.append("no_candidate_after_book_priority")
             print(
                 "[SDIO TOTAL REJECT] "
-                f"key={game_key} | reasons={reasons} | raw_ous={raw_ous[:12]}"
+                f"key={game_key} | reasons={reasons} | sample_explicit_ous={raw_ous[:12]}"
             )
 
         if best_row_ml is None and book_rows:

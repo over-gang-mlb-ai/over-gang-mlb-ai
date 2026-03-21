@@ -205,6 +205,8 @@ def safe_get(obj, key, default):
 TELEGRAM_BOT_TOKEN = '7660295294:AAHakWClywbZP9hdgC5DomgT8EyBa14w-wU'
 TELEGRAM_CHAT_ID = '1821580164'
 MIN_CONFIDENCE_ALERT = 0.85
+# ML side-signal fire: max(home_win_prob, away_win_prob) from calculate_team_win_probability (not gated on O/U totals).
+MIN_ML_WIN_PROB_FOR_FIRE = 0.55
 DATA_DIR = "data"
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
@@ -1222,8 +1224,15 @@ def generate_prediction(
     else:
         confidence *= 1.0 + reliever_factor * 0.05
 
-    total_open = safe_float(public_data.get("Total_Open"), default=vegas_line)
-    total_current = safe_float(public_data.get("Total_Current"), default=total_open)
+    # Loader uses total_open / total_current; accept legacy Total_Open / Total_Current.
+    _raw_to = public_data.get("total_open")
+    if _raw_to is None or _raw_to == "":
+        _raw_to = public_data.get("Total_Open")
+    _raw_tc = public_data.get("total_current")
+    if _raw_tc is None or _raw_tc == "":
+        _raw_tc = public_data.get("Total_Current")
+    total_open = safe_float(_raw_to, default=vegas_line)
+    total_current = safe_float(_raw_tc, default=total_open)
 
     # Public betting: fade heavy public (contrarian)
     try:
@@ -1507,6 +1516,15 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
 
         manual_totals = _load_manual_totals()
         manual_loaded = isinstance(manual_totals, dict) and len(manual_totals) >= 1
+        slate_keys_pf = set()
+        if games:
+            for g in games:
+                _ak = normalize_team_name(safe_get(g, "away_name", ""))
+                _hk = normalize_team_name(safe_get(g, "home_name", ""))
+                slate_keys_pf.add(f"{_ak} @ {_hk}")
+        manual_keys_pf = set(manual_totals.keys()) if isinstance(manual_totals, dict) else set()
+        matched_manual_keys_pf = slate_keys_pf.intersection(manual_keys_pf)
+        manual_matched_today = len(matched_manual_keys_pf) >= 1
 
         if not pitcher_ok:
             issues.append("pitcher data missing or empty")
@@ -1534,12 +1552,12 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         ):
             mode = "full_auto"
             warnings.append("all systems go; full auto mode")
-        elif pitcher_ok and bullpen_ok and manual_loaded and (not public_ok or not odds_coverage_ok):
+        elif pitcher_ok and bullpen_ok and manual_matched_today and (not public_ok or not odds_coverage_ok):
             mode = "manual_test"
-            warnings.append("manual_totals loaded; public or odds partial — manual_test mode")
+            warnings.append("manual totals matched today's slate; public or odds partial — manual_test mode")
         else:
             mode = "projection_only"
-            warnings.append("odds weak/fallback and no trusted manual totals — projection_only mode")
+            warnings.append("odds weak/fallback or no manual rows for today's slate — projection_only mode")
 
         ok = mode != "stop"
 
@@ -1550,7 +1568,10 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         print(f"  Games found:   {games_status}")
         print(f"  Public betting: {public_status} (n={public_n})")
         print(f"  Odds status:   {odds_status} (real_totals_n={odds_real_n})")
-        print(f"  Manual totals: {'loaded' if manual_loaded else 'none'} ({len(manual_totals) if isinstance(manual_totals, dict) else 0} rows)")
+        print(
+            f"  Manual totals: {'loaded' if manual_loaded else 'none'} "
+            f"({len(manual_totals) if isinstance(manual_totals, dict) else 0} rows) | matched today: {len(matched_manual_keys_pf)}"
+        )
         print(f"  Proceed mode:  {mode}")
         print("-----------------\n")
 
@@ -1734,6 +1755,16 @@ def run_predictions():
             warnings = preflight.get("warnings", [])
             if warnings:
                 print("[PREFLIGHT] Warnings:", "; ".join(warnings))
+            print(
+                "[READINESS] OU: "
+                f"trusted_total_games={len(trusted_total_source_map)} | slate_games={len(games)}"
+            )
+            print(
+                "[READINESS] Public: "
+                f"loaded_game_rows={len(public_betting_data)} "
+                "(empty file is OK — degrades confidence; not a hard stop)"
+            )
+            print("[READINESS] ML: per-game ML block runs regardless of trusted O/U (see ML_Fired after slate)")
         if mode == "stop":
             issues = preflight.get("issues", [])
             if issues:
@@ -1747,6 +1778,7 @@ def run_predictions():
 
     results = []
     alerts = []
+    ml_alerts = []
     unmatched_pitchers = set()
     alias_log = []
 
@@ -2540,8 +2572,13 @@ def run_predictions():
                 'Captured_ML_Home': odds_info.get('ml_home'),
                 'Captured_ML_Away': odds_info.get('ml_away'),
                 'Fired_Play': False,
+                'OU_Fired': False,
+                'ML_Fired': False,
                 'Trigger_Tags': '',
                 'No_Fire_Reason': '',
+                'No_Fire_OU_Reason': '',
+                'No_Fire_ML_Reason': '',
+                'ML_Quality_Flag': '',
                 'Model_Notes': '',
                 'Confidence_Tier': '',
                 'Edge_Tier': '',
@@ -2635,30 +2672,105 @@ def run_predictions():
                 "VeloDrop_Away": round(safe_float(velo_drop_away), 1),
                 "VeloDrop_Home": round(safe_float(velo_drop_home), 1),
             })
+
+            # 💵 MONEYLINE PREDICTION (independent of trusted O/U — uses starter/bullpen model + optional public ML line)
+            home_ml_data = get_team_ml_data(home_team, home_pitcher)
+            away_ml_data = get_team_ml_data(away_team, away_pitcher)
+
+            home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
+
+            try:
+                odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
+                odds_value = float(odds_str) if isinstance(odds_str, (int, float)) else float(str(odds_str).strip())
+                if odds_value < 0:
+                    implied_home = abs(odds_value) / (100 + abs(odds_value))
+                else:
+                    implied_home = 100 / (100 + odds_value)
+            except Exception:
+                implied_home = 0.53
+
+            implied_away = 1 - implied_home
+
+            home_kelly = calculate_kelly_units(home_win_prob, implied_home)
+            away_kelly = calculate_kelly_units(away_win_prob, implied_away)
+
+            if home_win_prob > away_win_prob:
+                ml_pick = f"{home_team.upper()} ML"
+                ml_conf = f"{round(home_win_prob * 100)}%"
+                ml_value = f"{round((home_win_prob - implied_home) * 100)}%"
+                ml_kelly = f"{round(home_kelly, 2)}u"
+            else:
+                ml_pick = f"{away_team.upper()} ML"
+                ml_conf = f"{round(away_win_prob * 100)}%"
+                ml_value = f"{round((away_win_prob - implied_away) * 100)}%"
+                ml_kelly = f"{round(away_kelly, 2)}u"
+
+            _league_avg_pitcher = (
+                "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")
+            )
+            ml_win_max = max(home_win_prob, away_win_prob)
+            # Fire on probability only; League Avg probable = degraded tag, not a hard ML block.
+            ml_fired = bool(ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
+            ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
+            if ml_fired:
+                no_fire_ml = ""
+            else:
+                no_fire_ml = "ml_win_prob_below_threshold"
+
+            game_data.update({
+                "ML_Pick": ml_pick,
+                "ML_Confidence": ml_conf,
+                "ML_Value": ml_value,
+                "ML_Kelly_Units": ml_kelly,
+                "ML_Fired": ml_fired,
+                "No_Fire_ML_Reason": no_fire_ml,
+                "ML_Quality_Flag": ml_quality_flag,
+            })
+
+            if isinstance(public, dict):
+                print(f"Public keys found: {list(public.keys())}")
+            else:
+                print("Public betting data is missing (NoneType)")
+
+            if public:
+                game_data["ou_bets_pct_over"] = public.get("ou_bets_pct_over", "?")
+                game_data["ou_bets_pct_under"] = public.get("ou_bets_pct_under", "?")
+                game_data["ml_bets_pct_home"] = public.get("ml_bets_pct_home", "?")
+                game_data["ml_bets_pct_away"] = public.get("ml_bets_pct_away", "?")
+                game_data["total_open"] = public.get("total_open", "?")
+                game_data["total_current"] = public.get("total_current", "?")
+
             is_manual_trusted = (odds_info.get("_source") == "manual_totals_csv") and has_real_total
             fire_threshold = 0.79 if is_manual_trusted else MIN_CONFIDENCE_ALERT
-            fired = (confidence >= fire_threshold) and has_real_total
+            ou_fired = (confidence >= fire_threshold) and has_real_total
             trigger_tags = "|".join(filter(None, [
-                "high_confidence" if fired else None,
+                "ou_high_confidence" if ou_fired else None,
+                "ml_high_signal" if ml_fired else None,
+                "ml_degraded_league_avg_pitcher" if (_league_avg_pitcher and ml_fired) else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "odds_api" if (odds_source == "Odds API") else None,
                 "fallback_line" if (not has_real_total) else None,
             ]))
-            game_data["Fired_Play"] = fired
+            game_data["Fired_Play"] = ou_fired
+            game_data["OU_Fired"] = ou_fired
             game_data["Trigger_Tags"] = trigger_tags
-            if fired:
-                game_data["No_Fire_Reason"] = ""
+            if ou_fired:
+                no_fire_ou = ""
             else:
                 if not has_real_total:
-                    game_data["No_Fire_Reason"] = "fallback_line_used"
+                    no_fire_ou = "fallback_line_used"
                 elif abs(edge) < 1.0:
-                    game_data["No_Fire_Reason"] = "edge_too_small"
-                elif public is None or public == {} or ("League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")):
-                    game_data["No_Fire_Reason"] = "data_quality_degraded"
+                    no_fire_ou = "edge_too_small"
                 elif confidence < fire_threshold:
-                    game_data["No_Fire_Reason"] = "confidence_below_alert_threshold"
+                    no_fire_ou = "confidence_below_alert_threshold"
+                elif public is None or public == {} or (
+                    "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")
+                ):
+                    no_fire_ou = "data_quality_degraded"
                 else:
-                    game_data["No_Fire_Reason"] = "manual_review"
+                    no_fire_ou = "manual_review"
+            game_data["No_Fire_Reason"] = no_fire_ou
+            game_data["No_Fire_OU_Reason"] = no_fire_ou
             game_data["Play_Status"] = "BETTABLE" if has_real_total else "PROJECTION_ONLY"
             game_data["Bettable"] = bool(has_real_total)
             game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
@@ -2666,13 +2778,12 @@ def run_predictions():
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
             game_data["Bet_Type"] = "total"
             game_data["Side"] = "over" if "OVER" in (prediction or "").upper() else ("under" if "UNDER" in (prediction or "").upper() else "")
-            line_status = "market" if bool(odds_info.get('_has_real_total', False)) else "fallback"
+            line_status = "market" if bool(odds_info.get("_has_real_total", False)) else "fallback"
             game_data["Line_Status"] = line_status
-            game_data["Fallback_Used"] = not bool(odds_info.get('_has_real_total', False))
+            game_data["Fallback_Used"] = not bool(odds_info.get("_has_real_total", False))
             dq_parts = []
             if line_status == "fallback":
                 dq_parts.append("fallback_line")
-            # Fallback pitcher stats: synthetic league-avg starters or any starter on LowIP / league-avg row from matcher
             _away_low = bool(safe_get(away_stats, "LowIP", False))
             _home_low = bool(safe_get(home_stats, "LowIP", False))
             if (
@@ -2688,106 +2799,71 @@ def run_predictions():
                 dq_parts.append("low_ip")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
-            # 💵 MONEYLINE PREDICTION
-            home_ml_data = get_team_ml_data(home_team, home_pitcher)
-            away_ml_data = get_team_ml_data(away_team, away_pitcher)
-
-            home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
-
-            # Get implied odds for home ML (from public/Vegas data)
-            try:
-                odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
-                odds_value = float(odds_str) if isinstance(odds_str, (int, float)) else float(str(odds_str).strip())
-                if odds_value < 0:
-                    implied_home = abs(odds_value) / (100 + abs(odds_value))  # favorite
-                else:
-                    implied_home = 100 / (100 + odds_value)  # underdog
-            except Exception:
-                implied_home = 0.53
-
-            implied_away = 1 - implied_home
-
-            home_kelly = calculate_kelly_units(home_win_prob, implied_home)
-            away_kelly = calculate_kelly_units(away_win_prob, implied_away)
-
-            # ✅ Always give a pick (even if edge is small)
-            if home_win_prob > away_win_prob:
-                ml_pick = f"{home_team.upper()} ML"
-                ml_conf = f"{round(home_win_prob * 100)}%"
-                ml_value = f"{round((home_win_prob - implied_home) * 100)}%"
-                ml_kelly = f"{round(home_kelly, 2)}u"
-            else:
-                ml_pick = f"{away_team.upper()} ML"
-                ml_conf = f"{round(away_win_prob * 100)}%"
-                ml_value = f"{round((away_win_prob - implied_away) * 100)}%"
-                ml_kelly = f"{round(away_kelly, 2)}u"
-
-            # Add to game data
-            game_data.update({
-                "ML_Pick": ml_pick,
-                "ML_Confidence": ml_conf,
-                "ML_Value": ml_value,
-                "ML_Kelly_Units": ml_kelly,
-            })
-
-            if isinstance(public, dict):
-                print(f"Public keys found: {list(public.keys())}")
-            else:
-                print("Public betting data is missing (NoneType)")
-
-            if public:
-                game_data['ou_bets_pct_over'] = public.get('ou_bets_pct_over', '?')
-                game_data['ou_bets_pct_under'] = public.get('ou_bets_pct_under', '?')
-                game_data['ml_bets_pct_home'] = public.get('ml_bets_pct_home', '?')
-                game_data['ml_bets_pct_away'] = public.get('ml_bets_pct_away', '?')
-                game_data['total_open'] = public.get('total_open', '?')
-                game_data['total_current'] = public.get('total_current', '?')
-
             results.append(game_data)
-            print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%}")
-            if fired:
+            print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
+            if ou_fired:
                 alerts.append(game_data)
+            if ml_fired:
+                ml_alerts.append(game_data)
 
         except Exception as e:
             print(f"❌ Game processing error: {e}")
             traceback.print_exc()
             continue
 
-    # Save results (only real-market totals)
-    eligible_results = [r for r in results if r.get("Total_Is_Real", False)]
-    if eligible_results:
+    # Export: O/U rows require trusted real total; ML rows can export when ML_Fired without Total_Is_Real
+    export_cols = [
+        "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
+        "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
+        "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
+        "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
+        "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags", "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
+        "Model_Notes",
+        "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
+        "Line_Status", "Fallback_Used", "Data_Quality_Flag",
+        "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
+        "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag",
+    ]
+    eligible_ou = [r for r in results if r.get("Total_Is_Real", False)]
+    eligible_ml = [r for r in results if r.get("ML_Fired", False)]
+    if eligible_ou or eligible_ml:
         archive_date = datetime.now().strftime("%Y%m%d_%H%M")
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-        results_df = pd.DataFrame(eligible_results, columns=[
-            "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
-            "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
-            "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
-            "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
-            "Fired_Play", "Trigger_Tags", "No_Fire_Reason", "Model_Notes",
-            "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
-            "Line_Status", "Fallback_Used", "Data_Quality_Flag",
-            "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
-            "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units"
-        ])
+        if eligible_ou:
+            ou_df = pd.DataFrame(eligible_ou, columns=export_cols)
+            ou_path = f"{ARCHIVE_DIR}/predictions_ou_{archive_date}.csv"
+            ou_df.to_csv(ou_path, index=False)
+            print(f"\n💾 Saved {len(eligible_ou)} O/U (trusted-total) rows → {ou_path}")
+            send_telegram_file(ou_path, caption=f"📊 Over Gang O/U (trusted totals) — {datetime.now().strftime('%b %d')}")
 
-        csv_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
-        results_df.to_csv(csv_path, index=False)
-
-        print(f"\n💾 Saved {len(eligible_results)} predictions")
-
-        # 📤 Auto-upload to Telegram
-        send_telegram_file(csv_path, caption=f"📊 Over Gang Predictions for {datetime.now().strftime('%b %d')}")
+        if eligible_ml:
+            ml_df = pd.DataFrame(eligible_ml, columns=export_cols)
+            ml_path = f"{ARCHIVE_DIR}/predictions_ml_{archive_date}.csv"
+            ml_df.to_csv(ml_path, index=False)
+            print(f"💾 Saved {len(eligible_ml)} ML-signal rows → {ml_path}")
+            send_telegram_file(ml_path, caption=f"📊 Over Gang ML signals — {datetime.now().strftime('%b %d')}")
     elif results:
-        print("\nℹ️ No eligible real-market plays to export; all games were fallback/no-bet.")
+        print("\nℹ️ No export rows (no trusted O/U games and no ML_Fired games).")
 
-    # Send alerts
+    _ml_fired_n = sum(1 for r in results if r.get("ML_Fired"))
+    print(f"[READINESS] ML: slate_ml_fired_games={_ml_fired_n} / {len(results)} games processed")
+
+    # Send alerts (O/U high-confidence)
     if alerts:
-        print(f"\n🚨 Sending {len(alerts)} alerts...")
+        print(f"\n🚨 Sending {len(alerts)} O/U alerts...")
         for alert in alerts:
             message = format_alert(alert)
             if send_telegram_alert(message):
-                print(f"📤 Alert sent for {alert['Game']}")
+                print(f"📤 O/U alert sent for {alert['Game']}")
+                time.sleep(1)
+
+    if ml_alerts:
+        print(f"\n🚨 Sending {len(ml_alerts)} ML signal alerts...")
+        for alert in ml_alerts:
+            message = format_alert(alert)
+            if send_telegram_alert(message):
+                print(f"📤 ML alert sent for {alert['Game']}")
                 time.sleep(1)
 
     # Log unmatched
@@ -2955,8 +3031,10 @@ def run_predictions():
     print("\n--- RUN SUMMARY ---")
     print(f"  Mode: {preflight.get('mode', 'projection_only')}")
     print(f"  Games processed: {len(results)}")
-    print(f"  Bettable plays saved: {len(eligible_results)}")
-    print(f"  Alerts sent: {len(alerts)}")
+    print(f"  Games with trusted O/U (Total_Is_Real): {sum(1 for r in results if r.get('Total_Is_Real'))}")
+    print(f"  Games with ML_Fired: {sum(1 for r in results if r.get('ML_Fired'))}")
+    print(f"  O/U high-confidence alerts sent: {len(alerts)}")
+    print(f"  ML signal alerts sent: {len(ml_alerts)}")
     print(f"  Manual totals loaded: {len(_manual)}")
     print("-------------------")
 

@@ -136,7 +136,13 @@ def fetch_mlb_odds(target_date=None):
         print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
         r.raise_for_status()
         data = r.json()
-        print(f"[ODDS API] Events returned: {len(data) if isinstance(data, list) else 0}")
+        if not isinstance(data, list):
+            print("[ODDS API] Response JSON is not a list; returning empty odds_map.")
+            return {}
+        if len(data) == 0:
+            print("[ODDS API] Empty events list from API; returning empty odds_map (no error).")
+            return {}
+        print(f"[ODDS API] Events returned: {len(data)}")
     except Exception as e:
         print(f"[ODDS API] Request failed: {e}")
         logging.warning(f"⚠️ Odds API request failed: {e}")

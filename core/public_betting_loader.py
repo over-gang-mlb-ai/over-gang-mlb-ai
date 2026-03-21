@@ -1,3 +1,13 @@
+"""
+Public betting CSV loader for the predictor.
+
+Expected schema (data/public_betting.csv), one row per game:
+  - Game: matchup key containing \" @ \" (e.g. \"yankees @ red sox\"); normalized via normalize_game_key.
+  - Total_Open, Total_Current: numeric lines (defaults 8.5 if missing/unparseable).
+  - ML_Bets_Home, ML_Bets_Away, OU_Bets_Over, OU_Bets_Under: optional; default 50.
+
+Empty file, missing file, or parse failures return {} — degradation only; callers must not treat as fatal.
+"""
 import pandas as pd
 import os
 import logging
@@ -92,6 +102,10 @@ def normalize_game_key(game_key):
         return None, None
 
 def load_public_betting_data():
+    """
+    Load public betting splits into a dict keyed by normalized \"away @ home\".
+    Returns {} if file missing, empty, unreadable, or all rows fail parse — never raises.
+    """
     if not os.path.exists(PUBLIC_BETTING_FILE):
         logging.warning("⚠️ Public betting CSV not found.")
         return {}
