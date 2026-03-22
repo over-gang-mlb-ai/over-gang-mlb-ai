@@ -2564,6 +2564,7 @@ def run_predictions():
                 'Over_Juice': odds_info.get('over_juice', -110),
                 'Under_Juice': odds_info.get('under_juice', -110),
                 'Odds_Book': odds_info.get('book', ''),
+                'Total_Line_Source': str(odds_info.get("_source", "") or ""),
                 'Odds_ML_Home': odds_info.get('ml_home'),
                 'Odds_ML_Away': odds_info.get('ml_away'),
                 'Market_Source': odds_source if 'odds_source' in locals() else '',
@@ -2816,7 +2817,7 @@ def run_predictions():
         "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
-        "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
+        "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
         "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags", "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
         "Model_Notes",
         "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
@@ -2933,9 +2934,10 @@ def run_predictions():
     api_real_n = sum(1 for r in results if r.get("Total_Is_Real") and not _is_manual_trusted(r))
     fallback_n = sum(1 for r in results if not r.get("Total_Is_Real"))
     print("\n--- MARKET PATH ---")
-    print(f"  Manual trusted totals: {manual_trusted_n}")
-    print(f"  API/market real totals: {api_real_n}")
-    print(f"  Fallback totals: {fallback_n}")
+    print(f"  Trusted totals (manual CSV): {manual_trusted_n}")
+    print(f"  Trusted totals (API/SDIO, non-manual): {api_real_n}")
+    print(f"  No trusted line (fallback): {fallback_n}")
+    print("  (Non-manual count excludes rows sourced from manual_totals.csv.)")
     print("-------------------")
 
     # LIVE TOTAL BLOCKERS summary
