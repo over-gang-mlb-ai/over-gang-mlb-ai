@@ -1469,6 +1469,42 @@ def _preflight_count_games_with_real_totals(games, odds_map):
     return n
 
 
+def _vegas_line_info_is_manual_trusted_total(info):
+    """
+    True when this VegasLines info dict is a manual-totals trusted line (same signals as
+    end-of-run _is_manual_trusted on result rows: manual_totals_csv source or Book=Manual).
+    """
+    if not isinstance(info, dict):
+        return False
+    if str(info.get("_source") or "").strip() == "manual_totals_csv":
+        return True
+    if str(info.get("book") or "").strip() == "Manual":
+        return True
+    return False
+
+
+def _preflight_count_games_with_non_manual_real_totals(games, odds_map):
+    """
+    Count slate games with a real O/U from VegasLines that is NOT manual_totals.csv / Manual book.
+    Used for full_auto gating (aligned with api_real_n: market-trusted totals only).
+    """
+    if not games:
+        return 0
+    n = 0
+    for g in games:
+        try:
+            home_team = safe_get(g, "home_name", "")
+            away_team = safe_get(g, "away_name", "")
+            _, info = VegasLines.get_vegas_line(
+                home_team, away_team, odds_map, emit_live_total_diagnostics=False
+            )
+            if bool(info.get("_has_real_total")) and not _vegas_line_info_is_manual_trusted_total(info):
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
 def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
     """
     Inspect already-loaded data and print a preflight summary.
@@ -1506,10 +1542,12 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
 
         odds_map_n = len(odds_map) if (odds_map is not None and isinstance(odds_map, dict)) else 0
         odds_real_n = _preflight_count_games_with_real_totals(games, odds_map)
-        odds_ok = odds_real_n > 0
-        odds_coverage_ok = games_n > 0 and odds_real_n >= max(1, games_n - 1)
+        odds_non_manual_n = _preflight_count_games_with_non_manual_real_totals(games, odds_map)
+        # full_auto requires market (non-manual) trusted totals; manual CSV alone uses manual_test
+        odds_ok = odds_non_manual_n > 0
+        odds_coverage_ok = games_n > 0 and odds_non_manual_n >= max(1, games_n - 1)
         odds_status = (
-            f"real O/U {odds_real_n}/{games_n} games (odds_map rows={odds_map_n})"
+            f"real O/U {odds_real_n}/{games_n} (all sources); non-manual (market) {odds_non_manual_n}/{games_n} (odds_map rows={odds_map_n})"
             if games_n
             else "no games"
         )
@@ -1554,7 +1592,9 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
             warnings.append("all systems go; full auto mode")
         elif pitcher_ok and bullpen_ok and manual_matched_today and (not public_ok or not odds_coverage_ok):
             mode = "manual_test"
-            warnings.append("manual totals matched today's slate; public or odds partial — manual_test mode")
+            warnings.append(
+                "manual totals matched today's slate; or public / non-manual market totals incomplete — manual_test mode"
+            )
         else:
             mode = "projection_only"
             warnings.append("odds weak/fallback or no manual rows for today's slate — projection_only mode")
@@ -1567,7 +1607,7 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         print(f"  Bullpen data:  {bullpen_status} (n={bullpen_n})")
         print(f"  Games found:   {games_status}")
         print(f"  Public betting: {public_status} (n={public_n})")
-        print(f"  Odds status:   {odds_status} (real_totals_n={odds_real_n})")
+        print(f"  Odds status:   {odds_status} (real_totals_n={odds_real_n}, non_manual_n={odds_non_manual_n})")
         print(
             f"  Manual totals: {'loaded' if manual_loaded else 'none'} "
             f"({len(manual_totals) if isinstance(manual_totals, dict) else 0} rows) | matched today: {len(matched_manual_keys_pf)}"
@@ -2980,7 +3020,7 @@ def run_predictions():
     else:
         _fa_missing = []
         _g_n = len(games) if games else 0
-        _real_ou_n = _preflight_count_games_with_real_totals(games, odds_map)
+        _non_manual_ou_n = _preflight_count_games_with_non_manual_real_totals(games, odds_map)
         if stats_df is None or (isinstance(stats_df, pd.DataFrame) and stats_df.empty):
             _fa_missing.append("pitcher data missing")
         if _g_n == 0:
@@ -2995,8 +3035,8 @@ def run_predictions():
             _fa_missing.append("bullpen missing")
         if not public_betting_data or not isinstance(public_betting_data, dict) or len(public_betting_data) == 0:
             _fa_missing.append("public betting missing")
-        if _g_n > 0 and (_real_ou_n == 0 or _real_ou_n < max(1, _g_n - 1)):
-            _fa_missing.append("odds coverage incomplete (real O/U totals)")
+        if _g_n > 0 and (_non_manual_ou_n == 0 or _non_manual_ou_n < max(1, _g_n - 1)):
+            _fa_missing.append("odds coverage incomplete (non-manual market O/U totals)")
         if api_real_n == 0:
             _fa_missing.append("no API/market real totals")
         print("[FULL AUTO CHECK]", "; ".join(_fa_missing) if _fa_missing else "see preflight mode")
