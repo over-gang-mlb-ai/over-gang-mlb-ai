@@ -1471,8 +1471,8 @@ def _preflight_count_games_with_real_totals(games, odds_map):
 
 def _vegas_line_info_is_manual_trusted_total(info):
     """
-    True when this VegasLines info dict is a manual-totals trusted line (same signals as
-    end-of-run _is_manual_trusted on result rows: manual_totals_csv source or Book=Manual).
+    True when this VegasLines info dict is a manual-totals trusted line.
+    Same rules as _result_row_is_manual_trusted_total: _source manual_totals_csv or book Manual.
     """
     if not isinstance(info, dict):
         return False
@@ -1481,6 +1481,19 @@ def _vegas_line_info_is_manual_trusted_total(info):
     if str(info.get("book") or "").strip() == "Manual":
         return True
     return False
+
+
+def _result_row_is_manual_trusted_total(r):
+    """
+    True when this prediction result row used a manual-totals line. Uses Total_Line_Source and
+    Odds_Book (propagated from VegasLines odds_info), not Market_Source (global fetch label).
+    Delegates to _vegas_line_info_is_manual_trusted_total for one canonical definition.
+    """
+    if not isinstance(r, dict):
+        return False
+    return _vegas_line_info_is_manual_trusted_total(
+        {"_source": r.get("Total_Line_Source"), "book": r.get("Odds_Book")}
+    )
 
 
 def _preflight_count_games_with_non_manual_real_totals(games, odds_map):
@@ -1590,10 +1603,15 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         ):
             mode = "full_auto"
             warnings.append("all systems go; full auto mode")
-        elif pitcher_ok and bullpen_ok and manual_matched_today and (not public_ok or not odds_coverage_ok):
+        elif (
+            pitcher_ok
+            and bullpen_ok
+            and manual_matched_today
+            and (not public_ok or not odds_ok or not odds_coverage_ok)
+        ):
             mode = "manual_test"
             warnings.append(
-                "manual totals matched today's slate; or public / non-manual market totals incomplete — manual_test mode"
+                "manual totals matched today's slate; public and/or non-manual market totals incomplete — manual_test mode"
             )
         else:
             mode = "projection_only"
@@ -2965,19 +2983,15 @@ def run_predictions():
     print(f"  Fallback pitcher stats used: {fallback_pitcher}")
     print("------------------------")
 
-    # Market path summary
-    def _is_manual_trusted(r):
-        src = str(r.get("Market_Source") or "")
-        book = str(r.get("Odds_Book") or "")
-        return src == "manual_totals_csv" or book == "Manual"
-    manual_trusted_n = sum(1 for r in results if _is_manual_trusted(r))
-    api_real_n = sum(1 for r in results if r.get("Total_Is_Real") and not _is_manual_trusted(r))
+    # Market path summary (manual vs market: same classifier as VegasLines via Total_Line_Source)
+    manual_trusted_n = sum(1 for r in results if _result_row_is_manual_trusted_total(r))
+    api_real_n = sum(1 for r in results if r.get("Total_Is_Real") and not _result_row_is_manual_trusted_total(r))
     fallback_n = sum(1 for r in results if not r.get("Total_Is_Real"))
     print("\n--- MARKET PATH ---")
     print(f"  Trusted totals (manual CSV): {manual_trusted_n}")
     print(f"  Trusted totals (API/SDIO, non-manual): {api_real_n}")
     print(f"  No trusted line (fallback): {fallback_n}")
-    print("  (Non-manual count excludes rows sourced from manual_totals.csv.)")
+    print("  (Non-manual count excludes manual rows: Total_Line_Source=manual_totals_csv or Odds_Book=Manual.)")
     print("-------------------")
 
     # LIVE TOTAL BLOCKERS summary
@@ -3001,9 +3015,10 @@ def run_predictions():
     print(f"  Scrambled book: {_fmt_keys(live_total_scrambled_book_keys)}")
     print("-------------------------------")
 
-    # Auto fire status (one line)
+    # Auto fire status (one line) — aligned with preflight mode, not api_real_n (result rows can
+    # diverge from slate-level non-manual coverage when lines are manual CSV / Book=Manual).
     _pf_mode = preflight.get("mode", "projection_only")
-    if _pf_mode == "full_auto" and api_real_n > 0:
+    if _pf_mode == "full_auto":
         print("[AUTO FIRE STATUS] LIVE AUTO READY")
     elif _pf_mode == "manual_test":
         print("[AUTO FIRE STATUS] MANUAL TEST ONLY")
@@ -3037,8 +3052,6 @@ def run_predictions():
             _fa_missing.append("public betting missing")
         if _g_n > 0 and (_non_manual_ou_n == 0 or _non_manual_ou_n < max(1, _g_n - 1)):
             _fa_missing.append("odds coverage incomplete (non-manual market O/U totals)")
-        if api_real_n == 0:
-            _fa_missing.append("no API/market real totals")
         print("[FULL AUTO CHECK]", "; ".join(_fa_missing) if _fa_missing else "see preflight mode")
 
     # Opening Day readiness end-of-run summary
