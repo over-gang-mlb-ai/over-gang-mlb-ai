@@ -1658,8 +1658,22 @@ def run_predictions():
     velocity_tracker = VelocityTracker()
     lineups = LineupImpact()
     try:
-        # --- Mountain Time "today"
+        # --- Mountain Time slate date: wall-clock MT today, or OVERGANG_TARGET_DATE=YYYY-MM-DD
         today_mt = datetime.now(ZoneInfo("America/Denver")).date()
+        _og_target = os.environ.get("OVERGANG_TARGET_DATE", "").strip()
+        if _og_target:
+            try:
+                today_mt = datetime.strptime(_og_target, "%Y-%m-%d").date()
+                print(
+                    f"[OVERRIDE] OVERGANG_TARGET_DATE={_og_target} → "
+                    f"schedule/odds slate MT date: {today_mt}"
+                )
+            except ValueError:
+                today_mt = datetime.now(ZoneInfo("America/Denver")).date()
+                print(
+                    f"⚠️ OVERGANG_TARGET_DATE={_og_target!r} invalid (use YYYY-MM-DD); "
+                    f"using MT today: {today_mt}"
+                )
 
         # Pull MLB schedule for that calendar day (UTC-based API)
         games = schedule(
@@ -1743,7 +1757,7 @@ def run_predictions():
 
         print(f"[ODDS] Final odds source: {odds_source}")
 
-        # Keep only games that are actually TODAY in MT
+        # Keep only games whose local MT calendar date matches the target slate (today_mt)
         def game_mt_date(g):
             dt_utc = datetime.strptime(
                 g["game_datetime"], "%Y-%m-%dT%H:%M:%SZ"
