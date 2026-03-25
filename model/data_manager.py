@@ -73,14 +73,27 @@ class DataManager:
     # MLB + Savant fetchers
     # ----------------------------
     @staticmethod
-    def _savant_xera_by_id(year: int) -> pd.DataFrame:
+    def _savant_body_looks_like_html(text: str) -> bool:
+        """Reject error pages / HTML served instead of Savant CSV export."""
+        if not text or not str(text).strip():
+            return True
+        head = str(text).lstrip()[:1200].lower()
+        if head.startswith("<!doctype") or head.startswith("<html"):
+            return True
+        if head.startswith("<?xml") and "<html" in head[:500]:
+            return True
+        if head.startswith("<") and ("<table" in head[:600] or "<body" in head[:600] or "<head" in head[:600]):
+            return True
+        return False
+
+    @staticmethod
+    def _savant_xera_single_year(year: int) -> pd.DataFrame:
         """
-        Return DataFrame with columns: player_id, xERA
-        Multi-stage:
-          1) CSV export (fast, preferred)
-          2) HTML table scrape (robust when CSV omits xERA)
-          3) Derive xERA from est_wOBA (last-resort, transparent)
-        Saves debug artifacts under ./debug for troubleshooting.
+        Return DataFrame with columns: player_id, xERA for one season.
+        Multi-stage (canonical real xERA from Savant CSV first):
+          1) CSV export — validated body, broad column aliases
+          2) Derive xERA from est_wOBA when CSV has wOBA but not xERA (not official Savant xERA)
+        HTML read_html path removed: brittle on current Savant JS pages; does not improve real xERA.
         """
         os.makedirs("debug", exist_ok=True)
         headers = {
@@ -88,21 +101,27 @@ class DataManager:
                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         }
 
-        # ---------- helper: choose column by fuzzy/normalized name
         def _pick_col(cols, *candidates):
             norm = {c.lower().strip().replace(" ", "").replace("_", ""): c for c in cols}
             normalized_candidates = [c.lower().strip().replace(" ", "").replace("_", "") for c in candidates]
             for key, original in norm.items():
                 if key in normalized_candidates:
                     return original
-            # soft search (prefix match)
             for c in cols:
                 cl = str(c).lower().replace(" ", "").replace("_", "")
                 if any(cl.startswith(k) for k in normalized_candidates):
                     return c
             return None
 
-        # ---------- 1) CSV attempt(s)
+        _PID = (
+            "player_id", "playerid", "player id", "mlbam", "mlb_am_id", "mlbam_id",
+            "pitcher_id", "mlbamid",
+        )
+        _XERA = (
+            "xERA", "xera", "expectedera", "exera", "expected_era", "x_era",
+            "expectedrunavg", "expected_run_avg",
+        )
+
         csv_urls = [
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&season={year}&csv=true",
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&csv=true",
@@ -114,14 +133,26 @@ class DataManager:
                 r = requests.get(url, headers=headers, timeout=25)
                 r.raise_for_status()
                 csv_text = r.text
-                # save a sample for debugging
                 path = f"debug/savant_xera_{year}_csv_attempt{i}.csv"
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(csv_text)
 
-                df = pd.read_csv(io.StringIO(csv_text))
-                pid_col = _pick_col(df.columns, "player_id", "playerid", "player id")
-                xera_col = _pick_col(df.columns, "xERA", "xera", "expectedera", "exera")
+                if DataManager._savant_body_looks_like_html(csv_text):
+                    last_err = f"CSV attempt {i}: response body looks like HTML, not CSV ({url})"
+                    continue
+
+                try:
+                    df = pd.read_csv(io.StringIO(csv_text))
+                except Exception as e:
+                    last_err = f"CSV attempt {i} parse failed: {e}"
+                    continue
+
+                if df is None or df.empty or len(df.columns) < 2:
+                    last_err = f"CSV attempt {i}: empty or single-column parse ({url})"
+                    continue
+
+                pid_col = _pick_col(df.columns, *_PID)
+                xera_col = _pick_col(df.columns, *_XERA)
 
                 if pid_col and xera_col:
                     out = df[[pid_col, xera_col]].rename(columns={pid_col: "player_id", xera_col: "xERA"})
@@ -129,10 +160,10 @@ class DataManager:
                     out["xERA"] = pd.to_numeric(out["xERA"], errors="coerce")
                     out = out.dropna(subset=["player_id", "xERA"]).astype({"player_id": int})
                     if not out.empty:
-                        print(f"✅ xERA source: CSV (rows={len(out)}, attempt={i})")
+                        print(f"✅ xERA source: Savant CSV (rows={len(out)}, year={year}, attempt={i})")
                         return out
+                    last_err = f"CSV attempt {i}: no rows with valid player_id+xERA after dropna ({url})"
                 else:
-                    # keep a header snapshot for support
                     hdr = ",".join(map(str, df.columns))
                     with open(f"debug/savant_headers_{year}.csv", "w", encoding="utf-8") as f:
                         f.write(hdr + "\n")
@@ -142,48 +173,7 @@ class DataManager:
             except Exception as e:
                 last_err = f"CSV attempt {i} failed: {e}"
 
-        # ---------- 2) HTML table scrape
-        try:
-            html_url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}"
-            r = requests.get(html_url, headers=headers, timeout=25)
-            r.raise_for_status()
-            html_path = f"debug/savant_xera_{year}_page.html"
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(r.text)
-
-            # read all tables; pick the one that has player_id and xERA (or est_wOBA for fallback)
-            tables = pd.read_html(io.StringIO(r.text), flavor=["lxml", "bs4"], header=0)
-            chosen = None
-            for t in tables:
-                cols = [str(c) for c in t.columns]
-                pid_col = _pick_col(cols, "player_id", "playerid", "player id")
-                xera_col = _pick_col(cols, "xERA", "xera", "expectedera", "exera")
-                estwoba_col = _pick_col(cols, "est_wOBA", "estwoba", "expectedwoba", "xwoba")
-                if pid_col and (xera_col or estwoba_col):
-                    chosen = t
-                    break
-
-            if chosen is not None:
-                cols = [str(c) for c in chosen.columns]
-                pid_col = _pick_col(cols, "player_id", "playerid", "player id")
-                xera_col = _pick_col(cols, "xERA", "xera", "expectedera", "exera")
-
-                if pid_col and xera_col:
-                    out = chosen[[pid_col, xera_col]].rename(columns={pid_col: "player_id", xera_col: "xERA"})
-                    out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce").astype("Int64")
-                    out["xERA"] = pd.to_numeric(out["xERA"], errors="coerce")
-                    out = out.dropna(subset=["player_id", "xERA"]).astype({"player_id": int})
-                    if not out.empty:
-                        print(f"✅ xERA source: HTML (rows={len(out)})")
-                        return out
-                # keep table preview for debugging/derivation
-                chosen.to_csv(f"debug/savant_xera_{year}_html_table.csv", index=False)
-            else:
-                last_err = "HTML scrape found no suitable table."
-        except Exception as e:
-            last_err = f"HTML scrape failed: {e}"
-
-        # ---------- 3) Derive xERA from est_wOBA (transparent fallback)
+        # ---------- Derive xERA from est_wOBA (secondary; not official Savant xERA)
         # Approach: linear transform anchored to league averages
         #   xERA ≈ L_ERA + SLOPE * (est_wOBA - L_wOBA)
         # Defaults are adjustable via env vars.
@@ -203,6 +193,8 @@ class DataManager:
                 url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&csv=true"
                 r = requests.get(url, headers=headers, timeout=25)
                 r.raise_for_status()
+                if DataManager._savant_body_looks_like_html(r.text):
+                    raise ValueError("Fallback CSV fetch returned HTML, not Savant CSV.")
                 source = f"debug/savant_xera_{year}_csv_attempt_fallback.csv"
                 with open(source, "w", encoding="utf-8") as f:
                     f.write(r.text)
@@ -213,8 +205,10 @@ class DataManager:
                 df = pd.read_csv(source)
 
             cols = [str(c) for c in df.columns]
-            pid_col = _pick_col(cols, "player_id", "playerid", "player id")
-            estwoba_col = _pick_col(cols, "est_wOBA", "estwoba", "expectedwoba", "xwoba")
+            pid_col = _pick_col(cols, *_PID)
+            estwoba_col = _pick_col(
+                cols, "est_wOBA", "estwoba", "expectedwoba", "xwoba", "x_woba", "xwoba_con", "est_woba"
+            )
             if not (pid_col and estwoba_col):
                 raise ValueError(
                     f"Derivation failed: could not find est_wOBA. id='{pid_col}', est_wOBA='{estwoba_col}'"
@@ -255,6 +249,26 @@ class DataManager:
                 f"See debug/savant_xera_{year}_*.csv/.html for raw responses."
             )
             raise ValueError(msg)
+
+    @staticmethod
+    def _savant_xera_by_id(year: int) -> pd.DataFrame:
+        """
+        Return DataFrame with columns: player_id, xERA (real Savant leaderboard values when CSV succeeds).
+        Tries current season first, then prior season (same MLBAM ids) so early-season / thin
+        leaderboards still receive last year's Savant xERA before merge falls back to ERA.
+        """
+        errs = []
+        for y in (year, year - 1) if year > 2015 else (year,):
+            if y < 2015:
+                break
+            try:
+                return DataManager._savant_xera_single_year(y)
+            except ValueError as e:
+                errs.append(f"{y}: {e}")
+                continue
+        raise ValueError(
+            "Savant xERA unavailable: " + (" | ".join(errs) if errs else "unknown")
+        )
 
     @staticmethod
     def _mlb_pitching_stats_by_id(year: int) -> Tuple[pd.DataFrame, bool]:
