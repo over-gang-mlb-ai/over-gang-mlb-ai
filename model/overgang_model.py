@@ -205,6 +205,9 @@ TELEGRAM_CHAT_ID = '1821580164'
 MIN_CONFIDENCE_ALERT = 0.85
 # ML side-signal fire: max(home_win_prob, away_win_prob) from calculate_team_win_probability (not gated on O/U totals).
 MIN_ML_WIN_PROB_FOR_FIRE = 0.55
+# Customer Telegram only (CSV/export unchanged): min confidence to send a message.
+TELEGRAM_OU_MIN_CONFIDENCE_PCT = 90.0
+TELEGRAM_ML_MIN_CONFIDENCE_PCT = 60.0
 DATA_DIR = "data"
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
@@ -1343,6 +1346,28 @@ def _ml_confidence_display(game_data: dict) -> tuple:
         return clean, emoji
     except Exception:
         return str(game_data.get("ML_Confidence", "?")), ""
+
+
+def _ou_confidence_percent_for_telegram_gate(game_data: dict) -> float:
+    """O/U confidence on 0–100 scale for Telegram send gating (Confidence_Value 0–1 or Confidence %)."""
+    try:
+        raw_conf = game_data.get("Confidence_Value")
+        if raw_conf is None:
+            return float(str(game_data.get("Confidence", "0")).replace("%", ""))
+        raw_conf = float(raw_conf)
+        if 0 <= raw_conf <= 1.0:
+            return raw_conf * 100.0
+        return raw_conf
+    except Exception:
+        return float("-inf")
+
+
+def _ml_confidence_percent_for_telegram_gate(game_data: dict) -> float:
+    """ML_Confidence on 0–100 scale for Telegram send gating (parses percent strings)."""
+    try:
+        return float(str(game_data.get("ML_Confidence", "0")).replace("%", "").strip())
+    except Exception:
+        return float("-inf")
 
 
 def _fmt_num_one(v) -> str:
@@ -2915,18 +2940,29 @@ def run_predictions():
     print(f"[READINESS] ML: slate_ml_fired_games={_ml_fired_n} / {len(results)} games processed")
 
     # Telegram: O/U and ML use separate send loops and distinct message bodies (format_ou_alert vs format_ml_alert).
+    # Gating (thresholds TELEGRAM_*_MIN_*): CSV keeps all rows; only high-confidence rows are messaged.
+    telegram_ou_alerts = [
+        a
+        for a in alerts
+        if _ou_confidence_percent_for_telegram_gate(a) >= TELEGRAM_OU_MIN_CONFIDENCE_PCT
+    ]
+    telegram_ml_alerts = [
+        a
+        for a in ml_alerts
+        if _ml_confidence_percent_for_telegram_gate(a) >= TELEGRAM_ML_MIN_CONFIDENCE_PCT
+    ]
     # The same game can appear in both lists when both fire, producing two clearly different messages.
-    if alerts:
-        print(f"\n🚨 Sending {len(alerts)} O/U alerts...")
-        for alert in alerts:
+    if telegram_ou_alerts:
+        print(f"\n🚨 Sending {len(telegram_ou_alerts)} O/U Telegram alert(s) (≥{TELEGRAM_OU_MIN_CONFIDENCE_PCT:.0f}% conf)...")
+        for alert in telegram_ou_alerts:
             message = format_ou_alert(alert)
             if send_telegram_alert(message):
                 print(f"📤 O/U alert sent for {alert['Game']}")
                 time.sleep(1)
 
-    if ml_alerts:
-        print(f"\n🚨 Sending {len(ml_alerts)} ML signal alerts...")
-        for alert in ml_alerts:
+    if telegram_ml_alerts:
+        print(f"\n🚨 Sending {len(telegram_ml_alerts)} ML Telegram alert(s) (≥{TELEGRAM_ML_MIN_CONFIDENCE_PCT:.0f}% ML conf)...")
+        for alert in telegram_ml_alerts:
             message = format_ml_alert(alert)
             if send_telegram_alert(message):
                 print(f"📤 ML alert sent for {alert['Game']}")
@@ -3095,8 +3131,8 @@ def run_predictions():
     print(f"  Games processed: {len(results)}")
     print(f"  Games with trusted O/U (Total_Is_Real): {sum(1 for r in results if r.get('Total_Is_Real'))}")
     print(f"  Games with ML_Fired: {sum(1 for r in results if r.get('ML_Fired'))}")
-    print(f"  O/U high-confidence alerts sent: {len(alerts)}")
-    print(f"  ML signal alerts sent: {len(ml_alerts)}")
+    print(f"  O/U Telegram alerts sent: {len(telegram_ou_alerts)} (candidates: {len(alerts)})")
+    print(f"  ML Telegram alerts sent: {len(telegram_ml_alerts)} (candidates: {len(ml_alerts)})")
     print(f"  Manual totals loaded: {len(_manual)}")
     print("-------------------")
 
