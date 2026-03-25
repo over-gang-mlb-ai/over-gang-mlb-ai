@@ -1354,6 +1354,11 @@ def format_alert(game_data: dict) -> str:
         raw_conf = game_data.get('Confidence_Value')
         if raw_conf is None:
             raw_conf = float(str(game_data.get('Confidence', '0')).replace('%', ''))
+        else:
+            raw_conf = float(raw_conf)
+            # Confidence_Value is stored 0–1; Telegram display/thresholds expect 0–100
+            if 0 <= raw_conf <= 1.0:
+                raw_conf = raw_conf * 100.0
         confidence_clean = f"{raw_conf:.0f}%" if raw_conf is not None else str(game_data.get('Confidence', '?'))
 
         if raw_conf >= 95:
