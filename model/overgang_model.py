@@ -1315,85 +1315,91 @@ def send_telegram_alert(message):
             time.sleep(2)
     return False
 
-def format_alert(game_data: dict) -> str:
+def _alert_formatted_time(game_data: dict) -> str:
     try:
-        game_utc_time = datetime.strptime(game_data['Datetime'], "%Y-%m-%dT%H:%M:%SZ")
+        game_utc_time = datetime.strptime(game_data["Datetime"], "%Y-%m-%dT%H:%M:%SZ")
         mt_time = game_utc_time.replace(tzinfo=utc).astimezone(timezone("US/Mountain"))
-        formatted_time = mt_time.strftime('%I:%M %p MT')
-    except:
-        formatted_time = "TBD"
+        return mt_time.strftime("%I:%M %p MT")
+    except Exception:
+        return "TBD"
 
-    velo_away = game_data.get('VeloDrop_Away', '?')
-    velo_home = game_data.get('VeloDrop_Home', '?')
-    ou_over = game_data.get('ou_bets_pct_over', '?')
-    ou_under = game_data.get('ou_bets_pct_under', '?')
-    ml_home = game_data.get('ml_bets_pct_home', '?')
-    ml_away = game_data.get('ml_bets_pct_away', '?')
-    total_open = game_data.get('total_open', '?')
-    total_current = game_data.get('total_current', '?')
-    vegas_line = game_data.get('vegas_line', '?')
 
-    # Determine emoji for line movement
-    if total_open != "?" and total_current != "?":
-        try:
-            open_val = float(total_open)
-            current_val = float(total_current)
-            if current_val > open_val:
-                line_move_emoji = "📈"
-            elif current_val < open_val:
-                line_move_emoji = "📉"
-            else:
-                line_move_emoji = "⏸️"
-            line_movement = f"{total_open} → {total_current} {line_move_emoji}"
-        except:
-            line_movement = f"{total_open} → {total_current}"
-    else:
-        line_movement = f"{total_open} → {total_current}"
+def _confidence_emoji_for_percent(raw_conf: float) -> str:
+    if raw_conf >= 95:
+        return "🔥"
+    if raw_conf >= 90:
+        return "💪"
+    if raw_conf >= 80:
+        return "👍"
+    if raw_conf >= 70:
+        return "🤞"
+    return "😬"
 
+
+def _ou_confidence_display(game_data: dict) -> tuple:
+    """O/U row: Confidence_Value (0–1) or Confidence string (percent)."""
     try:
-        raw_conf = game_data.get('Confidence_Value')
+        raw_conf = game_data.get("Confidence_Value")
         if raw_conf is None:
-            raw_conf = float(str(game_data.get('Confidence', '0')).replace('%', ''))
+            raw_conf = float(str(game_data.get("Confidence", "0")).replace("%", ""))
         else:
             raw_conf = float(raw_conf)
-            # Confidence_Value is stored 0–1; Telegram display/thresholds expect 0–100
             if 0 <= raw_conf <= 1.0:
                 raw_conf = raw_conf * 100.0
-        confidence_clean = f"{raw_conf:.0f}%" if raw_conf is not None else str(game_data.get('Confidence', '?'))
+        clean = f"{raw_conf:.0f}%"
+        emoji = _confidence_emoji_for_percent(raw_conf)
+        return clean, emoji
+    except Exception:
+        return str(game_data.get("Confidence", "?")), ""
 
-        if raw_conf >= 95:
-            confidence_emoji = "🔥"
-        elif raw_conf >= 90:
-            confidence_emoji = "💪"
-        elif raw_conf >= 80:
-            confidence_emoji = "👍"
-        elif raw_conf >= 70:
-            confidence_emoji = "🤞"
-        else:
-            confidence_emoji = "😬"
 
-    except:
-        confidence_clean = game_data.get('Confidence', '?')
-        confidence_emoji = ""
+def _ml_confidence_display(game_data: dict) -> tuple:
+    """ML row: ML_Confidence string like '64%'."""
+    try:
+        raw = float(str(game_data.get("ML_Confidence", "0")).replace("%", "").strip())
+        clean = f"{raw:.0f}%"
+        emoji = _confidence_emoji_for_percent(raw)
+        return clean, emoji
+    except Exception:
+        return str(game_data.get("ML_Confidence", "?")), ""
 
-    proj_total = game_data.get('Projected_Total', '?')
-    edge_val = game_data.get('Edge', '?')
-    edge_str = f"{edge_val:+.2f}" if isinstance(edge_val, (int, float)) else edge_val
-    away_r = game_data.get('Away_Runs', '?')
-    home_r = game_data.get('Home_Runs', '?')
+
+def _fmt_num_one(v) -> str:
+    if isinstance(v, (int, float)):
+        return f"{v:.1f}"
+    return str(v)
+
+
+def format_ou_alert(game_data: dict) -> str:
+    """Customer-facing O/U Telegram message (CSV remains full detail)."""
+    t = _alert_formatted_time(game_data)
+    conf, emoji = _ou_confidence_display(game_data)
+    proj = game_data.get("Projected_Total", "?")
+    vegas = game_data.get("vegas_line", "?")
     return (
-        f"🔥 *OVER GANG ALERT* 🔥\n\n"
+        f"📊 *O/U · Over Gang*\n"
         f"🏟️ *{game_data['Game']}*\n"
-        f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {formatted_time}\n\n"
-        f"🎯 *Pitchers*: {game_data['Pitchers']}\n"
-        f"📊 xERA: {game_data['xERA']} | WHIP: {game_data['WHIP']}\n"
-        f"📐 *Projection*: {away_r} + {home_r} = *{proj_total}* runs\n"
-        f"📏 *Edge*: {edge_str} vs Vegas {vegas_line}\n"
+        f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {t}\n\n"
+        f"🎯 {game_data['Pitchers']}\n"
+        f"📊 xERA {game_data['xERA']} · WHIP {game_data['WHIP']}\n\n"
+        f"*Proj* {_fmt_num_one(proj)} vs *Vegas* {_fmt_num_one(vegas)}\n"
         f"🧠 *Pick*: {game_data['Prediction']}\n"
-        f"💪 *Confidence*: {confidence_clean}{f' {confidence_emoji}' if confidence_emoji else ''} | *Units*: {game_data.get('Units', '-')}\n"
-        f"🏆 *ML Pick*: {game_data.get('ML_Pick', '-')} | *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n"
-        f"📉 *Public*: {ou_over if ou_over != '?' else '-'}% Over / {ou_under if ou_under != '?' else '-'}% Under | Line: {line_movement}\n"
-        f"🧾 *ML Bets*: {ml_home if ml_home != '?' else '-'}% Home / {ml_away if ml_away != '?' else '-'}% Away"
+        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Units*: {game_data.get('Units', '-')}"
+    )
+
+
+def format_ml_alert(game_data: dict) -> str:
+    """Customer-facing ML Telegram message (distinct from O/U; CSV remains full detail)."""
+    t = _alert_formatted_time(game_data)
+    conf, emoji = _ml_confidence_display(game_data)
+    return (
+        f"💵 *ML · Over Gang*\n"
+        f"🏟️ *{game_data['Game']}*\n"
+        f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {t}\n\n"
+        f"🎯 {game_data['Pitchers']}\n"
+        f"📊 xERA {game_data['xERA']} · WHIP {game_data['WHIP']}\n\n"
+        f"🏆 *Pick*: {game_data.get('ML_Pick', '-')}\n"
+        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Kelly*: {game_data.get('ML_Kelly_Units', '-')}"
     )
 
 def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
@@ -2927,11 +2933,12 @@ def run_predictions():
     _ml_fired_n = sum(1 for r in results if r.get("ML_Fired"))
     print(f"[READINESS] ML: slate_ml_fired_games={_ml_fired_n} / {len(results)} games processed")
 
-    # Send alerts (O/U high-confidence)
+    # Telegram: O/U and ML use separate send loops and distinct message bodies (format_ou_alert vs format_ml_alert).
+    # The same game can appear in both lists when both fire, producing two clearly different messages.
     if alerts:
         print(f"\n🚨 Sending {len(alerts)} O/U alerts...")
         for alert in alerts:
-            message = format_alert(alert)
+            message = format_ou_alert(alert)
             if send_telegram_alert(message):
                 print(f"📤 O/U alert sent for {alert['Game']}")
                 time.sleep(1)
@@ -2939,7 +2946,7 @@ def run_predictions():
     if ml_alerts:
         print(f"\n🚨 Sending {len(ml_alerts)} ML signal alerts...")
         for alert in ml_alerts:
-            message = format_alert(alert)
+            message = format_ml_alert(alert)
             if send_telegram_alert(message):
                 print(f"📤 ML alert sent for {alert['Game']}")
                 time.sleep(1)
