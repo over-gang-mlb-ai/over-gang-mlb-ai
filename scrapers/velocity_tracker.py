@@ -1,6 +1,10 @@
 import pandas as pd
 from functools import lru_cache
+from pathlib import Path
 from unidecode import unidecode
+
+_VELOCITY_CSV = Path(__file__).resolve().parent.parent / "data" / "velocity_data.csv"
+
 
 class VelocityTracker:
     _velocity_df = None
@@ -9,7 +13,7 @@ class VelocityTracker:
     def load_velocity_csv():
         if VelocityTracker._velocity_df is None:
             try:
-                df = pd.read_csv("data/velocity_data.csv")
+                df = pd.read_csv(_VELOCITY_CSV)
                 df["Name"] = df["Name"].apply(lambda x: unidecode(x.lower().strip()))
                 VelocityTracker._velocity_df = df.set_index("Name")
                 print(f"✅ Loaded velocity data for {len(df)} pitchers")

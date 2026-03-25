@@ -31,14 +31,12 @@ from unidecode import unidecode
 from rapidfuzz import fuzz, process
 from functools import lru_cache
 from statsapi import schedule
-from pybaseball import pitching_stats, statcast_pitcher, playerid_lookup
 import numpy as np
 import subprocess
 import sys
 from pathlib import Path
 
 from scrapers.velocity_tracker import VelocityTracker
-velocity_tracker = VelocityTracker()
 from core.public_betting_dummy import DUMMY_PUBLIC_BETTING
 from core.public_betting_loader import load_public_betting_data
 public_data = load_public_betting_data()
@@ -1081,23 +1079,6 @@ def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
 
     return sio.fetch_mlb_odds_by_date(target_date_yyyy_mm_dd)
 
-
-class VelocityTracker:
-    @staticmethod
-    @lru_cache(maxsize=100)
-    def get_velocity_drop(pitcher_name):
-        try:
-            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            data = statcast_pitcher(start_date, end_date, pitcher_name)
-            if data is None or len(data) < 10:
-                return 0
-            recent_avg = data['release_speed'].tail(3).mean()
-            season_peak = data['release_speed'].quantile(0.75)
-            return recent_avg - season_peak
-        except Exception as e:
-            print(f"⚠️ Velocity error for {pitcher_name}: {e}")
-            return 0
 
 # ================================
 # 📈 PREDICTION ENGINE (true projection model)
