@@ -1381,14 +1381,18 @@ def format_ou_alert(game_data: dict) -> str:
     t = _alert_formatted_time(game_data)
     conf, emoji = _ou_confidence_display(game_data)
     proj = game_data.get("Projected_Total", "?")
-    vegas = game_data.get("vegas_line", "?")
+    edge_val = game_data.get("Edge", "?")
+    if isinstance(edge_val, (int, float)):
+        edge_str = f"{edge_val:+.1f}"
+    else:
+        edge_str = str(edge_val)
     return (
         f"📊 *O/U · Over Gang*\n"
         f"🏟️ *{game_data['Game']}*\n"
         f"📍 {game_data.get('Venue', 'Unknown')} | 🕒 {t}\n\n"
         f"🎯 {game_data['Pitchers']}\n"
         f"📊 xERA {game_data['xERA']} · WHIP {game_data['WHIP']}\n\n"
-        f"*Proj* {_fmt_num_one(proj)} vs *Vegas* {_fmt_num_one(vegas)}\n"
+        f"Projection: {_fmt_num_one(proj)} | Edge: {edge_str}\n"
         f"🧠 *Pick*: {game_data['Prediction']}\n"
         f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Units*: {game_data.get('Units', '-')}"
     )
@@ -2901,7 +2905,7 @@ def run_predictions():
             traceback.print_exc()
             continue
 
-    # Export: O/U rows require trusted real total; ML rows can export when ML_Fired without Total_Is_Real
+    # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
         "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
@@ -2914,25 +2918,21 @@ def run_predictions():
         "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag",
     ]
-    eligible_ou = [r for r in results if r.get("Total_Is_Real", False)]
-    eligible_ml = [r for r in results if r.get("ML_Fired", False)]
-    if eligible_ou or eligible_ml:
+    eligible_export = [
+        r for r in results
+        if r.get("Total_Is_Real", False) or r.get("ML_Fired", False)
+    ]
+    if eligible_export:
         archive_date = datetime.now().strftime("%Y%m%d_%H%M")
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
-
-        if eligible_ou:
-            ou_df = pd.DataFrame(eligible_ou, columns=export_cols)
-            ou_path = f"{ARCHIVE_DIR}/predictions_ou_{archive_date}.csv"
-            ou_df.to_csv(ou_path, index=False)
-            print(f"\n💾 Saved {len(eligible_ou)} O/U (trusted-total) rows → {ou_path}")
-            send_telegram_file(ou_path, caption=f"📊 Over Gang O/U (trusted totals) — {datetime.now().strftime('%b %d')}")
-
-        if eligible_ml:
-            ml_df = pd.DataFrame(eligible_ml, columns=export_cols)
-            ml_path = f"{ARCHIVE_DIR}/predictions_ml_{archive_date}.csv"
-            ml_df.to_csv(ml_path, index=False)
-            print(f"💾 Saved {len(eligible_ml)} ML-signal rows → {ml_path}")
-            send_telegram_file(ml_path, caption=f"📊 Over Gang ML signals — {datetime.now().strftime('%b %d')}")
+        combined_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
+        combined_df = pd.DataFrame(eligible_export, columns=export_cols)
+        combined_df.to_csv(combined_path, index=False)
+        print(f"\n💾 Saved {len(eligible_export)} combined row(s) → {combined_path}")
+        send_telegram_file(
+            combined_path,
+            caption=f"📊 Over Gang predictions — {datetime.now().strftime('%b %d')}",
+        )
     elif results:
         print("\nℹ️ No export rows (no trusted O/U games and no ML_Fired games).")
 
