@@ -1713,6 +1713,21 @@ def run_predictions():
             end_date=today_mt.strftime('%Y-%m-%d')
         )
 
+        try:
+            from core.public_betting_scraper import scrape_public_betting
+
+            _pb_ok = scrape_public_betting(target_date=today_mt)
+            if not _pb_ok:
+                print(
+                    "⚠️ Public betting CSV not refreshed (scraper returned False); "
+                    "continuing with existing data/public_betting.csv if present."
+                )
+        except Exception as _e_pb:
+            print(
+                f"⚠️ Public betting scrape error ({_e_pb!r}); "
+                "continuing with existing data/public_betting.csv if present."
+            )
+
         public_betting_data = load_public_betting_data()
         target_date_str = today_mt.strftime("%Y-%m-%d")
         print("[ODDS] Trying SportsDataIO first...")
