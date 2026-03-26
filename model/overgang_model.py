@@ -1617,8 +1617,7 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
             warnings.append("bullpen data missing or empty")
         if games_n == 0:
             issues.append("no games for slate")
-        if not public_ok:
-            warnings.append("public betting empty or missing")
+        # Public betting is optional overlay; do not warn or gate modes on it.
 
         if not pitcher_ok or games_n == 0:
             mode = "stop"
@@ -1629,7 +1628,6 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
         elif (
             pitcher_ok
             and bullpen_ok
-            and public_ok
             and odds_ok
             and odds_coverage_ok
         ):
@@ -1639,11 +1637,11 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
             pitcher_ok
             and bullpen_ok
             and manual_matched_today
-            and (not public_ok or not odds_ok or not odds_coverage_ok)
+            and (not odds_ok or not odds_coverage_ok)
         ):
             mode = "manual_test"
             warnings.append(
-                "manual totals matched today's slate; public and/or non-manual market totals incomplete — manual_test mode"
+                "manual totals matched today's slate; non-manual market totals incomplete — manual_test mode"
             )
         else:
             mode = "projection_only"
@@ -2289,13 +2287,13 @@ def run_predictions():
             opening_missing_trusted_totals += 1
 
         pitchers_ready = (away_type in {"exact", "alias"}) and (home_type in {"exact", "alias"})
-        public_ready = not public_missing
         totals_ready = trusted_exists
-        if pitchers_ready and public_ready and totals_ready:
+        # Public betting is optional; readiness = pitchers + trusted totals only.
+        if pitchers_ready and totals_ready:
             opening_fully_ready_games += 1
         else:
             opening_degraded_games += 1
-            if (public_missing or not totals_ready or not pitchers_ready):
+            if not totals_ready or not pitchers_ready:
                 opening_games_missing_required_inputs.append(game_key)
 
     # Print compact preflight block
@@ -2717,11 +2715,10 @@ def run_predictions():
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
             data_quality_degraded = (
-                public is None or public == {} or
-                "League Avg" in (away_pitcher or "") or
-                "League Avg" in (home_pitcher or "") or
-                bool(safe_get(away_stats, "LowIP", False)) or
-                bool(safe_get(home_stats, "LowIP", False))
+                "League Avg" in (away_pitcher or "")
+                or "League Avg" in (home_pitcher or "")
+                or bool(safe_get(away_stats, "LowIP", False))
+                or bool(safe_get(home_stats, "LowIP", False))
             )
             proj = generate_prediction(
                 away_stats=away_stats,
@@ -2933,9 +2930,7 @@ def run_predictions():
                     no_fire_ou = "edge_too_small"
                 elif confidence < fire_threshold:
                     no_fire_ou = "confidence_below_alert_threshold"
-                elif public is None or public == {} or (
-                    "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")
-                ):
+                elif "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
                     no_fire_ou = "data_quality_degraded"
                 else:
                     no_fire_ou = "manual_review"
@@ -2963,8 +2958,6 @@ def run_predictions():
                 or _home_low
             ):
                 dq_parts.append("fallback_pitcher")
-            if public is None or public == {}:
-                dq_parts.append("missing_public_data")
             if _away_low or _home_low:
                 dq_parts.append("low_ip")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
@@ -3167,8 +3160,6 @@ def run_predictions():
             _bp_ok, _bp_n = False, 0
         if not _bp_ok or _bp_n == 0:
             _fa_missing.append("bullpen missing")
-        if not public_betting_data or not isinstance(public_betting_data, dict) or len(public_betting_data) == 0:
-            _fa_missing.append("public betting missing")
         if _g_n > 0 and (_non_manual_ou_n == 0 or _non_manual_ou_n < max(1, _g_n - 1)):
             _fa_missing.append("odds coverage incomplete (non-manual market O/U totals)")
         print("[FULL AUTO CHECK]", "; ".join(_fa_missing) if _fa_missing else "see preflight mode")
