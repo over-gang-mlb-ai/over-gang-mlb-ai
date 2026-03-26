@@ -2711,6 +2711,8 @@ def run_predictions():
                 'Closing_Line': '',
                 'CLV': '',
                 'CLV_Result': '',
+                'OU_Result': 'PENDING',
+                'ML_Result': 'PENDING',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -2935,6 +2937,7 @@ def run_predictions():
         "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
         "Line_Status", "Fallback_Used", "Data_Quality_Flag",
         "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
+        "OU_Result", "ML_Result",
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag",
     ]
     eligible_export = [
