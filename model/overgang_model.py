@@ -1394,7 +1394,8 @@ def format_ou_alert(game_data: dict) -> str:
         f"📊 xERA {game_data['xERA']} · WHIP {game_data['WHIP']}\n\n"
         f"Projection: {_fmt_num_one(proj)} | Edge: {edge_str}\n"
         f"🧠 *Pick*: {game_data['Prediction']}\n"
-        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Units*: {game_data.get('Units', '-')}"
+        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Units*: {game_data.get('Units', '-')}\n\n"
+        "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly."
     )
 
 
@@ -1409,7 +1410,8 @@ def format_ml_alert(game_data: dict) -> str:
         f"🎯 {game_data['Pitchers']}\n"
         f"📊 xERA {game_data['xERA']} · WHIP {game_data['WHIP']}\n\n"
         f"🏆 *Pick*: {game_data.get('ML_Pick', '-')}\n"
-        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Kelly*: {game_data.get('ML_Kelly_Units', '-')}"
+        f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n\n"
+        "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly."
     )
 
 def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
