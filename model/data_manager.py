@@ -29,6 +29,10 @@ MIN_PITCHER_IP_LATE = 15
 # Refuse to overwrite pitcher_stats.csv if new pull has fewer than this many rows
 MIN_PITCHER_SAVE_COUNT = 100
 
+# Early-season blend: w26 = min(max(ip_current, 0), EARLY_SEASON_BLEND_IP_CAP) / EARLY_SEASON_BLEND_IP_CAP
+# so ~50 IP of current season fully weights toward live xERA/WHIP vs prior-year carryover.
+EARLY_SEASON_BLEND_IP_CAP = 50.0
+
 
 class DataManager:
     # ----------------------------
@@ -271,11 +275,20 @@ class DataManager:
         )
 
     @staticmethod
-    def _mlb_pitching_stats_by_id(year: int) -> Tuple[pd.DataFrame, bool]:
+    def _mlb_pitching_stats_by_id(
+        year: int,
+        *,
+        prior_year_fallback: bool = True,
+        apply_safe_mode: bool = True,
+    ) -> Tuple[pd.DataFrame, bool]:
         """
         Pull ERA/WHIP/IP for all active MLB pitchers via MLB StatsAPI (free).
         Returns (DataFrame with columns mlb_id, Name, ERA, WHIP, IP, used_prior_year_fallback).
-        used_prior_year_fallback is True when current season had 0 regular-season splits and prior year was used.
+        used_prior_year_fallback is True when the requested season had 0 regular-season splits and prior year was used.
+
+        prior_year_fallback: if False, do not retry with year-1 when the requested year has no splits (returns empty).
+        apply_safe_mode: if False, do not reject small current-year universes (< MIN_PITCHER_SAVE_COUNT) when not using
+        the prior-year fallback path — used so update_pitcher_stats can blend a thin live year with full prior season.
         """
         headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -392,7 +405,7 @@ class DataManager:
                     "IP": ip
                 })
         # Preseason fallback: if no regular-season splits yet, retry with previous year
-        if total_raw_splits == 0 and year is not None:
+        if prior_year_fallback and total_raw_splits == 0 and year is not None:
             used_fallback = True
             fallback_year = year - 1
             print(f"[Pitcher update] No regular-season splits for {year}; retrying with {fallback_year}")
@@ -467,7 +480,7 @@ class DataManager:
                         })
         # SAFE MODE: only for true current-year responses (splits existed). Preseason prior-year fallback
         # must not be rejected for having < MIN_PITCHER_SAVE_COUNT rows — empty/malformed still fails below.
-        if not used_fallback and len(rows) < MIN_PITCHER_SAVE_COUNT:
+        if apply_safe_mode and not used_fallback and len(rows) < MIN_PITCHER_SAVE_COUNT:
             print("[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv")
             raise ValueError(
                 "[Pitcher update] SAFE MODE: insufficient live pitcher data; keeping existing pitcher_stats.csv"
@@ -483,15 +496,127 @@ class DataManager:
         df = pd.DataFrame(rows)
         if df.empty:
             if total_raw_splits == 0:
+                if not apply_safe_mode:
+                    return pd.DataFrame(), False
                 raise ValueError(
                     "MLB StatsAPI returned no pitcher rows (stats endpoint returned 0 splits). "
                     "Check endpoint or network."
                 )
+            if not apply_safe_mode:
+                return pd.DataFrame(), used_fallback
             raise ValueError(
                 f"MLB StatsAPI returned no pitcher rows (raw splits: {total_raw_splits}, "
                 "rows with ERA/WHIP/IP: 0). Check API response structure for stat/player."
             )
         return df, used_fallback
+
+    @staticmethod
+    def _mlb_savant_join(mlb_df: pd.DataFrame, savant_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge MLB season ERA/WHIP/IP with Savant xERA (same rules as update_pitcher_stats)."""
+        if mlb_df is None or mlb_df.empty:
+            return pd.DataFrame(columns=["mlb_id", "Name", "ERA", "WHIP", "IP", "xERA"])
+        merged = mlb_df.merge(savant_df, left_on="mlb_id", right_on="player_id", how="left")
+        merged["xERA"] = merged["xERA"].where(~merged["xERA"].isna(), merged["ERA"])
+        merged["xERA"] = merged["xERA"].fillna(4.25)
+        merged["IP"] = pd.to_numeric(merged["IP"], errors="coerce")
+        merged["WHIP"] = pd.to_numeric(merged["WHIP"], errors="coerce")
+        merged["xERA"] = pd.to_numeric(merged["xERA"], errors="coerce")
+        return merged[["mlb_id", "Name", "ERA", "WHIP", "IP", "xERA"]]
+
+    @staticmethod
+    def _blend_cur_prev_season_pitchers(
+        cur: pd.DataFrame,
+        prev: pd.DataFrame,
+        min_ip: float,
+        blend_ip_cap: float = EARLY_SEASON_BLEND_IP_CAP,
+    ) -> pd.DataFrame:
+        """
+        Early-season carryover: for each mlb_id, blend current-season xERA/WHIP with prior full season.
+
+        w26 = min(max(ip_current, 0), blend_ip_cap) / blend_ip_cap
+        blended xERA = w26 * xERA_cur + (1 - w26) * xERA_prev (with coalesce when one side is missing).
+        Final IP is current-season IP when a current row exists, else prior IP. LowIP uses current IP when present.
+        """
+        cols = ["mlb_id", "Name", "xERA", "WHIP", "IP", "LowIP"]
+        if cur.empty and prev.empty:
+            return pd.DataFrame(columns=cols)
+        if cur.empty:
+            o = prev.copy()
+            o["LowIP"] = o["IP"] < float(min_ip)
+            return o[cols]
+        if prev.empty:
+            o = cur.copy()
+            o["LowIP"] = o["IP"] < float(min_ip)
+            return o[cols]
+
+        cur = cur.sort_values("IP", ascending=False).drop_duplicates(subset=["mlb_id"], keep="first")
+        prev = prev.sort_values("IP", ascending=False).drop_duplicates(subset=["mlb_id"], keep="first")
+        joined = cur.merge(prev, on="mlb_id", how="outer", suffixes=("_cur", "_prev"))
+
+        def _nz(a, b, default: float) -> float:
+            if a is not None and pd.notna(a):
+                try:
+                    return float(a)
+                except (TypeError, ValueError):
+                    pass
+            if b is not None and pd.notna(b):
+                try:
+                    return float(b)
+                except (TypeError, ValueError):
+                    pass
+            return default
+
+        out_rows = []
+        for _, r in joined.iterrows():
+            has_cur = pd.notna(r.get("IP_cur"))
+            has_prev = pd.notna(r.get("IP_prev"))
+            ip_cur = float(r["IP_cur"]) if has_cur else None
+            ip_prev = float(r["IP_prev"]) if has_prev else None
+
+            xc = r.get("xERA_cur")
+            xp = r.get("xERA_prev")
+            wc = r.get("WHIP_cur")
+            wp = r.get("WHIP_prev")
+
+            if has_cur and has_prev:
+                xc_eff = _nz(xc, xp, 4.25)
+                xp_eff = _nz(xp, xc, 4.25)
+                wc_eff = _nz(wc, wp, 1.30)
+                wp_eff = _nz(wp, wc, 1.30)
+                ip26 = float(ip_cur) if ip_cur is not None else 0.0
+                w26 = min(max(ip26, 0.0), float(blend_ip_cap)) / float(blend_ip_cap)
+                x_bl = w26 * xc_eff + (1.0 - w26) * xp_eff
+                whip_bl = w26 * wc_eff + (1.0 - w26) * wp_eff
+                ip_final = ip_cur if ip_cur is not None else 0.0
+                low_ip = ip_final < float(min_ip)
+                name = (
+                    str(r["Name_cur"]).strip()
+                    if pd.notna(r.get("Name_cur")) and str(r.get("Name_cur")).strip()
+                    else str(r["Name_prev"]).strip()
+                )
+            elif has_cur:
+                x_bl = _nz(xc, xp, 4.25)
+                whip_bl = _nz(wc, wp, 1.30)
+                ip_final = ip_cur if ip_cur is not None else 0.0
+                low_ip = ip_final < float(min_ip)
+                name = str(r["Name_cur"]).strip()
+            else:
+                x_bl = _nz(xp, xc, 4.25)
+                whip_bl = _nz(wp, wc, 1.30)
+                ip_final = ip_prev if ip_prev is not None else 0.0
+                low_ip = ip_final < float(min_ip)
+                name = str(r["Name_prev"]).strip()
+
+            mid = r["mlb_id"]
+            try:
+                mid = int(mid)
+            except (TypeError, ValueError):
+                continue
+            out_rows.append(
+                {"mlb_id": mid, "Name": name, "xERA": x_bl, "WHIP": whip_bl, "IP": ip_final, "LowIP": low_ip}
+            )
+
+        return pd.DataFrame(out_rows)
 
     # ----------------------------
     # Public API
@@ -501,10 +626,15 @@ class DataManager:
         """
         Nightly updater using MLB StatsAPI (ERA/WHIP/IP) + Savant (xERA).
         Writes data/pitcher_stats.csv with columns: Name, xERA, WHIP, IP, LowIP
+
+        Early season: fetches both the current regular season and the prior full season, then blends xERA/WHIP
+        toward live stats using current-season IP (see EARLY_SEASON_BLEND_IP_CAP). Thin current-year pulls no
+        longer trigger SAFE MODE alone because breadth comes from prior-year carryover in the blend.
         """
         try:
             print("🔄 Updating pitcher stats from MLB + Savant...")
             current_year = datetime.now().year
+            prior_year = current_year - 1
             month = datetime.now().month
 
             if month < 6:
@@ -514,34 +644,53 @@ class DataManager:
             else:
                 min_ip = MIN_PITCHER_IP_LATE
 
-            mlb_df, mlb_prior_year_fallback = DataManager._mlb_pitching_stats_by_id(current_year)
+            # Current year: no inline prior-year substitution — we blend explicitly with prior_year below.
+            # apply_safe_mode=False so a small live universe does not abort before carryover merge.
+            mlb_cur, _ = DataManager._mlb_pitching_stats_by_id(
+                current_year, prior_year_fallback=False, apply_safe_mode=False
+            )
+            # Prior full season: keep API fallback to year-2 if the season has no splits yet; no row-count SAFE MODE.
+            mlb_prev, mlb_prior_year_fallback = DataManager._mlb_pitching_stats_by_id(
+                prior_year, prior_year_fallback=True, apply_safe_mode=False
+            )
+
+            if mlb_cur.empty and mlb_prev.empty:
+                raise ValueError(
+                    "Pitcher update: no MLB pitching rows for current or prior season; cannot build pitcher table."
+                )
 
             try:
-                savant_df = DataManager._savant_xera_by_id(current_year)
+                savant_cur = DataManager._savant_xera_by_id(current_year)
             except Exception as e:
-                print(f"⚠️ Savant xERA fetch failed, proceeding without xERA: {e}")
-                savant_df = pd.DataFrame(columns=["player_id", "xERA"])
-                savant_df["player_id"] = pd.Series(dtype=int)
-                savant_df["xERA"] = pd.Series(dtype=float)
+                print(f"⚠️ Savant xERA fetch failed (current year), proceeding without xERA: {e}")
+                savant_cur = pd.DataFrame(columns=["player_id", "xERA"])
+                savant_cur["player_id"] = pd.Series(dtype=int)
+                savant_cur["xERA"] = pd.Series(dtype=float)
 
-            merged = mlb_df.merge(savant_df, left_on="mlb_id", right_on="player_id", how="left")
-            # fallback: if missing xERA, use ERA; if ERA missing too, 4.25
-            merged["xERA"] = merged["xERA"].where(~merged["xERA"].isna(), merged["ERA"])
-            merged["xERA"] = merged["xERA"].fillna(4.25)
+            try:
+                savant_prev = DataManager._savant_xera_by_id(prior_year)
+            except Exception as e:
+                print(f"⚠️ Savant xERA fetch failed (prior year), proceeding without xERA: {e}")
+                savant_prev = pd.DataFrame(columns=["player_id", "xERA"])
+                savant_prev["player_id"] = pd.Series(dtype=int)
+                savant_prev["xERA"] = pd.Series(dtype=float)
 
-            merged["Name"] = merged["Name"].astype(str).str.strip()
-            merged["norm_name"] = merged["Name"].apply(DataManager.normalize_name)
+            cur_joined = DataManager._mlb_savant_join(mlb_cur, savant_cur)
+            prev_joined = DataManager._mlb_savant_join(mlb_prev, savant_prev)
+            blended = DataManager._blend_cur_prev_season_pitchers(cur_joined, prev_joined, min_ip)
+            if not mlb_cur.empty and not mlb_prev.empty:
+                print(
+                    f"[Pitcher update] Early-season blend: current_year rows={len(mlb_cur)} | "
+                    f"prior_year rows={len(mlb_prev)} | blended_rows={len(blended)} "
+                    f"(w_live = min(IP_cur, {EARLY_SEASON_BLEND_IP_CAP:g}) / {EARLY_SEASON_BLEND_IP_CAP:g})"
+                )
 
-            merged["IP"] = pd.to_numeric(merged["IP"], errors="coerce")
-            merged["WHIP"] = pd.to_numeric(merged["WHIP"], errors="coerce")
-            merged["xERA"] = pd.to_numeric(merged["xERA"], errors="coerce")
-            merged["LowIP"] = merged["IP"] < float(min_ip)
+            blended["Name"] = blended["Name"].astype(str).str.strip()
+            blended["norm_name"] = blended["Name"].apply(DataManager.normalize_name)
+            blended = blended.sort_values(["norm_name", "IP"], ascending=[True, False])
+            blended = blended.drop_duplicates(subset=["norm_name"], keep="first")
 
-            # de-dupe by normalized name; keep highest IP row
-            merged = merged.sort_values(["norm_name", "IP"], ascending=[True, False])
-            merged = merged.drop_duplicates(subset=["norm_name"], keep="first")
-
-            out = merged[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
+            out = blended[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
             out["Name"] = out["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
             out = out.drop_duplicates(subset="Name", keep="first")
             refresh_n = len(out)
