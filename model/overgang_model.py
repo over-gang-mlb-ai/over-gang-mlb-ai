@@ -860,16 +860,25 @@ class BullpenManager:
             return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
 
         row = hit.iloc[0].to_dict()
-        # ensure numeric
-        def _num(v, default=0.0):
-            try: return float(v)
-            except: return default
+        # ensure numeric; NaN/inf from CSV must not propagate (would break ERA blend + clamp in project_team_runs)
+        def _finite_float(v, default):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return default
+            if not np.isfinite(x):
+                return default
+            return x
+
+        era = _finite_float(row.get("ERA"), 4.25)
+        ipw = _finite_float(row.get("IP_Week"), 12.0)
+        rel = int(_finite_float(row.get("Relievers"), 7.0))
 
         return {
-            'ERA': _num(row.get('ERA'), 4.25),
-            'IP_Week': _num(row.get('IP_Week'), 12.0),
-            'Relievers': int(_num(row.get('Relievers'), 7)),
-            'source': 'MLB Stats API'
+            "ERA": era,
+            "IP_Week": ipw,
+            "Relievers": rel,
+            "source": "MLB Stats API",
         }
 
 # ================================
