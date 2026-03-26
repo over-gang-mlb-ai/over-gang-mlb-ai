@@ -2752,56 +2752,6 @@ def run_predictions():
             edge = proj["edge"]
             recommended_units = proj["recommended_units"]
 
-            # TEMP DEBUG (remove after investigation): one game only — live inputs at total finalize
-            _dbg_key = f"{away_team} @ {home_team}".lower().strip()
-            if _dbg_key == "pittsburgh pirates @ new york mets":
-
-                def _dbg_pitcher_row_name(stats, schedule_name: str) -> str:
-                    if stats is None:
-                        return schedule_name
-                    if isinstance(stats, pd.Series):
-                        return str(stats.name) if stats.name is not None else schedule_name
-                    if isinstance(stats, dict):
-                        return str(stats.get("Name", schedule_name))
-                    return schedule_name
-
-                _ou_pct = public.get("ou_bets_pct_over", "n/a") if isinstance(public, dict) else "n/a"
-                print(
-                    "\n"
-                    "========== TEMP DEBUG: Pittsburgh Pirates @ New York Mets ==========\n"
-                    f"game: {game_name}\n"
-                    f"schedule_away_pitcher: {away_pitcher}\n"
-                    f"schedule_home_pitcher: {home_pitcher}\n"
-                    f"resolved_stats_row_away: {_dbg_pitcher_row_name(away_stats, away_pitcher)}\n"
-                    f"resolved_stats_row_home: {_dbg_pitcher_row_name(home_stats, home_pitcher)}\n"
-                    f"pitcher_resolution_path_away: {away_path}\n"
-                    f"pitcher_resolution_path_home: {home_path}\n"
-                    f"away_xERA: {safe_get(away_stats, 'xERA', 'N/A')}\n"
-                    f"home_xERA: {safe_get(home_stats, 'xERA', 'N/A')}\n"
-                    f"away_WHIP: {safe_get(away_stats, 'WHIP', 'N/A')}\n"
-                    f"home_WHIP: {safe_get(home_stats, 'WHIP', 'N/A')}\n"
-                    f"away_LowIP: {bool(safe_get(away_stats, 'LowIP', False))}\n"
-                    f"home_LowIP: {bool(safe_get(home_stats, 'LowIP', False))}\n"
-                    f"bullpen_away_ERA: {safe_get(bullpen_away, 'ERA', 'N/A')} (source={safe_get(bullpen_away, 'source', '?')})\n"
-                    f"bullpen_home_ERA: {safe_get(bullpen_home, 'ERA', 'N/A')} (source={safe_get(bullpen_home, 'source', '?')})\n"
-                    f"bullpen_away_IP_Week: {safe_get(bullpen_away, 'IP_Week', 'N/A')}\n"
-                    f"bullpen_home_IP_Week: {safe_get(bullpen_home, 'IP_Week', 'N/A')}\n"
-                    f"venue: {venue}\n"
-                    f"park_factors (over_boost, under_boost): {park_factors}\n"
-                    f"away_offense_mult: {away_offense_mult}\n"
-                    f"home_offense_mult: {home_offense_mult}\n"
-                    f"away_lineup_impact: {away_impact}\n"
-                    f"home_lineup_impact: {home_impact}\n"
-                    f"velo_drop_away (starter name): {velo_drop_away}\n"
-                    f"velo_drop_home (starter name): {velo_drop_home}\n"
-                    "public betting: does NOT change Projected_Total; adjusts confidence only in generate_prediction. "
-                    f"ou_bets_pct_over={_ou_pct}\n"
-                    f"final_away_runs: {away_runs}\n"
-                    f"final_home_runs: {home_runs}\n"
-                    f"final_Projected_Total: {projected_total}\n"
-                    "====================================================================\n"
-                )
-
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
             confidence = max(0.0, min(1.0, confidence))
