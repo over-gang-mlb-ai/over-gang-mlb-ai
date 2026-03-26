@@ -207,7 +207,7 @@ MIN_CONFIDENCE_ALERT = 0.85
 MIN_ML_WIN_PROB_FOR_FIRE = 0.55
 # Customer Telegram only (CSV/export unchanged): min confidence to send a message.
 TELEGRAM_OU_MIN_CONFIDENCE_PCT = 90.0
-TELEGRAM_ML_MIN_CONFIDENCE_PCT = 60.0
+TELEGRAM_ML_MIN_CONFIDENCE_PCT = 70.0
 DATA_DIR = "data"
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
