@@ -8,6 +8,9 @@ What it does
 1) Pulls MLB teams (sportId=1) and iterates active rosters to collect hitters.
 2) For each hitter, fetches overall season batting stats (type=season, group=hitting).
 3) Attempts to fetch vs-pitcher-hand splits using MLB Stats API (type=vsPitching).
+   - Writes both legacy columns (vsR_OBP, vsR_OPS, …) and advanced columns expected by
+     core/batters.py lineup scoring: vsR_wOBA, vsL_wOBA, vsR_wRC+, vsL_wRC+, vsR_ISO, vsL_ISO
+     when the API stat dict includes woba / wrcPlus / iso (or derivable ISO from slg−avg).
    - If splits are missing/empty for a player, preserves last-good splits from the previous CSV.
 4) Writes a unified CSV: data/batter_stats.csv
 
@@ -137,6 +140,24 @@ def _safe_int(x) -> Optional[int]:
             return None
 
 
+def _hitting_split_advanced(stat: Optional[dict]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Extract wOBA, wRC+, ISO from an MLB hitting `stat` dict (platoon or season).
+    Tries common camelCase keys; ISO falls back to slg - avg when `iso` is absent.
+    """
+    if not stat:
+        return None, None, None
+    woba = _safe_float(stat.get("woba") or stat.get("wOBA"))
+    wrc = _safe_float(stat.get("wrcPlus") or stat.get("wRCPlus"))
+    iso = _safe_float(stat.get("iso") or stat.get("ISO"))
+    if iso is None:
+        slg = _safe_float(stat.get("slg"))
+        avg = _safe_float(stat.get("avg"))
+        if slg is not None and avg is not None:
+            iso = slg - avg
+    return woba, wrc, iso
+
+
 @dataclass
 class PlayerRow:
     player_id: int
@@ -164,6 +185,13 @@ class PlayerRow:
     vsL_OBP: Optional[float] = None
     vsL_SLG: Optional[float] = None
     vsL_OPS: Optional[float] = None
+    # Advanced platoon stats — CSV columns vsR_wRC+ / vsL_wRC+ (mapped from *_wrc_plus below)
+    vsR_wOBA: Optional[float] = None
+    vsL_wOBA: Optional[float] = None
+    vsR_wrc_plus: Optional[float] = None
+    vsL_wrc_plus: Optional[float] = None
+    vsR_ISO: Optional[float] = None
+    vsL_ISO: Optional[float] = None
 
 
 # -----------------------
@@ -297,15 +325,24 @@ def collect_hitters(season: int) -> pd.DataFrame:
                 row.vsR_OBP = _safe_float(vsR.get("obp"))
                 row.vsR_SLG = _safe_float(vsR.get("slg"))
                 row.vsR_OPS = _safe_float(vsR.get("ops"))
+                rw, rrw, riso = _hitting_split_advanced(vsR)
+                row.vsR_wOBA = rw
+                row.vsR_wrc_plus = rrw
+                row.vsR_ISO = riso
             if vsL:
                 row.vsL_PA = _safe_int(vsL.get("plateAppearances"))
                 row.vsL_OBP = _safe_float(vsL.get("obp"))
                 row.vsL_SLG = _safe_float(vsL.get("slg"))
                 row.vsL_OPS = _safe_float(vsL.get("ops"))
+                lw, lrw, liso = _hitting_split_advanced(vsL)
+                row.vsL_wOBA = lw
+                row.vsL_wrc_plus = lrw
+                row.vsL_ISO = liso
 
             rows.append(row)
 
     df = pd.DataFrame([r.__dict__ for r in rows])
+    df = df.rename(columns={"vsR_wrc_plus": "vsR_wRC+", "vsL_wrc_plus": "vsL_wRC+"})
     ok(f"Collected {len(df)} hitters from {len(teams)} teams (scanned {total_players} active roster slots).")
     return df
 
@@ -386,6 +423,12 @@ def main():
     split_cols = [
         "vsR_PA", "vsR_OBP", "vsR_SLG", "vsR_OPS",
         "vsL_PA", "vsL_OBP", "vsL_SLG", "vsL_OPS",
+        "vsR_wOBA",
+        "vsL_wOBA",
+        "vsR_wRC+",
+        "vsL_wRC+",
+        "vsR_ISO",
+        "vsL_ISO",
     ]
     # Ensure all expected split columns exist
     for c in split_cols:
@@ -422,7 +465,10 @@ def main():
     # Small summary
     n_with_vsR = int(df["vsR_OPS"].notna().sum())
     n_with_vsL = int(df["vsL_OPS"].notna().sum())
+    n_vsR_wrc = int(df["vsR_wRC+"].notna().sum()) if "vsR_wRC+" in df.columns else 0
+    n_vsR_woba = int(df["vsR_wOBA"].notna().sum()) if "vsR_wOBA" in df.columns else 0
     log(f"vsR_OPS available: {n_with_vsR} | vsL_OPS available: {n_with_vsL}")
+    log(f"vsR_wRC+ available: {n_vsR_wrc} | vsR_wOBA available: {n_vsR_woba} (lineup scoring columns)")
 
     return 0
 
