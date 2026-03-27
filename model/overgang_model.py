@@ -38,6 +38,7 @@ from pathlib import Path
 
 from scrapers.velocity_tracker import VelocityTracker
 from core.public_betting_dummy import DUMMY_PUBLIC_BETTING
+from core.public_betting_scraper import active_slate_date_mt
 from core.public_betting_loader import load_public_betting_data
 public_data = load_public_betting_data()
 from core.public_betting_loader import split_game_key
@@ -1720,22 +1721,8 @@ def run_predictions():
     velocity_tracker = VelocityTracker()
     lineups = LineupImpact()
     try:
-        # --- Mountain Time slate date: wall-clock MT today, or OVERGANG_TARGET_DATE=YYYY-MM-DD
-        today_mt = datetime.now(ZoneInfo("America/Denver")).date()
-        _og_target = os.environ.get("OVERGANG_TARGET_DATE", "").strip()
-        if _og_target:
-            try:
-                today_mt = datetime.strptime(_og_target, "%Y-%m-%d").date()
-                print(
-                    f"[OVERRIDE] OVERGANG_TARGET_DATE={_og_target} → "
-                    f"schedule/odds slate MT date: {today_mt}"
-                )
-            except ValueError:
-                today_mt = datetime.now(ZoneInfo("America/Denver")).date()
-                print(
-                    f"⚠️ OVERGANG_TARGET_DATE={_og_target!r} invalid (use YYYY-MM-DD); "
-                    f"using MT today: {today_mt}"
-                )
+        # --- Active slate date (America/Denver, 04:00 MT rollover); OVERGANG_TARGET_DATE overrides — see active_slate_date_mt()
+        today_mt, _ = active_slate_date_mt()
 
         # Pull MLB schedule for that calendar day (UTC-based API)
         games = schedule(

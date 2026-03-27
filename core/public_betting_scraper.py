@@ -7,7 +7,7 @@ filtering uses statsapi.schedule for the target date.
 """
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
@@ -18,6 +18,61 @@ from zoneinfo import ZoneInfo
 from core.public_betting_loader import normalize_team_name
 
 OUTPUT_FILE = "data/public_betting.csv"
+
+# Before this hour (Mountain Time), treat the active MLB slate as the previous calendar date
+# (late West Coast games / post-midnight local time).
+SLATE_ROLLOVER_HOUR_MT = 4
+
+
+def active_slate_date_mt():
+    """
+    Active slate calendar date in America/Denver.
+
+    - OVERGANG_TARGET_DATE=YYYY-MM-DD wins when valid (highest priority).
+    - Otherwise: wall-clock before 04:00 MT → previous calendar day; at/after 04:00 MT → current day.
+
+    Returns (slate_date, meta) where meta includes logging fields. Emits one [SLATE] log line per call.
+    """
+    zone = ZoneInfo("America/Denver")
+    now_mt = datetime.now(zone)
+    _og = os.environ.get("OVERGANG_TARGET_DATE", "").strip()
+    if _og:
+        try:
+            slate = datetime.strptime(_og, "%Y-%m-%d").date()
+            print(
+                f"[SLATE] wall_clock_mt={now_mt.strftime('%Y-%m-%d %H:%M:%S')} America/Denver | "
+                f"active_slate_date={slate} | late_night_cutoff_applied=False | source=OVERGANG_TARGET_DATE"
+            )
+            return slate, {
+                "now_mt": now_mt,
+                "late_night_cutoff_applied": False,
+                "override": True,
+            }
+        except ValueError:
+            print(
+                f"⚠️ OVERGANG_TARGET_DATE={_og!r} invalid (use YYYY-MM-DD); "
+                "using 04:00 MT slate rollover logic"
+            )
+
+    cal = now_mt.date()
+    if now_mt.hour < SLATE_ROLLOVER_HOUR_MT:
+        slate = cal - timedelta(days=1)
+        late = True
+        src = "late_night_rollover"
+    else:
+        slate = cal
+        late = False
+        src = "calendar_mt"
+    print(
+        f"[SLATE] wall_clock_mt={now_mt.strftime('%Y-%m-%d %H:%M:%S')} America/Denver | "
+        f"active_slate_date={slate} | late_night_cutoff_applied={late} | source={src}"
+    )
+    return slate, {
+        "now_mt": now_mt,
+        "late_night_cutoff_applied": late,
+        "override": False,
+    }
+
 
 _CSV_COLUMNS = [
     "Game",
@@ -61,14 +116,14 @@ def scrape_public_betting(target_date: date | None = None) -> bool:
     Scrape Covers matchups, keep only games on MLB schedule for target_date, write CSV.
 
     target_date: calendar date for the slate (use MT today or OVERGANG_TARGET_DATE from caller).
-    If None, uses America/Denver today.
+    If None, uses active_slate_date_mt() (04:00 MT rollover + OVERGANG_TARGET_DATE).
 
     Returns True if the CSV was written successfully (including empty slate).
     Returns False if scrape failed or rows could not be aligned; existing file is left unchanged.
     """
     try:
         if target_date is None:
-            target_date = datetime.now(ZoneInfo("America/Denver")).date()
+            target_date, _ = active_slate_date_mt()
         elif isinstance(target_date, str):
             target_date = datetime.strptime(target_date.strip(), "%Y-%m-%d").date()
 
