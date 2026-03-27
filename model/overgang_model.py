@@ -52,6 +52,7 @@ from core.weather_adjustment import (
     WEATHER_RUNS_MULT_MIN,
     compute_weather_runs_mult,
 )
+from core.starter_fatigue import xera_delta_for_pitcher_days_rest
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
 
@@ -1140,12 +1141,18 @@ def generate_prediction(
     has_real_total=True,
     data_quality_degraded=False,
     weather_runs_mult=1.0,
+    away_pitcher_name="",
+    home_pitcher_name="",
+    game_datetime=None,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
 
     weather_runs_mult: bounded daily environment overlay (temp/wind) on top of static park factor;
       combined as effective_park_runs_factor = park_runs_factor * weather_runs_mult.
+
+    away_pitcher_name / home_pitcher_name / game_datetime: optional inputs for days-rest v1
+      starter xERA bump (see core.starter_fatigue); defaults leave behavior unchanged.
 
     Returns dict with: projected_total, away_runs, home_runs, edge, pick, prediction (str),
     confidence, total_open, total_current, recommended_units, skip (bool).
@@ -1171,8 +1178,12 @@ def generate_prediction(
             "total_current": vegas_line,
         }
 
-    away_xera = safe_get(away_stats, "xERA", 4.50)
-    home_xera = safe_get(home_stats, "xERA", 4.50)
+    away_xera = safe_get(away_stats, "xERA", 4.50) + xera_delta_for_pitcher_days_rest(
+        away_pitcher_name, game_datetime
+    )
+    home_xera = safe_get(home_stats, "xERA", 4.50) + xera_delta_for_pitcher_days_rest(
+        home_pitcher_name, game_datetime
+    )
     away_whip = safe_get(away_stats, "WHIP", 1.30)
     home_whip = safe_get(home_stats, "WHIP", 1.30)
     bullpen_home_era = safe_get(bullpen_home, "ERA", 4.25)
@@ -2874,6 +2885,9 @@ def run_predictions():
                 has_real_total=bool(odds_info.get("_has_real_total", False)),
                 data_quality_degraded=data_quality_degraded,
                 weather_runs_mult=weather_runs_mult,
+                away_pitcher_name=away_pitcher,
+                home_pitcher_name=home_pitcher,
+                game_datetime=safe_get(game, "game_datetime", ""),
             )
 
             if proj.get("skip"):
