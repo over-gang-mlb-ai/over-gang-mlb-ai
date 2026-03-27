@@ -1412,6 +1412,63 @@ def _ml_confidence_percent_for_telegram_gate(game_data: dict) -> float:
         return float("-inf")
 
 
+def _parse_ou_confidence_percent_optional(game_data: dict):
+    """O/U confidence on 0–100 scale, or None if missing/unparsable (for bucket labels only)."""
+    try:
+        raw_conf = game_data.get("Confidence_Value")
+        if raw_conf is None:
+            s = str(game_data.get("Confidence", "")).replace("%", "").strip()
+            if not s:
+                return None
+            v = float(s)
+        else:
+            v = float(raw_conf)
+            if 0 <= v <= 1.0:
+                v = v * 100.0
+        if v != v:  # NaN
+            return None
+        if not (0.0 <= v <= 100.0):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def _parse_ml_confidence_percent_optional(game_data: dict):
+    """ML win-prob percent from ML_Confidence string, or None if missing/unparsable."""
+    try:
+        s = str(game_data.get("ML_Confidence", "")).replace("%", "").strip()
+        if not s:
+            return None
+        v = float(s)
+        if v != v:
+            return None
+        if not (0.0 <= v <= 100.0):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def _confidence_bucket_5pt(pct) -> str:
+    """
+    Non-overlapping 5-point labels: 0-4, 5-9, …, 95-100.
+    Empty string if pct is None or not usable.
+    """
+    if pct is None:
+        return ""
+    try:
+        x = float(pct)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:  # NaN
+        return ""
+    x = max(0.0, min(100.0, x))
+    lo = min(95, (int(x) // 5) * 5)
+    hi = 100 if lo == 95 else lo + 4
+    return f"{lo}-{hi}"
+
+
 def _fmt_num_one(v) -> str:
     if isinstance(v, (int, float)):
         return f"{v:.1f}"
@@ -2972,6 +3029,13 @@ def run_predictions():
                 dq_parts.append("low_ip")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
+            game_data["OU_Confidence_Bucket"] = _confidence_bucket_5pt(
+                _parse_ou_confidence_percent_optional(game_data)
+            )
+            game_data["ML_Confidence_Bucket"] = _confidence_bucket_5pt(
+                _parse_ml_confidence_percent_optional(game_data)
+            )
+
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
             if ou_fired:
@@ -2997,6 +3061,7 @@ def run_predictions():
         "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
         "OU_Result", "ML_Result",
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag",
+        "OU_Confidence_Bucket", "ML_Confidence_Bucket",
     ]
     eligible_export = [
         r for r in results
