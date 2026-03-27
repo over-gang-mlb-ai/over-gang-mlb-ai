@@ -47,6 +47,11 @@ from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, get_game_odds
 from core.batters import Batters, LineupImpact, BATTER_DF
+from core.weather_adjustment import (
+    WEATHER_RUNS_MULT_MAX,
+    WEATHER_RUNS_MULT_MIN,
+    compute_weather_runs_mult,
+)
 from model.data_manager import DataManager
 manual_fallback_df = DataManager.load_manual_fallback_pitchers()
 
@@ -1134,9 +1139,13 @@ def generate_prediction(
     home_offense_mult=1.0,
     has_real_total=True,
     data_quality_degraded=False,
+    weather_runs_mult=1.0,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
+
+    weather_runs_mult: bounded daily environment overlay (temp/wind) on top of static park factor;
+      combined as effective_park_runs_factor = park_runs_factor * weather_runs_mult.
 
     Returns dict with: projected_total, away_runs, home_runs, edge, pick, prediction (str),
     confidence, total_open, total_current, recommended_units, skip (bool).
@@ -1179,6 +1188,14 @@ def generate_prediction(
     except (TypeError, ValueError):
         bullpen_away_rel = 7
     over_boost, _ = park_factors
+    try:
+        _wm = float(weather_runs_mult)
+    except (TypeError, ValueError):
+        _wm = 1.0
+    if not np.isfinite(_wm) or _wm <= 0:
+        _wm = 1.0
+    _wm = max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, _wm))
+    effective_park_runs_factor = over_boost * _wm
 
     # ---------- Project runs for each team ----------
     # Away offense faces home pitcher + home bullpen; away_offense_mult from Batters.offense_vs_hand_dict(away_team vs home_hand)
@@ -1188,7 +1205,7 @@ def generate_prediction(
         opponent_bullpen_era=bullpen_home_era,
         opponent_bullpen_ip_week=bullpen_home_ip_week,
         opponent_bullpen_relievers=bullpen_home_rel,
-        park_runs_factor=over_boost,
+        park_runs_factor=effective_park_runs_factor,
         lineup_impact=away_lineup_impact,
         opponent_velo_drop=velo_drop_home,
         opponent_low_ip=safe_get(home_stats, "LowIP", False),
@@ -1201,7 +1218,7 @@ def generate_prediction(
         opponent_bullpen_era=bullpen_away_era,
         opponent_bullpen_ip_week=bullpen_away_ip_week,
         opponent_bullpen_relievers=bullpen_away_rel,
-        park_runs_factor=over_boost,
+        park_runs_factor=effective_park_runs_factor,
         lineup_impact=home_lineup_impact,
         opponent_velo_drop=velo_drop_away,
         opponent_low_ip=safe_get(away_stats, "LowIP", False),
@@ -2621,6 +2638,9 @@ def run_predictions():
 
             venue = game.get("venue_name", "Unknown")
             park_factors = PARK_FACTORS.get(venue, PARK_FACTORS['Unknown'])
+            weather_runs_mult = compute_weather_runs_mult(venue, safe_get(game, "game_datetime"))
+            if abs(weather_runs_mult - 1.0) > 0.0005:
+                print(f"🌤️ Weather overlay: runs_mult={weather_runs_mult:.4f} ({venue})")
 
             print(f"\n🔍 Processing: {away_team} @ {home_team}")
             print(f"🧪 Matching: Away = {away_pitcher} | Home = {home_pitcher}")
@@ -2853,6 +2873,7 @@ def run_predictions():
                 home_offense_mult=home_offense_mult,
                 has_real_total=bool(odds_info.get("_has_real_total", False)),
                 data_quality_degraded=data_quality_degraded,
+                weather_runs_mult=weather_runs_mult,
             )
 
             if proj.get("skip"):
