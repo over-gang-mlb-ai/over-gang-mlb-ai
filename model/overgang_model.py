@@ -4,7 +4,7 @@ OVER GANG MLB PREDICTOR v4.0 — True projection model
 Projects expected runs per team (away + home), sums to a game total, then compares
 to the Vegas total for edge, confidence, and recommended bet.
 
-Inputs: starter xERA/WHIP, bullpen ERA/fatigue (IP_Week), park factors, velocity
+Inputs: starter xERA/WHIP, bullpen ERA, bullpen workload (IP_Week vs reliever-expected IP), park factors, velocity
 drops, lineup impact, public betting %. Output: projected_total, away_runs, home_runs,
 edge vs Vegas, pick (OVER/UNDER), confidence, recommended_units.
 """
@@ -699,8 +699,13 @@ BULLPEN_IP_SHARE = 0.40
 WHIP_LEAGUE = 1.30            # baseline WHIP for modifier
 EDGE_THRESHOLD = 0.25        # min |edge| to recommend OVER/UNDER (runs); tune up (e.g. 0.35) if too aggressive
 EDGE_FOR_FULL_UNIT = 0.5     # edge >= this gets 1.0 unit; scale below; tune up (e.g. 0.6) for conservative sizing
-BULLPEN_FATIGUE_IP_CUTOFF = 12.0   # IP_Week above this = tired bullpen
-BULLPEN_FATIGUE_RUNS_BOOST = 0.03  # +3% runs per 10 IP over cutoff (capped)
+# Unified bullpen workload fatigue (single run multiplier — do not stack with a second IP rule):
+# expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
+# fatigue_ratio = IP_Week / expected_weekly_ip — no penalty at or below neutral; modest +runs when elevated.
+BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK = 3.5
+BULLPEN_FATIGUE_RATIO_NEUTRAL = 1.0
+BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO = 0.22
+BULLPEN_FATIGUE_RUNS_MULT_MAX = 1.08
 VELO_DROP_RUNS_PER_MPH = 0.02      # +2% runs per mph velocity drop below 0
 LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller than offense_mult
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
@@ -729,6 +734,7 @@ def project_team_runs(
     opponent_starter_whip: float,
     opponent_bullpen_era: float,
     opponent_bullpen_ip_week: float,
+    opponent_bullpen_relievers: int,
     park_runs_factor: float,
     lineup_impact: float,
     opponent_velo_drop: float,
@@ -741,6 +747,7 @@ def project_team_runs(
     offense_mult: team offense strength vs opposing pitcher hand (Batters.offense_vs_hand_dict "mult");
       clamped to OFFENSE_MULT_MIN..OFFENSE_MULT_MAX. 1.0 when batter data unavailable.
     lineup_impact: smaller adjustment from LineupImpact.score_lineup (capped by LINEUP_IMPACT_CAP).
+    opponent_bullpen_relievers: active reliever count for expected weekly IP baseline (workload fatigue ratio).
     """
     if opponent_low_ip:
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
@@ -767,10 +774,25 @@ def project_team_runs(
         velo_mult = 1.0 - (VELO_DROP_RUNS_PER_MPH * opponent_velo_drop)
         runs *= min(1.10, velo_mult)
 
-    if opponent_bullpen_ip_week > BULLPEN_FATIGUE_IP_CUTOFF:
-        excess_ip = min(20.0, opponent_bullpen_ip_week - BULLPEN_FATIGUE_IP_CUTOFF)
-        fatigue_mult = 1.0 + BULLPEN_FATIGUE_RUNS_BOOST * (excess_ip / 10.0)
-        runs *= min(1.08, fatigue_mult)
+    # One bullpen workload term: IP_Week vs expected IP implied by reliever headcount (no separate IP cutoff rule).
+    try:
+        n_rel = max(1, int(round(float(opponent_bullpen_relievers))))
+    except (TypeError, ValueError):
+        n_rel = 7
+    expected_weekly_ip = n_rel * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
+    if expected_weekly_ip > 0:
+        try:
+            ip_w = float(opponent_bullpen_ip_week)
+        except (TypeError, ValueError):
+            ip_w = 0.0
+        if ip_w > 0:
+            fatigue_ratio = ip_w / expected_weekly_ip
+            excess = max(0.0, fatigue_ratio - BULLPEN_FATIGUE_RATIO_NEUTRAL)
+            fatigue_mult = 1.0 + min(
+                BULLPEN_FATIGUE_RUNS_MULT_MAX - 1.0,
+                BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO * excess,
+            )
+            runs *= fatigue_mult
 
     runs = min(runs, 6.5)
     return round(runs, 2)
@@ -1147,6 +1169,14 @@ def generate_prediction(
     bullpen_away_era = safe_get(bullpen_away, "ERA", 4.25)
     bullpen_home_ip_week = safe_get(bullpen_home, "IP_Week", 12.0)
     bullpen_away_ip_week = safe_get(bullpen_away, "IP_Week", 12.0)
+    try:
+        bullpen_home_rel = max(1, int(round(float(safe_get(bullpen_home, "Relievers", 7)))))
+    except (TypeError, ValueError):
+        bullpen_home_rel = 7
+    try:
+        bullpen_away_rel = max(1, int(round(float(safe_get(bullpen_away, "Relievers", 7)))))
+    except (TypeError, ValueError):
+        bullpen_away_rel = 7
     over_boost, _ = park_factors
 
     # ---------- Project runs for each team ----------
@@ -1156,6 +1186,7 @@ def generate_prediction(
         opponent_starter_whip=home_whip,
         opponent_bullpen_era=bullpen_home_era,
         opponent_bullpen_ip_week=bullpen_home_ip_week,
+        opponent_bullpen_relievers=bullpen_home_rel,
         park_runs_factor=over_boost,
         lineup_impact=away_lineup_impact,
         opponent_velo_drop=velo_drop_home,
@@ -1168,6 +1199,7 @@ def generate_prediction(
         opponent_starter_whip=away_whip,
         opponent_bullpen_era=bullpen_away_era,
         opponent_bullpen_ip_week=bullpen_away_ip_week,
+        opponent_bullpen_relievers=bullpen_away_rel,
         park_runs_factor=over_boost,
         lineup_impact=home_lineup_impact,
         opponent_velo_drop=velo_drop_away,
