@@ -13,6 +13,7 @@ returns 0.0 adjustment.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -153,4 +154,8 @@ def xera_delta_for_pitcher_days_rest(
         return 0.0
 
     rest = _days_rest(game_date, last_start)
-    return _rest_days_to_xera_delta(rest)
+    delta = _rest_days_to_xera_delta(rest)
+    # Temporary validation: set STARTER_FATIGUE_DEBUG=1 to log nonzero rest bumps only.
+    if delta > 0 and os.environ.get("STARTER_FATIGUE_DEBUG", "").strip() == "1":
+        print(f"[STARTER REST] {pitcher_name!r} rest={rest}d xERA+{delta:.3f}")
+    return delta
