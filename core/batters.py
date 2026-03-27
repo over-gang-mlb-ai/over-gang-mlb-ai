@@ -38,6 +38,66 @@ def _safe_float(x, default=np.nan):
         return default
 
 
+# Anchors for normalizing platoon stats (fallback when MLB omits wOBA/wRC+ on statSplits)
+_LEAGUE_WOBA = 0.310
+_LEAGUE_WRC_SCALE = 100.0
+_LEAGUE_OPS = 0.715
+_LEAGUE_OBP = 0.320
+_LEAGUE_SLG = 0.410
+# Halve deviation from 1.0 so OPS/OBP/SLG fallback does not move lineup impact as aggressively as wRC+/wOBA
+_FALLBACK_DAMP = 0.5
+
+
+def _platoon_split_relative(
+    df: pd.DataFrame,
+    pitcher_hand: Optional[str],
+) -> Optional[Tuple[float, str]]:
+    """
+    Relative team/lineup strength ~1.0 from same-hand platoon columns, or None.
+
+    Priority (do not skip earlier tiers when data exists):
+      1) Advanced splits: vsR/L_wRC+ and vsR/L_wOBA (primary; unchanged from pre-fallback behavior)
+      2) Bounded fallback: vsR/L_OPS if present; else mean of available vsR/L_OBP and vsR/L_SLG terms
+      3) None only when no usable split signal exists for this pitcher hand
+    """
+    if df is None or df.empty:
+        return None
+
+    # Match existing convention: vs LHP -> vsL_*, else vsR_* (including unknown hand)
+    prefix = "vsL" if pitcher_hand == "L" else "vsR"
+
+    col_wrc = f"{prefix}_wRC+" if f"{prefix}_wRC+" in df.columns else None
+    col_woba = f"{prefix}_wOBA" if f"{prefix}_wOBA" in df.columns else None
+    col_ops = f"{prefix}_OPS" if f"{prefix}_OPS" in df.columns else None
+    col_obp = f"{prefix}_OBP" if f"{prefix}_OBP" in df.columns else None
+    col_slg = f"{prefix}_SLG" if f"{prefix}_SLG" in df.columns else None
+
+    adv: List[float] = []
+    if col_wrc and df[col_wrc].notna().any():
+        adv.append(float(np.nanmean(df[col_wrc].values)) / _LEAGUE_WRC_SCALE)
+    if col_woba and df[col_woba].notna().any():
+        adv.append(float(np.nanmean(df[col_woba].values)) / _LEAGUE_WOBA)
+
+    if adv:
+        return float(np.nanmean(adv)), "advanced"
+
+    # Basic split fallback (statSplits supplies OPS/OBP/SLG but often not wOBA/wRC+)
+    if col_ops and df[col_ops].notna().any():
+        rel = float(np.nanmean(df[col_ops].values)) / _LEAGUE_OPS
+    else:
+        parts: List[float] = []
+        if col_obp and df[col_obp].notna().any():
+            parts.append(float(np.nanmean(df[col_obp].values)) / _LEAGUE_OBP)
+        if col_slg and df[col_slg].notna().any():
+            parts.append(float(np.nanmean(df[col_slg].values)) / _LEAGUE_SLG)
+        if not parts:
+            return None
+        rel = float(np.nanmean(parts))
+
+    rel = 1.0 + (rel - 1.0) * _FALLBACK_DAMP
+    return rel, "fallback"
+
+
 class Batters:
     """
     Static helpers for batter table + pitcher hand lookup + team split multipliers.
@@ -88,7 +148,8 @@ class Batters:
         # Coerce numeric fields if present
         for col in [
             "PA", "vsR_wOBA", "vsL_wOBA", "vsR_wRC+", "vsL_wRC+",
-            "vsR_ISO", "vsL_ISO", "wOBA", "wRC+"
+            "vsR_ISO", "vsL_ISO", "wOBA", "wRC+",
+            "vsR_OPS", "vsL_OPS", "vsR_OBP", "vsL_OBP", "vsR_SLG", "vsL_SLG",
         ]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -302,26 +363,17 @@ class LineupImpact:
         if li_df.empty:
             return {"lineup_impact": 0.0, "scope": scope}
 
-        # choose columns based on pitcher hand
-        if pitcher_hand == "L":
-            col_wrc = "vsL_wRC+" if "vsL_wRC+" in li_df.columns else None
-            col_woba = "vsL_wOBA" if "vsL_wOBA" in li_df.columns else None
-        else:
-            col_wrc = "vsR_wRC+" if "vsR_wRC+" in li_df.columns else None
-            col_woba = "vsR_wOBA" if "vsR_wOBA" in li_df.columns else None
-
-        metrics = []
-        if col_wrc and li_df[col_wrc].notna().any():
-            metrics.append(np.nanmean(li_df[col_wrc].values) / 100.0)  # 100 -> 1.0
-        if col_woba and li_df[col_woba].notna().any():
-            metrics.append(np.nanmean(li_df[col_woba].values) / 0.310)  # ~league wOBA
-
-        if not metrics:
+        # See _platoon_split_relative: advanced wRC+/wOBA first; OPS/OBP/SLG fallback; else neutral
+        rel_t = _platoon_split_relative(li_df, pitcher_hand)
+        if rel_t is None:
             return {"lineup_impact": 0.0, "scope": "none"}
 
-        rel = float(np.nanmean(metrics))  # around 1.0 = league average
+        rel, mode = rel_t
         impact = rel - 1.0
-        impact = max(-0.30, min(0.30, impact))
+        if mode == "fallback":
+            impact = max(-0.20, min(0.20, impact))
+        else:
+            impact = max(-0.30, min(0.30, impact))
         return {"lineup_impact": impact, "scope": scope}
 
     def score_lineup(
