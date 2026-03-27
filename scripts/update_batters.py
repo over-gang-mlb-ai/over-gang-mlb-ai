@@ -7,7 +7,7 @@ What it does
 ------------
 1) Pulls MLB teams (sportId=1) and iterates active rosters to collect hitters.
 2) For each hitter, fetches overall season batting stats (type=season, group=hitting).
-3) Attempts to fetch vs-pitcher-hand splits using MLB Stats API (type=vsPitching).
+3) Attempts to fetch vs-pitcher-hand splits using MLB Stats API (stats=statSplits + sitCodes vr/vl).
    - Writes both legacy columns (vsR_OBP, vsR_OPS, …) and advanced columns expected by
      core/batters.py lineup scoring: vsR_wOBA, vsL_wOBA, vsR_wRC+, vsL_wRC+, vsR_ISO, vsL_ISO
      when the API stat dict includes woba / wrcPlus / iso (or derivable ISO from slg−avg).
@@ -230,40 +230,53 @@ def fetch_person_stats_overall(player_id: int, season: int) -> Optional[dict]:
 
 def fetch_person_splits_vs_pitching(player_id: int, season: int) -> Tuple[Optional[dict], Optional[dict]]:
     """
-    Try to fetch vs-pitcher-hand splits via MLB hydrate: type=vsPitching.
-    Return: (vsR dict, vsL dict) with keys like PA, OBP, SLG, OPS.
-    If unavailable, return (None, None).
+    Platoon splits: GET /people/{id}/stats with stats=statSplits (not vsPitching hydrate; that stat type
+    is invalid for hitting and returns empty stats). Situation codes vr = PA vs RHP, vl = PA vs LHP
+    (MLB situation metadata). Returns (vsR dict, vsL dict) with keys like plateAppearances, obp, slg, ops.
     """
+    # statSplits + sitCodes vr,vl — valid hitting platoon splits (vs RHP / vs LHP as batter).
     params = {
-        "hydrate": f"stats(group=hitting,type=vsPitching,season={season},gameType=R)"
+        "stats": "statSplits",
+        "group": "hitting",
+        "season": season,
+        "gameType": "R",
+        "sportIds": 1,
+        "sitCodes": "vr,vl",
     }
-    data = get_json(f"{MLB_BASE}/api/v1/people/{player_id}", params=params, label=f"vsPitching pid={player_id}")
-    if not data or "people" not in data or not data["people"]:
+    data = get_json(
+        f"{MLB_BASE}/api/v1/people/{player_id}/stats",
+        params=params,
+        label=f"statSplits platoon pid={player_id}",
+    )
+    if not data:
         return None, None
 
-    person = data["people"][0]
-    stats = person.get("stats") or []
+    stats = data.get("stats") or []
     vsR = None
     vsL = None
     for block in stats:
         if block.get("group", {}).get("displayName") != "hitting":
             continue
-        if block.get("type", {}).get("displayName") != "vsPitching":
+        if block.get("type", {}).get("displayName") != "statSplits":
             continue
         for sp in block.get("splits") or []:
             stat = sp.get("stat") or {}
-            hand = sp.get("pitcherThrows") or sp.get("opponentHand", {}).get("code")
-            if not hand:
-                hand = (sp.get("split") or "").strip().upper()
-                if "RHP" in hand or hand == "R":
-                    hand = "R"
-                elif "LHP" in hand or hand == "L":
-                    hand = "L"
-                else:
-                    hand = None
-            if hand == "R":
+            split_meta = sp.get("split")
+            code = None
+            if isinstance(split_meta, dict):
+                code = (split_meta.get("code") or "").strip().lower()
+            elif isinstance(split_meta, str):
+                s = split_meta.strip().upper()
+                if s == "R" or "RHP" in s:
+                    code = "vr"
+                elif s == "L" or "LHP" in s:
+                    code = "vl"
+            hand = sp.get("pitcherThrows") or (sp.get("opponentHand") or {}).get("code")
+            if not code and hand:
+                code = "vr" if str(hand).upper().startswith("R") else "vl" if str(hand).upper().startswith("L") else None
+            if code == "vr":
                 vsR = stat
-            elif hand == "L":
+            elif code == "vl":
                 vsL = stat
 
     return vsR, vsL
