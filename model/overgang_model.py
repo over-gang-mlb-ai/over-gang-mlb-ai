@@ -1705,6 +1705,37 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
 # ================================
 # 🔍 CORE LOGIC
 # ================================
+_NON_PLAYABLE_STATUSES_FOR_PREDICTION = frozenset({
+    "postponed",
+    "cancelled",
+    "canceled",
+    "ppd",
+    # Not a normal pre-game pick: play has stopped and may resume later; exclude from slate.
+    "suspended",
+})
+
+
+def _game_is_playable_for_prediction(g) -> bool:
+    """
+    Use g['status'] (MLB detailedState string from statsapi.schedule).
+
+    Conservative denylist only (Postponed, Cancelled, PPD, Suspended). Do not exclude
+    Scheduled, Pre-Game, Warmup, In Progress, Final, Delayed, etc.
+
+    Empty/missing status: treat as playable so we do not drop games on unexpected shapes.
+    """
+    st = g.get("status")
+    if st is None or not str(st).strip():
+        return True
+    s = str(st).strip().lower()
+    if s in _NON_PLAYABLE_STATUSES_FOR_PREDICTION:
+        return False
+    # MLB sometimes appends a reason, e.g. "Postponed: Rain"
+    if s.startswith("postponed") or s.startswith("cancelled") or s.startswith("canceled"):
+        return False
+    return True
+
+
 def run_predictions():
     print(f"🔮 OVER GANG PREDICTOR v4.0 (projection model) | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*50 + "\n")
@@ -1829,6 +1860,14 @@ def run_predictions():
             return dt_utc.astimezone(ZoneInfo("America/Denver")).date()
 
         games = [g for g in games if game_mt_date(g) == today_mt]
+        _after_mt = len(games)
+        games = [g for g in games if _game_is_playable_for_prediction(g)]
+        _skipped_non_playable = _after_mt - len(games)
+        if _skipped_non_playable > 0:
+            print(
+                f"[SLATE] Skipped {_skipped_non_playable} game(s) with non-playable status "
+                f"(denylist: postponed/cancelled/PPD/suspended)"
+            )
 
         print(f"✅ Found {len(games)} games for {today_mt} MT")
         for g in games:
