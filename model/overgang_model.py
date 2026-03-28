@@ -228,8 +228,6 @@ MIN_PITCHER_IP_LATE = 15
 # Thresholds
 NAME_MATCH_THRESHOLD = 85
 FATIGUE_THRESHOLD = 4.25
-VELOCITY_DROP_THRESHOLD = -1.5
-
 # Session-only: schedule probable (lower) → pitcher_stats index key for targeted MLB id + no reg-season-stat cases.
 RUNTIME_TARGETED_LOCAL_RECOVERY_ALIASES = {}
 
@@ -713,7 +711,12 @@ BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK = 3.5
 BULLPEN_FATIGUE_RATIO_NEUTRAL = 1.0
 BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO = 0.22
 BULLPEN_FATIGUE_RUNS_MULT_MAX = 1.08
-VELO_DROP_RUNS_PER_MPH = 0.02      # +2% runs per mph velocity drop below 0
+# Velocity (Season_Velo - Recent_Velo from VelocityTracker): positive = lost velo vs season baseline.
+# Ignore small scatter; scale conservatively and cap so we do not stack aggressively with starter_fatigue xERA or LowIP.
+VELO_DROP_NOISE_MPH = 0.50
+VELO_DROP_RUNS_PER_MPH = 0.012
+VELO_DROP_RUNS_MULT_MAX = 1.05
+VELO_DROP_CONF_LOSS_MPH = 1.05  # meaningful loss: slight confidence trim only (separate from xERA bumps)
 LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller than offense_mult
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
 OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
@@ -734,6 +737,33 @@ PARK_FACTORS = {
     "T-Mobile Park": (0.88, 1.14),
     "Unknown": (1.0, 1.0)
 }
+
+
+def _opponent_velocity_run_multiplier(opponent_velo_drop: float) -> float:
+    """
+    opponent_velo_drop = Season - Recent (mph). Positive => recent fastball slower than season (fatigue signal).
+    Below noise => 1.0. Otherwise bounded increase in expected runs vs that starter (capped).
+    """
+    try:
+        d = float(opponent_velo_drop)
+    except (TypeError, ValueError):
+        return 1.0
+    if d <= VELO_DROP_NOISE_MPH:
+        return 1.0
+    excess = d - VELO_DROP_NOISE_MPH
+    bump = min(VELO_DROP_RUNS_MULT_MAX - 1.0, VELO_DROP_RUNS_PER_MPH * excess)
+    return min(VELO_DROP_RUNS_MULT_MAX, 1.0 + bump)
+
+
+def _confidence_trim_for_velocity_loss(velo_drop: float) -> float:
+    """Tiny multiplicative trim when this starter has clear velocity loss (kept mild vs rest/LowIP)."""
+    try:
+        d = float(velo_drop)
+    except (TypeError, ValueError):
+        return 1.0
+    if d < VELO_DROP_CONF_LOSS_MPH:
+        return 1.0
+    return 0.99
 
 
 def project_team_runs(
@@ -777,9 +807,7 @@ def project_team_runs(
     whip_mult = max(0.90, min(1.15, whip_mult))
     runs *= whip_mult
 
-    if opponent_velo_drop < 0:
-        velo_mult = 1.0 - (VELO_DROP_RUNS_PER_MPH * opponent_velo_drop)
-        runs *= min(1.10, velo_mult)
+    runs *= _opponent_velocity_run_multiplier(opponent_velo_drop)
 
     # One bullpen workload term: IP_Week vs expected IP implied by reliever headcount (no separate IP cutoff rule).
     try:
@@ -1267,11 +1295,9 @@ def generate_prediction(
 
     # (Bullpen/park already in projection; avoid re-using for confidence to prevent bias)
 
-    # Velocity drop (tired starter): slight confidence reduction (data noisier)
-    if velo_drop_away < VELOCITY_DROP_THRESHOLD:
-        confidence *= 0.98
-    if velo_drop_home < VELOCITY_DROP_THRESHOLD:
-        confidence *= 0.99
+    # Meaningful velocity loss on either starter: modest confidence trim (separate from days-rest xERA / LowIP).
+    confidence *= _confidence_trim_for_velocity_loss(velo_drop_away)
+    confidence *= _confidence_trim_for_velocity_loss(velo_drop_home)
 
     relievers = (safe_get(bullpen_away, "Relievers", 7) + safe_get(bullpen_home, "Relievers", 7)) / 14.0
     reliever_factor = min(1.0, relievers)
