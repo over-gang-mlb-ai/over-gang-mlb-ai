@@ -1144,6 +1144,7 @@ def generate_prediction(
     away_pitcher_name="",
     home_pitcher_name="",
     game_datetime=None,
+    schedule_game_date=None,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -1151,8 +1152,9 @@ def generate_prediction(
     weather_runs_mult: bounded daily environment overlay (temp/wind) on top of static park factor;
       combined as effective_park_runs_factor = park_runs_factor * weather_runs_mult.
 
-    away_pitcher_name / home_pitcher_name / game_datetime: optional inputs for days-rest v1
-      starter xERA bump (see core.starter_fatigue); defaults leave behavior unchanged.
+    away_pitcher_name / home_pitcher_name / game_datetime / schedule_game_date: optional inputs
+      for days-rest v1 starter xERA bump (see core.starter_fatigue); schedule_game_date should
+      be statsapi schedule game_date (YYYY-MM-DD) when available; defaults leave behavior unchanged.
 
     Returns dict with: projected_total, away_runs, home_runs, edge, pick, prediction (str),
     confidence, total_open, total_current, recommended_units, skip (bool).
@@ -1179,10 +1181,10 @@ def generate_prediction(
         }
 
     away_xera = safe_get(away_stats, "xERA", 4.50) + xera_delta_for_pitcher_days_rest(
-        away_pitcher_name, game_datetime
+        away_pitcher_name, game_datetime, schedule_game_date
     )
     home_xera = safe_get(home_stats, "xERA", 4.50) + xera_delta_for_pitcher_days_rest(
-        home_pitcher_name, game_datetime
+        home_pitcher_name, game_datetime, schedule_game_date
     )
     away_whip = safe_get(away_stats, "WHIP", 1.30)
     home_whip = safe_get(home_stats, "WHIP", 1.30)
@@ -2888,6 +2890,7 @@ def run_predictions():
                 away_pitcher_name=away_pitcher,
                 home_pitcher_name=home_pitcher,
                 game_datetime=safe_get(game, "game_datetime", ""),
+                schedule_game_date=safe_get(game, "game_date", ""),
             )
 
             if proj.get("skip"):

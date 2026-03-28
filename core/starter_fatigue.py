@@ -28,6 +28,19 @@ MAX_XERA_BUMP_FROM_REST = 0.12
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OverGangPredictor/1.0)"}
 
 
+def _parse_schedule_game_date(schedule_game_date: Optional[str]) -> Optional[date]:
+    """
+    MLB schedule `date` from statsapi (YYYY-MM-DD) — same convention as pitching gameLog `date`.
+    Prefer this over UTC .date() from game_datetime so rest days align with official game dates.
+    """
+    if not schedule_game_date or not str(schedule_game_date).strip():
+        return None
+    try:
+        return datetime.strptime(str(schedule_game_date).strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def _parse_game_datetime_utc(game_datetime: Optional[str]) -> Optional[datetime]:
     if not game_datetime or not str(game_datetime).strip():
         return None
@@ -130,19 +143,26 @@ def _rest_days_to_xera_delta(rest_days: Optional[int]) -> float:
 def xera_delta_for_pitcher_days_rest(
     pitcher_name: Optional[str],
     game_datetime: Optional[str],
+    schedule_game_date: Optional[str] = None,
 ) -> float:
     """
     Return a small non-negative xERA increment for this starter based on days rest before
     the scheduled game. 0.0 when unavailable or on normal rest (5+ days).
 
     v1 uses current-season gameLog only (no cross-season prior start).
+
+    schedule_game_date: optional YYYY-MM-DD from statsapi schedule `game_date` (same bucket as
+    gameLog `date`); when set, used as the game calendar date instead of UTC midnight from
+    game_datetime.
     """
-    dt = _parse_game_datetime_utc(game_datetime)
-    if dt is None:
-        return 0.0
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    game_date = dt.date()
+    game_date = _parse_schedule_game_date(schedule_game_date)
+    if game_date is None:
+        dt = _parse_game_datetime_utc(game_datetime)
+        if dt is None:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        game_date = dt.date()
     season = int(game_date.year)
 
     pid = _lookup_pitcher_id(pitcher_name or "")
