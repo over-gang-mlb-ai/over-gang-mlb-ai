@@ -323,6 +323,7 @@ def main() -> int:
         if col not in df.columns:
             df[col] = "PENDING"
 
+    _ensure_root_path()
     games, fetch_diag = fetch_final_games_by_key(target_date, game_to_key_fn)
     _print_fetch_diagnostics_if_empty(target_date, games, fetch_diag)
 
