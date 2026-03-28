@@ -3,6 +3,8 @@ from functools import lru_cache
 from pathlib import Path
 from unidecode import unidecode
 
+from model.data_manager import DataManager
+
 _VELOCITY_CSV = Path(__file__).resolve().parent.parent / "data" / "velocity_data.csv"
 
 
@@ -26,7 +28,8 @@ class VelocityTracker:
     @lru_cache(maxsize=300)
     def get_velocity_drop(pitcher_name: str) -> float:
         try:
-            norm_name = unidecode(pitcher_name.lower().strip())
+            canonical = DataManager.normalize_name(pitcher_name)
+            norm_name = unidecode(canonical.lower().strip())
             df = VelocityTracker.load_velocity_csv()
             if norm_name in df.index:
                 season = float(df.loc[norm_name, "Season_Velo"])
