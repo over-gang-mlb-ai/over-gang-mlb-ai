@@ -1266,6 +1266,9 @@ def generate_prediction(
         offense_mult=home_offense_mult,
     )
 
+    # 6.5 is project_team_runs() per-team ceiling; flag for O/U customer-fire gating (no math change).
+    projection_cap_hit = (round(float(away_runs), 2) == 6.5) or (round(float(home_runs), 2) == 6.5)
+
     projected_total = round(away_runs + home_runs, 2)
     edge = round(projected_total - vegas_line, 2)
 
@@ -1363,6 +1366,7 @@ def generate_prediction(
         "projected_total": projected_total,
         "away_runs": away_runs,
         "home_runs": home_runs,
+        "projection_cap_hit": projection_cap_hit,
         "vegas_line": vegas_line,
         "edge": edge,
         "pick": pick,
@@ -2865,6 +2869,7 @@ def run_predictions():
                 'Captured_ML_Away': odds_info.get('ml_away'),
                 'Fired_Play': False,
                 'OU_Fired': False,
+                'Projection_Cap_Flag': False,
                 'ML_Fired': False,
                 'Trigger_Tags': '',
                 'No_Fire_Reason': '',
@@ -2932,6 +2937,7 @@ def run_predictions():
             home_runs = proj["home_runs"]
             edge = proj["edge"]
             recommended_units = proj["recommended_units"]
+            projection_cap_hit = bool(proj.get("projection_cap_hit", False))
 
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
@@ -2952,6 +2958,7 @@ def run_predictions():
                 "Projected_Total": projected_total,
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
+                "Projection_Cap_Flag": projection_cap_hit,
                 "Vegas_Line": total_current if (total_current is not None and total_current != 0) else vegas_line,
                 "Edge": edge,
                 "Prediction": prediction,
@@ -3040,7 +3047,11 @@ def run_predictions():
 
             is_manual_trusted = (odds_info.get("_source") == "manual_totals_csv") and has_real_total
             fire_threshold = 0.79 if is_manual_trusted else MIN_CONFIDENCE_ALERT
-            ou_fired = (confidence >= fire_threshold) and has_real_total
+            ou_fired = (
+                (confidence >= fire_threshold)
+                and has_real_total
+                and (not projection_cap_hit)
+            )
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ml_high_signal" if ml_fired else None,
@@ -3055,7 +3066,13 @@ def run_predictions():
             if ou_fired:
                 no_fire_ou = ""
             else:
-                if not has_real_total:
+                if (
+                    projection_cap_hit
+                    and has_real_total
+                    and (confidence >= fire_threshold)
+                ):
+                    no_fire_ou = "projection_cap"
+                elif not has_real_total:
                     no_fire_ou = "fallback_line_used"
                 elif abs(edge) < 1.0:
                     no_fire_ou = "edge_too_small"
@@ -3114,7 +3131,7 @@ def run_predictions():
 
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
-        "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Vegas_Line", "Edge",
+        "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag", "Vegas_Line", "Edge",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
