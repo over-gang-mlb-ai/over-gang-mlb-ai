@@ -213,7 +213,7 @@ MIN_CONFIDENCE_ALERT = 0.85
 # ML side-signal fire: max(home_win_prob, away_win_prob) from calculate_team_win_probability (not gated on O/U totals).
 MIN_ML_WIN_PROB_FOR_FIRE = 0.55
 # Customer Telegram only (CSV/export unchanged): min confidence to send a message.
-TELEGRAM_OU_MIN_CONFIDENCE_PCT = 90.0
+TELEGRAM_OU_MIN_CONFIDENCE_PCT = 75.0
 TELEGRAM_ML_MIN_CONFIDENCE_PCT = 70.0
 DATA_DIR = "data"
 ARCHIVE_DIR = "archive"
