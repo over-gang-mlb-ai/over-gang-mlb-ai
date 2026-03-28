@@ -1822,35 +1822,50 @@ def run_preflight_checks(stats_df, games, public_betting_data, odds_map):
 # ================================
 # 🔍 CORE LOGIC
 # ================================
-_NON_PLAYABLE_STATUSES_FOR_PREDICTION = frozenset({
-    "postponed",
-    "cancelled",
-    "canceled",
-    "ppd",
-    # Not a normal pre-game pick: play has stopped and may resume later; exclude from slate.
-    "suspended",
+# StatsAPI schedule g['status'] (string or nested detailedState): allowlist only — prediction runs pregame slate only.
+_PREGAME_STATUSES_FOR_PREDICTION = frozenset({
+    "scheduled",
+    "pre-game",
+    "pregame",
+    "warmup",
+    "preview",
 })
+
+
+def _statsapi_status_base_string(g) -> str:
+    """Normalized first segment of game status for allowlist match (statsapi string or dict)."""
+    st = g.get("status")
+    if isinstance(st, dict):
+        st = st.get("detailedState") or st.get("abstractGameState") or ""
+    if st is None:
+        return ""
+    s = str(st).strip().lower()
+    if not s:
+        return ""
+    return s.split(":")[0].strip()
+
+
+def _game_status_for_export(g) -> str:
+    """Display status for CSV (additive column)."""
+    st = g.get("status")
+    if isinstance(st, dict):
+        v = st.get("detailedState") or st.get("abstractGameState")
+        return str(v).strip() if v is not None else ""
+    if st is None:
+        return ""
+    return str(st).strip()
 
 
 def _game_is_playable_for_prediction(g) -> bool:
     """
-    Use g['status'] (MLB detailedState string from statsapi.schedule).
+    Pregame-only slate gate: g['status'] from statsapi.schedule must match _PREGAME_STATUSES_FOR_PREDICTION.
 
-    Conservative denylist only (Postponed, Cancelled, PPD, Suspended). Do not exclude
-    Scheduled, Pre-Game, Warmup, In Progress, Final, Delayed, etc.
-
-    Empty/missing status: treat as playable so we do not drop games on unexpected shapes.
+    Excludes In Progress, Final, Game Over, Completed, postponed/cancelled/suspended, and unknown/empty status.
     """
-    st = g.get("status")
-    if st is None or not str(st).strip():
-        return True
-    s = str(st).strip().lower()
-    if s in _NON_PLAYABLE_STATUSES_FOR_PREDICTION:
+    base = _statsapi_status_base_string(g)
+    if not base:
         return False
-    # MLB sometimes appends a reason, e.g. "Postponed: Rain"
-    if s.startswith("postponed") or s.startswith("cancelled") or s.startswith("canceled"):
-        return False
-    return True
+    return base in _PREGAME_STATUSES_FOR_PREDICTION
 
 
 def run_predictions():
@@ -1982,8 +1997,8 @@ def run_predictions():
         _skipped_non_playable = _after_mt - len(games)
         if _skipped_non_playable > 0:
             print(
-                f"[SLATE] Skipped {_skipped_non_playable} game(s) with non-playable status "
-                f"(denylist: postponed/cancelled/PPD/suspended)"
+                f"[SLATE] Skipped {_skipped_non_playable} game(s) not in pregame status allowlist "
+                f"(Scheduled/Pre-Game/Warmup/Preview only)"
             )
 
         print(f"✅ Found {len(games)} games for {today_mt} MT")
@@ -2850,6 +2865,7 @@ def run_predictions():
 
             game_data = {
                 'Game': game_name,
+                'Game_Status': _game_status_for_export(game),
                 'Venue': venue,
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
                 'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
@@ -3131,7 +3147,7 @@ def run_predictions():
 
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
-        "Game", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag", "Vegas_Line", "Edge",
+        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag", "Vegas_Line", "Edge",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
