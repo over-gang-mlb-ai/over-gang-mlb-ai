@@ -19,7 +19,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -41,14 +41,36 @@ def _load_fill_final_scores():
     return mod
 
 
+# MLB finalized games: detailedState / statsapi typically "Final" or "Game Over".
+_FINAL_STATUS_TOKENS = frozenset({"final", "game over"})
+
+
+def _normalized_game_status_string(g: dict) -> str:
+    """
+    Comparable status for final detection. Aligns with tools/fill_final_scores._game_final_total:
+    use status or top-level abstract_game_state; if status is a dict, prefer abstractGameState
+    then detailedState; if those are empty, treat codedGameState/statusCode F as final (MLB API).
+    """
+    if not isinstance(g, dict):
+        return ""
+    raw = g.get("status") or g.get("abstract_game_state")
+    if isinstance(raw, dict):
+        inner = (
+            raw.get("abstractGameState")
+            or raw.get("detailedState")
+            or ""
+        )
+        if not str(inner).strip():
+            code = raw.get("codedGameState") or raw.get("statusCode")
+            if str(code).strip().upper() in ("F", "FINAL"):
+                return "final"
+            return ""
+        return str(inner).strip().lower()
+    return str(raw or "").strip().lower()
+
+
 def _is_final_status(g: dict) -> bool:
-    status = g.get("status")
-    if isinstance(status, dict):
-        status = status.get("detailedState") or status.get("abstractGameState") or ""
-    else:
-        status = status or ""
-    s = str(status).strip().lower()
-    return s in ("final", "game over")
+    return _normalized_game_status_string(g) in _FINAL_STATUS_TOKENS
 
 
 def _parse_final_game_detail(g: dict) -> Optional[Dict[str, Any]]:
@@ -85,25 +107,44 @@ def _parse_final_game_detail(g: dict) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_final_games_by_key(date_yyyy_mm_dd: str, game_to_key_fn) -> Dict[str, Dict[str, Any]]:
-    """Normalized 'away @ home' -> detail dict with runs and total."""
+def fetch_final_games_by_key(
+    date_yyyy_mm_dd: str, game_to_key_fn
+) -> Tuple[Dict[str, Dict[str, Any]], dict]:
+    """Normalized 'away @ home' -> detail dict with runs and total. Second value is fetch diagnostics."""
     out: Dict[str, Dict[str, Any]] = {}
+    diag: dict = {
+        "statsapi_games": 0,
+        "statsapi_error": None,
+        "statsapi_parseable": 0,
+        "statsapi_key_drops": 0,
+        "http_games": 0,
+        "http_error": None,
+        "http_parseable": 0,
+        "http_key_drops": 0,
+    }
+    games = []
     try:
         from statsapi import schedule
 
         games = schedule(start_date=date_yyyy_mm_dd, end_date=date_yyyy_mm_dd) or []
-    except Exception:
+    except Exception as e:
+        diag["statsapi_error"] = str(e)
         games = []
+    diag["statsapi_games"] = len(games)
+
     for g in games:
         det = _parse_final_game_detail(g)
         if not det:
             continue
+        diag["statsapi_parseable"] += 1
         key = game_to_key_fn(f"{det['away_name']} @ {det['home_name']}")
-        if key:
-            out[key] = det
+        if not key:
+            diag["statsapi_key_drops"] += 1
+            continue
+        out[key] = det
 
     if out:
-        return out
+        return out, diag
 
     try:
         import requests
@@ -112,18 +153,64 @@ def fetch_final_games_by_key(date_yyyy_mm_dd: str, game_to_key_fn) -> Dict[str, 
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
-    except Exception:
-        return out
+    except Exception as e:
+        diag["http_error"] = str(e)
+        return out, diag
 
+    http_games: list = []
     for d in data.get("dates") or []:
         for g in d.get("games") or []:
-            det = _parse_final_game_detail(g)
-            if not det:
-                continue
-            key = game_to_key_fn(f"{det['away_name']} @ {det['home_name']}")
-            if key:
-                out[key] = det
-    return out
+            http_games.append(g)
+    diag["http_games"] = len(http_games)
+
+    for g in http_games:
+        det = _parse_final_game_detail(g)
+        if not det:
+            continue
+        diag["http_parseable"] += 1
+        key = game_to_key_fn(f"{det['away_name']} @ {det['home_name']}")
+        if not key:
+            diag["http_key_drops"] += 1
+            continue
+        out[key] = det
+    return out, diag
+
+
+def _print_fetch_diagnostics_if_empty(
+    date_yyyy_mm_dd: str, games_map: Dict[str, Dict[str, Any]], diag: dict
+) -> None:
+    """If nothing loaded, print stderr hints (fetch errors vs parse vs key drops)."""
+    if games_map:
+        return
+    print(
+        f"Note: no finalized games loaded for {date_yyyy_mm_dd} "
+        "(empty schedule, non-final status, missing scores, or game key mismatch).",
+        file=sys.stderr,
+    )
+    if diag.get("statsapi_error"):
+        print(f"  statsapi error: {diag['statsapi_error']}", file=sys.stderr)
+    if diag.get("http_error"):
+        print(f"  http schedule error: {diag['http_error']}", file=sys.stderr)
+    sg, sp, sk = (
+        diag.get("statsapi_games", 0),
+        diag.get("statsapi_parseable", 0),
+        diag.get("statsapi_key_drops", 0),
+    )
+    hg, hp, hk = (
+        diag.get("http_games", 0),
+        diag.get("http_parseable", 0),
+        diag.get("http_key_drops", 0),
+    )
+    if sg or sp or sk:
+        print(
+            f"  statsapi: {sg} row(s), {sp} final w/scores, {sk} dropped (no game key).",
+            file=sys.stderr,
+        )
+    if hg or hp or hk:
+        print(
+            f"  http: {hg} row(s), {hp} final w/scores, {hk} dropped (no game key).",
+            file=sys.stderr,
+        )
 
 
 def _is_pending_result(val) -> bool:
@@ -236,7 +323,8 @@ def main() -> int:
         if col not in df.columns:
             df[col] = "PENDING"
 
-    games = fetch_final_games_by_key(target_date, game_to_key_fn)
+    games, fetch_diag = fetch_final_games_by_key(target_date, game_to_key_fn)
+    _print_fetch_diagnostics_if_empty(target_date, games, fetch_diag)
 
     ou_set = ml_set = 0
     ou_still = ml_still = 0
