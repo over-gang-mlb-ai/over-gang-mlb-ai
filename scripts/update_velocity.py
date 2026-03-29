@@ -89,6 +89,33 @@ def _first_col(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
     return None
 
 
+def _raw_pitcher_display_name(
+    row: pd.Series,
+    name_w: str | None,
+    fn_c: str | None,
+    ln_c: str | None,
+    fallback: str,
+) -> str:
+    """Build 'First Last' for Savant wide exports (player_name OR first_name+last_name; 'Last, First' → First Last)."""
+    if name_w:
+        v = row.get(name_w)
+        if isinstance(v, str) and v.strip():
+            s = v.strip()
+            if "," in s:
+                parts = [p.strip() for p in s.split(",", 1)]
+                if len(parts) == 2 and parts[0] and parts[1]:
+                    return f"{parts[1]} {parts[0]}"
+            return s
+    if fn_c and ln_c:
+        fn = row.get(fn_c)
+        ln = row.get(ln_c)
+        fn = "" if pd.isna(fn) else str(fn).strip()
+        ln = "" if pd.isna(ln) else str(ln).strip()
+        if fn or ln:
+            return f"{fn} {ln}".strip()
+    return fallback
+
+
 def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
     """Return DataFrame with columns: mlb_id (int), raw_name (str), season_velo (float)."""
     last_err: Exception | None = None
@@ -106,8 +133,11 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
         # Wide format: ff_avg_speed / si_avg_speed style (Savant custom naming varies by year).
         ff_w = _first_col(df, ("ff_avg_speed", "ff_avg_velo", "ff_velo", "ff_avg_speed_mph"))
         si_w = _first_col(df, ("si_avg_speed", "si_avg_velo", "si_velo"))
-        id_w = _first_col(df, ("player_id", "pitcher_id", "id"))
-        name_w = _first_col(df, ("player_name", "name", "pitcher"))
+        # Savant often uses `pitcher` for MLBAM id when `player_id` is absent (do not treat as name here).
+        id_w = _first_col(df, ("player_id", "pitcher_id", "id", "pitcher"))
+        name_w = _first_col(df, ("player_name", "name"))
+        fn_c = _first_col(df, ("first_name", "name_first"))
+        ln_c = _first_col(df, ("last_name", "name_last"))
 
         if ff_w and id_w:
             rows = []
@@ -119,9 +149,7 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
                     mlb_id = int(pid)
                 except (TypeError, ValueError):
                     continue
-                raw = row.get(name_w, "")
-                if not isinstance(raw, str) or not raw.strip():
-                    raw = str(mlb_id)
+                raw = _raw_pitcher_display_name(row, name_w, fn_c, ln_c, str(mlb_id))
                 v_ff = row.get(ff_w)
                 v_si = row.get(si_w) if si_w else float("nan")
                 velo = None
@@ -161,6 +189,13 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
                 try:
                     mid = int(r[pid_c])
                     name_map[mid] = str(r[pname]).strip() if pd.notna(r[pname]) else ""
+                except (TypeError, ValueError):
+                    continue
+        elif fn_c and ln_c:
+            for _, r in df[[pid_c, fn_c, ln_c]].drop_duplicates(subset=[pid_c]).iterrows():
+                try:
+                    mid = int(r[pid_c])
+                    name_map[mid] = _raw_pitcher_display_name(r, None, fn_c, ln_c, str(mid))
                 except (TypeError, ValueError):
                     continue
 
