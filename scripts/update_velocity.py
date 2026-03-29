@@ -331,6 +331,34 @@ def _recent_velocity_by_id(recent_days: int, season_year: int) -> pd.Series:
     return pd.Series(out, name="recent_velo")
 
 
+def _fetch_mlb_people_full_names(person_ids: list[int]) -> dict[int, str]:
+    """
+    Map MLBAM pitcher ids → fullName using the public MLB Stats API (batch personIds).
+    Used only for recent-only pitchers not present in pitch-arsenals season_df.
+    """
+    out: dict[int, str] = {}
+    if not person_ids:
+        return out
+    chunk_size = 50
+    for i in range(0, len(person_ids), chunk_size):
+        chunk = person_ids[i : i + chunk_size]
+        ids = ",".join(str(x) for x in chunk)
+        url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids}"
+        try:
+            r = requests.get(url, headers=_REQUEST_HEADERS, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            for p in data.get("people", []):
+                pid = p.get("id")
+                fn = p.get("fullName")
+                if pid is None or not isinstance(fn, str) or not fn.strip():
+                    continue
+                out[int(pid)] = fn.strip()
+        except Exception:
+            continue
+    return out
+
+
 def _format_name_key(raw: str) -> str:
     """Match VelocityTracker: unidecode(normalize_name).lower().strip() after normalize."""
     if not _is_usable_pitcher_name(raw):
@@ -361,8 +389,30 @@ def _build_output(season_df: pd.DataFrame, recent: pd.Series) -> pd.DataFrame:
                 "Recent_Velo": round(recent_v, 1),
             }
         )
+
+    # Recent Statcast ids not in pitch-arsenals: Season_Velo = Recent_Velo = rolling mean (drop 0 vs season baseline).
+    season_ids = {int(x) for x in season_df["mlb_id"].unique()} if len(season_df) else set()
+    recent_only_ids = sorted(int(pid) for pid in recent.index if int(pid) not in season_ids)
+    name_by_id = _fetch_mlb_people_full_names(recent_only_ids)
+    for mid in recent_only_ids:
+        rv = float(recent[mid])
+        raw = name_by_id.get(mid)
+        if not raw or not _is_usable_pitcher_name(raw):
+            continue
+        key = _format_name_key(raw)
+        if not key:
+            continue
+        rows.append(
+            {
+                "Name": key,
+                "Season_Velo": round(rv, 1),
+                "Recent_Velo": round(rv, 1),
+            }
+        )
+
     out = pd.DataFrame(rows)
-    out = out.drop_duplicates(subset=["Name"], keep="last")
+    # Season rows listed first: keep="first" lets arsenal-backed names win on duplicate Name.
+    out = out.drop_duplicates(subset=["Name"], keep="first")
     out = out.sort_values("Name").reset_index(drop=True)
     return out
 
