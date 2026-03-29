@@ -167,7 +167,16 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
         si_w = _first_col(df, ("si_avg_speed", "si_avg_velo", "si_velo"))
         # Savant often uses `pitcher` for MLBAM id when `player_id` is absent (do not treat as name here).
         id_w = _first_col(df, ("player_id", "pitcher_id", "id", "pitcher"))
-        name_w = _first_col(df, ("player_name", "name"))
+        # Savant sometimes uses one header string for the full name, e.g. `last_name, first_name`.
+        name_w = _first_col(
+            df,
+            (
+                "player_name",
+                "last_name, first_name",
+                "last_name,first_name",
+                "name",
+            ),
+        )
         # Include spaced headers (e.g. "First Name") after strip; Savant CSVs vary.
         fn_c = _first_col(
             df,
