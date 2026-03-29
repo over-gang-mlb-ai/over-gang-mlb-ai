@@ -18,7 +18,18 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 MLB_SPORT_KEY = "baseball_mlb"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
 # Prefer sharp / liquid books first; fall back to first available
-BOOK_PRIORITY = ("pinnacle", "bovada", "betonlineag", "draftkings", "fanduel", "betmgm", "pointsbetus", "williamhill_us")
+BOOK_PRIORITY = (
+    "pinnacle",
+    "lowvig",  # if present in Odds API
+    "betonlineag",
+    "draftkings",
+    "fanduel",
+    "betrivers",
+    "betmgm",
+    "pointsbetus",
+    "williamhill_us",
+    "bovada",
+)
 
 DEFAULT_TOTAL = 8.5
 DEFAULT_JUICE = -110
