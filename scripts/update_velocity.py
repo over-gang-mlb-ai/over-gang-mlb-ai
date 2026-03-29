@@ -97,6 +97,17 @@ def _is_usable_pitcher_name(s: str) -> bool:
     return any(c.isalpha() for c in s)
 
 
+def _maybe_last_comma_first_to_first_last(s: str) -> str:
+    """If s looks like 'Last, First', return 'First Last'; otherwise return s stripped."""
+    s = (s or "").strip()
+    if not s or s.isdigit() or "," not in s:
+        return s
+    parts = [p.strip() for p in s.split(",", 1)]
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return f"{parts[1]} {parts[0]}"
+    return s
+
+
 def _raw_pitcher_display_name(
     row: pd.Series,
     name_w: str | None,
@@ -116,12 +127,23 @@ def _raw_pitcher_display_name(
                 if len(parts) == 2 and parts[0] and parts[1]:
                     return f"{parts[1]} {parts[0]}"
             return s
-    if fn_c and ln_c:
-        fn = row.get(fn_c)
-        ln = row.get(ln_c)
-        fn = "" if pd.isna(fn) else str(fn).strip()
-        ln = "" if pd.isna(ln) else str(ln).strip()
+    # Savant wide: first_name / last_name (and variants); either cell may hold 'Last, First'.
+    if fn_c or ln_c:
+        fn = row.get(fn_c) if fn_c else None
+        ln = row.get(ln_c) if ln_c else None
+        fn = "" if fn_c is None or pd.isna(fn) else str(fn).strip()
+        ln = "" if ln_c is None or pd.isna(ln) else str(ln).strip()
+        if fn and fn.isdigit():
+            fn = ""
+        if ln and ln.isdigit():
+            ln = ""
+        if fn and not ln:
+            return _maybe_last_comma_first_to_first_last(fn)
+        if ln and not fn:
+            return _maybe_last_comma_first_to_first_last(ln)
         if fn or ln:
+            fn = _maybe_last_comma_first_to_first_last(fn)
+            ln = _maybe_last_comma_first_to_first_last(ln)
             return f"{fn} {ln}".strip()
     return fallback
 
@@ -146,8 +168,15 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
         # Savant often uses `pitcher` for MLBAM id when `player_id` is absent (do not treat as name here).
         id_w = _first_col(df, ("player_id", "pitcher_id", "id", "pitcher"))
         name_w = _first_col(df, ("player_name", "name"))
-        fn_c = _first_col(df, ("first_name", "name_first"))
-        ln_c = _first_col(df, ("last_name", "name_last"))
+        # Include spaced headers (e.g. "First Name") after strip; Savant CSVs vary.
+        fn_c = _first_col(
+            df,
+            ("first_name", "name_first", "firstname", "first", "fname", "first name"),
+        )
+        ln_c = _first_col(
+            df,
+            ("last_name", "name_last", "lastname", "last", "lname", "last name"),
+        )
 
         if ff_w and id_w:
             rows = []
@@ -203,8 +232,9 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
                     name_map[mid] = str(r[pname]).strip() if pd.notna(r[pname]) else ""
                 except (TypeError, ValueError):
                     continue
-        elif fn_c and ln_c:
-            for _, r in df[[pid_c, fn_c, ln_c]].drop_duplicates(subset=[pid_c]).iterrows():
+        elif fn_c or ln_c:
+            _cols = [pid_c] + [c for c in (fn_c, ln_c) if c]
+            for _, r in df[_cols].drop_duplicates(subset=[pid_c]).iterrows():
                 try:
                     mid = int(r[pid_c])
                     name_map[mid] = _raw_pitcher_display_name(r, None, fn_c, ln_c, "")
