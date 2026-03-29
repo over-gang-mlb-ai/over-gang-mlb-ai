@@ -2969,6 +2969,14 @@ def run_predictions():
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
                 "Projection_Cap_Flag": projection_cap_hit,
+                "Lineup_Impact_Away": round(float(away_impact), 4),
+                "Lineup_Impact_Home": round(float(home_impact), 4),
+                "Lineup_Delta_Raw": round(float(lineup_delta), 4),
+                "Lineup_Delta_Effective": round(float(effective_lineup_delta), 4),
+                "Lineup_Mode_Away": (away_scope if away_scope and str(away_scope).lower() != "none" else ""),
+                "Lineup_Mode_Home": (home_scope if home_scope and str(home_scope).lower() != "none" else ""),
+                "Lineup_Cap_Hit_Away": bool(abs(float(away_impact)) >= 0.20),
+                "Lineup_Cap_Hit_Home": bool(abs(float(home_impact)) >= 0.20),
                 "Vegas_Line": total_current if (total_current is not None and total_current != 0) else vegas_line,
                 "Edge": edge,
                 "Prediction": prediction,
@@ -3141,7 +3149,10 @@ def run_predictions():
 
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
-        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag", "Vegas_Line", "Edge",
+        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag",
+        "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
+        "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
+        "Vegas_Line", "Edge",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
