@@ -2694,6 +2694,7 @@ def run_predictions():
             away_scope = "none"
             home_scope = "none"
             lineup_delta = 0.0
+            effective_lineup_delta = 0.0
 
             # --- score lineups vs the real opposing starter hand (safe) ---
             try:
@@ -2722,6 +2723,9 @@ def run_predictions():
 
                 # positive means home lineup projects stronger than away
                 lineup_delta = float(home_impact) - float(away_impact)
+                _eh = max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, float(home_impact)))
+                _ea = max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, float(away_impact)))
+                effective_lineup_delta = _eh - _ea
 
                 # small, controlled nudge to the total (tune 0.1–0.5 after backtests)
                 vegas_line_adj = float(vegas_line) + 0.3 * lineup_delta
@@ -2730,9 +2734,13 @@ def run_predictions():
                     f"🧮 Lineup impacts → AWAY {away_team}: {away_impact:.3f} ({away_scope}) | "
                     f"HOME {home_team}: {home_impact:.3f} ({home_scope}) | Δ={lineup_delta:+.3f}"
                 )
+                print(
+                    f"   sizing Δ (±{LINEUP_IMPACT_CAP} cap, same scale as project_team_runs): {effective_lineup_delta:+.3f}"
+                )
             except Exception as e:
                 print(f"⚠️ Lineup impact error: {e}")
                 lineup_delta = 0.0
+                effective_lineup_delta = 0.0
                 vegas_line_adj = float(vegas_line)
 
             # Runtime game key for pitcher-resolution logging (no logic change)
@@ -2948,9 +2956,9 @@ def run_predictions():
             if not has_real_total:
                 prediction = "NO BET (fallback total only)"
 
-            # Optional: scale units by lineup conviction
+            # Optional: scale units by lineup conviction (aligned to LINEUP_IMPACT_CAP, not raw rails)
             try:
-                units_mult = 1.0 + 0.25 * abs(float(lineup_delta))
+                units_mult = 1.0 + 0.25 * abs(float(effective_lineup_delta))
                 units_mult = min(units_mult, 1.50)
                 sized_units = round(recommended_units * units_mult, 2)
             except Exception:
