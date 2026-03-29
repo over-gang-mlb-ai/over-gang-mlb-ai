@@ -127,8 +127,8 @@ class DataManager:
         )
 
         csv_urls = [
-            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&season={year}&csv=true",
-            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&csv=true",
+            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&season={year}&csv=true",
+            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true",
         ]
 
         last_err = None
@@ -136,7 +136,7 @@ class DataManager:
             try:
                 r = requests.get(url, headers=headers, timeout=25)
                 r.raise_for_status()
-                csv_text = r.text
+                csv_text = r.text.lstrip("\ufeff")
                 path = f"debug/savant_xera_{year}_csv_attempt{i}.csv"
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(csv_text)
@@ -194,19 +194,20 @@ class DataManager:
                     break
             if source is None:
                 # as a last attempt, fetch CSV once more for est_wOBA
-                url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&csv=true"
+                url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true"
                 r = requests.get(url, headers=headers, timeout=25)
                 r.raise_for_status()
-                if DataManager._savant_body_looks_like_html(r.text):
+                fb_text = r.text.lstrip("\ufeff")
+                if DataManager._savant_body_looks_like_html(fb_text):
                     raise ValueError("Fallback CSV fetch returned HTML, not Savant CSV.")
                 source = f"debug/savant_xera_{year}_csv_attempt_fallback.csv"
                 with open(source, "w", encoding="utf-8") as f:
-                    f.write(r.text)
+                    f.write(fb_text)
 
             if source.endswith("_html_table.csv"):
-                df = pd.read_csv(source)
+                df = pd.read_csv(source, encoding="utf-8-sig")
             else:
-                df = pd.read_csv(source)
+                df = pd.read_csv(source, encoding="utf-8-sig")
 
             cols = [str(c) for c in df.columns]
             pid_col = _pick_col(cols, *_PID)
