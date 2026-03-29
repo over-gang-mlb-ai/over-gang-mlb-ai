@@ -717,6 +717,8 @@ VELO_DROP_NOISE_MPH = 0.50
 VELO_DROP_RUNS_PER_MPH = 0.012
 VELO_DROP_RUNS_MULT_MAX = 1.05
 VELO_DROP_CONF_LOSS_MPH = 1.05  # meaningful loss: slight confidence trim only (separate from xERA bumps)
+# O/U confidence: multiplicative penalty when League Avg / LowIP flags set (replaces prior hard cap at 0.79 on high conf)
+CONFIDENCE_DATA_QUALITY_DEGRADED_MULT = 0.93
 LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller than offense_mult
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
 OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
@@ -1288,29 +1290,39 @@ def generate_prediction(
         pick = "LEAN_OVER" if edge > 0 else "LEAN_UNDER"
         prediction_str = f"LEAN {'OVER' if edge > 0 else 'UNDER'} {vegas_line:.1f} (proj {projected_total:.1f})"
 
-    # ---------- Base confidence from |edge| ----------
+    # ---------- O/U confidence: edge strength × data quality × market trust (additive nudges) ----------
+    # base_confidence = edge strength (projection vs line); data_quality_factor = uncertainty / completeness;
+    # market_trust_factor = reserved multiplicative market trust (1.0); public + line = small additive market nudges.
     abs_edge = abs(edge)
     if abs_edge >= 1.0:
-        confidence = 0.85
+        base_confidence = 0.85
     elif abs_edge >= 0.5:
-        confidence = 0.75
+        base_confidence = 0.75
     elif abs_edge >= EDGE_THRESHOLD:
-        confidence = 0.65
+        base_confidence = 0.65
     else:
-        confidence = 0.45
+        base_confidence = 0.45
 
     # (Bullpen/park already in projection; avoid re-using for confidence to prevent bias)
 
-    # Meaningful velocity loss on either starter: modest confidence trim (separate from days-rest xERA / LowIP).
-    confidence *= _confidence_trim_for_velocity_loss(velo_drop_away)
-    confidence *= _confidence_trim_for_velocity_loss(velo_drop_home)
-
+    # Meaningful velocity loss on either starter: modest multiplicative penalty (same as prior 0.99 trims).
+    _velo_trust = (
+        _confidence_trim_for_velocity_loss(velo_drop_away) * _confidence_trim_for_velocity_loss(velo_drop_home)
+    )
     relievers = (safe_get(bullpen_away, "Relievers", 7) + safe_get(bullpen_home, "Relievers", 7)) / 14.0
     reliever_factor = min(1.0, relievers)
     if pick == "OVER":
-        confidence *= 1.0 + (1.0 - reliever_factor) * 0.1
+        reliever_mult = 1.0 + (1.0 - reliever_factor) * 0.1
     else:
-        confidence *= 1.0 + reliever_factor * 0.05
+        reliever_mult = 1.0 + reliever_factor * 0.05
+
+    data_quality_factor = _velo_trust * reliever_mult
+    if data_quality_degraded:
+        data_quality_factor *= CONFIDENCE_DATA_QUALITY_DEGRADED_MULT
+
+    market_trust_factor = 1.0
+
+    confidence = base_confidence * data_quality_factor * market_trust_factor
 
     # Loader uses total_open / total_current; accept legacy Total_Open / Total_Current.
     _raw_to = public_data.get("total_open")
@@ -1322,7 +1334,7 @@ def generate_prediction(
     total_open = safe_float(_raw_to, default=vegas_line)
     total_current = safe_float(_raw_tc, default=total_open)
 
-    # Public betting: fade heavy public (contrarian)
+    # Public betting: fade heavy public (contrarian); additive market-trust nudges (unchanged behavior).
     try:
         ou_pct = float(public_data.get("ou_bets_pct_over", 50))
         if pick == "OVER":
@@ -1349,8 +1361,6 @@ def generate_prediction(
     if not has_real_total:
         confidence = min(0.59, confidence * 0.65)
         prediction_str = "NO BET (fallback total only)"
-    if data_quality_degraded:
-        confidence = min(confidence, 0.79)
 
     # Recommended units from edge size (only bet when |edge| >= threshold)
     if abs_edge < EDGE_THRESHOLD:
