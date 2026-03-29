@@ -777,7 +777,7 @@ def project_team_runs(
     opponent_velo_drop: float,
     opponent_low_ip: bool = False,
     offense_mult: float = 1.0,
-) -> float:
+) -> tuple:
     """
     Project expected runs scored by one team in the game (they face opponent starter + bullpen).
 
@@ -785,6 +785,8 @@ def project_team_runs(
       clamped to OFFENSE_MULT_MIN..OFFENSE_MULT_MAX. 1.0 when batter data unavailable.
     lineup_impact: smaller adjustment from LineupImpact.score_lineup (capped by LINEUP_IMPACT_CAP).
     opponent_bullpen_relievers: active reliever count for expected weekly IP baseline (workload fatigue ratio).
+
+    Returns (capped_runs, raw_runs): per-team 6.5 cap applied only to capped_runs; raw_runs is pre-cap for analysis.
     """
     if opponent_low_ip:
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
@@ -829,8 +831,9 @@ def project_team_runs(
             )
             runs *= fatigue_mult
 
-    runs = min(runs, 6.5)
-    return round(runs, 2)
+    raw_runs = runs
+    capped_runs = min(runs, 6.5)
+    return round(capped_runs, 2), round(raw_runs, 2)
 
 
 # ================================
@@ -1240,7 +1243,7 @@ def generate_prediction(
 
     # ---------- Project runs for each team ----------
     # Away offense faces home pitcher + home bullpen; away_offense_mult from Batters.offense_vs_hand_dict(away_team vs home_hand)
-    away_runs = project_team_runs(
+    away_runs, away_runs_raw = project_team_runs(
         opponent_starter_xera=home_xera,
         opponent_starter_whip=home_whip,
         opponent_bullpen_era=bullpen_home_era,
@@ -1253,7 +1256,7 @@ def generate_prediction(
         offense_mult=away_offense_mult,
     )
     # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
-    home_runs = project_team_runs(
+    home_runs, home_runs_raw = project_team_runs(
         opponent_starter_xera=away_xera,
         opponent_starter_whip=away_whip,
         opponent_bullpen_era=bullpen_away_era,
@@ -1366,6 +1369,8 @@ def generate_prediction(
         "projected_total": projected_total,
         "away_runs": away_runs,
         "home_runs": home_runs,
+        "away_runs_raw": away_runs_raw,
+        "home_runs_raw": home_runs_raw,
         "projection_cap_hit": projection_cap_hit,
         "vegas_line": vegas_line,
         "edge": edge,
@@ -2945,6 +2950,8 @@ def run_predictions():
             projected_total = proj["projected_total"]
             away_runs = proj["away_runs"]
             home_runs = proj["home_runs"]
+            away_runs_raw = proj["away_runs_raw"]
+            home_runs_raw = proj["home_runs_raw"]
             edge = proj["edge"]
             recommended_units = proj["recommended_units"]
             projection_cap_hit = bool(proj.get("projection_cap_hit", False))
@@ -2968,6 +2975,10 @@ def run_predictions():
                 "Projected_Total": projected_total,
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
+                "Away_Runs_Raw": away_runs_raw,
+                "Home_Runs_Raw": home_runs_raw,
+                "Away_Cap_Diff": round(float(away_runs_raw) - float(away_runs), 2),
+                "Home_Cap_Diff": round(float(home_runs_raw) - float(home_runs), 2),
                 "Projection_Cap_Flag": projection_cap_hit,
                 "Lineup_Impact_Away": round(float(away_impact), 4),
                 "Lineup_Impact_Home": round(float(home_impact), 4),
@@ -3149,7 +3160,8 @@ def run_predictions():
 
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
-        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs", "Projection_Cap_Flag",
+        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs",
+        "Away_Runs_Raw", "Home_Runs_Raw", "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
