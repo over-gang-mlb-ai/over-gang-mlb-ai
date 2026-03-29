@@ -89,6 +89,14 @@ def _first_col(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
     return None
 
 
+def _is_usable_pitcher_name(s: str) -> bool:
+    """True if we can emit this as Name: must contain letters; never a bare MLBAM id string."""
+    s = (s or "").strip()
+    if not s or s.isdigit():
+        return False
+    return any(c.isalpha() for c in s)
+
+
 def _raw_pitcher_display_name(
     row: pd.Series,
     name_w: str | None,
@@ -101,6 +109,8 @@ def _raw_pitcher_display_name(
         v = row.get(name_w)
         if isinstance(v, str) and v.strip():
             s = v.strip()
+            if s.isdigit():
+                return ""
             if "," in s:
                 parts = [p.strip() for p in s.split(",", 1)]
                 if len(parts) == 2 and parts[0] and parts[1]:
@@ -149,7 +159,9 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
                     mlb_id = int(pid)
                 except (TypeError, ValueError):
                     continue
-                raw = _raw_pitcher_display_name(row, name_w, fn_c, ln_c, str(mlb_id))
+                raw = _raw_pitcher_display_name(row, name_w, fn_c, ln_c, "")
+                if not _is_usable_pitcher_name(raw):
+                    continue
                 v_ff = row.get(ff_w)
                 v_si = row.get(si_w) if si_w else float("nan")
                 velo = None
@@ -195,13 +207,15 @@ def _season_table(year: int, min_pitches: int) -> pd.DataFrame:
             for _, r in df[[pid_c, fn_c, ln_c]].drop_duplicates(subset=[pid_c]).iterrows():
                 try:
                     mid = int(r[pid_c])
-                    name_map[mid] = _raw_pitcher_display_name(r, None, fn_c, ln_c, str(mid))
+                    name_map[mid] = _raw_pitcher_display_name(r, None, fn_c, ln_c, "")
                 except (TypeError, ValueError):
                     continue
 
         out_rows = []
         for mlb_id, g in work.groupby("mlb_id"):
-            raw = name_map.get(mlb_id, str(mlb_id))
+            raw = name_map.get(mlb_id, "")
+            if not _is_usable_pitcher_name(raw):
+                continue
             sub = g.groupby("pitch_type")["avg_speed"].mean()
             velo = None
             for ft in _FASTBALL_PRIORITY:
@@ -280,10 +294,15 @@ def _recent_velocity_by_id(recent_days: int, season_year: int) -> pd.Series:
 
 def _format_name_key(raw: str) -> str:
     """Match VelocityTracker: unidecode(normalize_name).lower().strip() after normalize."""
+    if not _is_usable_pitcher_name(raw):
+        return ""
     can = DataManager.normalize_name(raw)
     if not can:
         can = raw
-    return unidecode(can.lower().strip())
+    out = unidecode(can.lower().strip())
+    if not out or out.isdigit():
+        return ""
+    return out
 
 
 def _build_output(season_df: pd.DataFrame, recent: pd.Series) -> pd.DataFrame:
