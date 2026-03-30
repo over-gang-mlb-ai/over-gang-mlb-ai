@@ -723,6 +723,9 @@ LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller th
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
 OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
 OFFENSE_MULT_MAX = 1.10
+# Per-team run ceiling after all multipliers: base 6.5, raised modestly in weak-pitching / hitter-friendly contexts.
+DYNAMIC_TEAM_RUN_CAP_BASE = 6.5
+DYNAMIC_TEAM_RUN_CAP_MAX = 8.0
 
 # Park Factors
 PARK_FACTORS = {
@@ -768,6 +771,50 @@ def _confidence_trim_for_velocity_loss(velo_drop: float) -> float:
     return 0.99
 
 
+def _dynamic_team_run_cap(
+    opponent_starter_xera: float,
+    opponent_bullpen_era: float,
+    park_runs_factor: float,
+    opponent_low_ip: bool,
+    opponent_starter_whip: float,
+    lineup_impact: float,
+) -> float:
+    """
+    Context-aware per-team run ceiling (not a run multiplier). Base matches legacy 6.5; increases only when
+    opponent pitching context or park favors scoring; bounded by DYNAMIC_TEAM_RUN_CAP_MAX.
+    lineup_impact is accepted for API stability; kept neutral here (lineup already in runs path).
+    """
+    _ = lineup_impact
+    cap = float(DYNAMIC_TEAM_RUN_CAP_BASE)
+    try:
+        x = float(opponent_starter_xera)
+    except (TypeError, ValueError):
+        x = LEAGUE_ERA
+    if x > 4.5:
+        cap += min(0.45, (x - 4.5) * 0.16)
+    try:
+        bp = float(opponent_bullpen_era)
+    except (TypeError, ValueError):
+        bp = LEAGUE_ERA
+    if bp > 4.5:
+        cap += min(0.35, (bp - 4.5) * 0.12)
+    try:
+        pk = float(park_runs_factor)
+    except (TypeError, ValueError):
+        pk = 1.0
+    if pk > 1.0:
+        cap += min(0.35, (pk - 1.0) * 0.85)
+    try:
+        w = float(opponent_starter_whip)
+    except (TypeError, ValueError):
+        w = WHIP_LEAGUE
+    if w > WHIP_LEAGUE:
+        cap += min(0.15, (w - WHIP_LEAGUE) * 0.55)
+    if opponent_low_ip:
+        cap += 0.08
+    return max(DYNAMIC_TEAM_RUN_CAP_BASE, min(float(DYNAMIC_TEAM_RUN_CAP_MAX), cap))
+
+
 def project_team_runs(
     opponent_starter_xera: float,
     opponent_starter_whip: float,
@@ -788,7 +835,7 @@ def project_team_runs(
     lineup_impact: smaller adjustment from LineupImpact.score_lineup (capped by LINEUP_IMPACT_CAP).
     opponent_bullpen_relievers: active reliever count for expected weekly IP baseline (workload fatigue ratio).
 
-    Returns (capped_runs, raw_runs): per-team 6.5 cap applied only to capped_runs; raw_runs is pre-cap for analysis.
+    Returns (capped_runs, raw_runs): per-team dynamic cap applied only to capped_runs; raw_runs is pre-cap for analysis.
     """
     if opponent_low_ip:
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
@@ -834,7 +881,15 @@ def project_team_runs(
             runs *= fatigue_mult
 
     raw_runs = runs
-    capped_runs = min(runs, 6.5)
+    _cap = _dynamic_team_run_cap(
+        opponent_starter_xera,
+        opponent_bullpen_era,
+        park_runs_factor,
+        opponent_low_ip,
+        opponent_starter_whip,
+        lineup_impact,
+    )
+    capped_runs = min(runs, _cap)
     return round(capped_runs, 2), round(raw_runs, 2)
 
 
@@ -1271,8 +1326,10 @@ def generate_prediction(
         offense_mult=home_offense_mult,
     )
 
-    # 6.5 is project_team_runs() per-team ceiling; flag for O/U customer-fire gating (no math change).
-    projection_cap_hit = (round(float(away_runs), 2) == 6.5) or (round(float(home_runs), 2) == 6.5)
+    # Dynamic per-team cap: flag when raw runs exceeded the applied ceiling (O/U customer-fire gating).
+    projection_cap_hit = (round(float(away_runs_raw), 2) > round(float(away_runs), 2)) or (
+        round(float(home_runs_raw), 2) > round(float(home_runs), 2)
+    )
 
     projected_total = round(away_runs + home_runs, 2)
     edge = round(projected_total - vegas_line, 2)
