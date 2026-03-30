@@ -725,7 +725,7 @@ OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitc
 OFFENSE_MULT_MAX = 1.10
 # Per-team run ceiling after all multipliers: base 6.5, raised modestly in weak-pitching / hitter-friendly contexts.
 DYNAMIC_TEAM_RUN_CAP_BASE = 6.5
-DYNAMIC_TEAM_RUN_CAP_MAX = 8.0
+DYNAMIC_TEAM_RUN_CAP_MAX = 8.5
 
 # Park Factors
 PARK_FACTORS = {
@@ -791,19 +791,19 @@ def _dynamic_team_run_cap(
     except (TypeError, ValueError):
         x = LEAGUE_ERA
     if x > 4.5:
-        cap += min(0.45, (x - 4.5) * 0.16)
+        cap += min(0.58, (x - 4.5) * 0.19)
     try:
         bp = float(opponent_bullpen_era)
     except (TypeError, ValueError):
         bp = LEAGUE_ERA
     if bp > 4.5:
-        cap += min(0.35, (bp - 4.5) * 0.12)
+        cap += min(0.45, (bp - 4.5) * 0.14)
     try:
         pk = float(park_runs_factor)
     except (TypeError, ValueError):
         pk = 1.0
     if pk > 1.0:
-        cap += min(0.35, (pk - 1.0) * 0.85)
+        cap += min(0.48, (pk - 1.0) * 0.98)
     try:
         w = float(opponent_starter_whip)
     except (TypeError, ValueError):
