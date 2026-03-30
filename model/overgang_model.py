@@ -717,8 +717,10 @@ VELO_DROP_NOISE_MPH = 0.50
 VELO_DROP_RUNS_PER_MPH = 0.012
 VELO_DROP_RUNS_MULT_MAX = 1.05
 VELO_DROP_CONF_LOSS_MPH = 1.05  # meaningful loss: slight confidence trim only (separate from xERA bumps)
-# O/U confidence: multiplicative penalty when League Avg / LowIP flags set (replaces prior hard cap at 0.79 on high conf)
-CONFIDENCE_DATA_QUALITY_DEGRADED_MULT = 0.93
+# O/U confidence: stacked multiplicative penalties for degraded inputs (applied in generate_prediction only)
+CONFIDENCE_LEAGUE_AVG_MULT = 0.85
+CONFIDENCE_LOW_IP_MULT = 0.90
+CONFIDENCE_MISSING_PUBLIC_MULT = 0.95
 LINEUP_IMPACT_CAP = 0.10     # cap (1 + lineup_impact) to ±10%; kept smaller than offense_mult
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
 OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
@@ -1227,12 +1229,12 @@ def generate_prediction(
     away_offense_mult=1.0,
     home_offense_mult=1.0,
     has_real_total=True,
-    data_quality_degraded=False,
     weather_runs_mult=1.0,
     away_pitcher_name="",
     home_pitcher_name="",
     game_datetime=None,
     schedule_game_date=None,
+    public_betting_missing=False,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -1243,6 +1245,7 @@ def generate_prediction(
     away_pitcher_name / home_pitcher_name / game_datetime / schedule_game_date: optional inputs
       for days-rest v1 starter xERA bump (see core.starter_fatigue); schedule_game_date should
       be statsapi schedule game_date (YYYY-MM-DD) when available; defaults leave behavior unchanged.
+    public_betting_missing: True when no public-betting row exists for this game (confidence penalty only).
 
     Returns dict with: projected_total, away_runs, home_runs, edge, pick, prediction (str),
     confidence, total_open, total_current, recommended_units, skip (bool).
@@ -1373,9 +1376,31 @@ def generate_prediction(
     else:
         reliever_mult = 1.0 + reliever_factor * 0.05
 
-    data_quality_factor = _velo_trust * reliever_mult
-    if data_quality_degraded:
-        data_quality_factor *= CONFIDENCE_DATA_QUALITY_DEGRADED_MULT
+    league_avg_penalty = (
+        CONFIDENCE_LEAGUE_AVG_MULT
+        if (
+            "League Avg" in (away_pitcher_name or "")
+            or "League Avg" in (home_pitcher_name or "")
+        )
+        else 1.0
+    )
+    low_ip_penalty = (
+        CONFIDENCE_LOW_IP_MULT
+        if (
+            bool(safe_get(away_stats, "LowIP", False))
+            or bool(safe_get(home_stats, "LowIP", False))
+        )
+        else 1.0
+    )
+    missing_public_penalty = CONFIDENCE_MISSING_PUBLIC_MULT if public_betting_missing else 1.0
+
+    data_quality_factor = (
+        _velo_trust
+        * reliever_mult
+        * league_avg_penalty
+        * low_ip_penalty
+        * missing_public_penalty
+    )
 
     market_trust_factor = 1.0
 
@@ -2922,6 +2947,7 @@ def run_predictions():
             print(f"🧩 Game Key: {game_key}")
             print(f"📊 Public Data Found: {game_key in public_betting_data}")
 
+            public_betting_missing = game_key not in public_betting_data
             public = public_betting_data.get(game_key)
             if public is None:
                 print(f"⚠️ No public betting data for: {game_key}")
@@ -2977,12 +3003,6 @@ def run_predictions():
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
-            data_quality_degraded = (
-                "League Avg" in (away_pitcher or "")
-                or "League Avg" in (home_pitcher or "")
-                or bool(safe_get(away_stats, "LowIP", False))
-                or bool(safe_get(home_stats, "LowIP", False))
-            )
             proj = generate_prediction(
                 away_stats=away_stats,
                 home_stats=home_stats,
@@ -2998,12 +3018,12 @@ def run_predictions():
                 away_offense_mult=away_offense_mult,
                 home_offense_mult=home_offense_mult,
                 has_real_total=bool(odds_info.get("_has_real_total", False)),
-                data_quality_degraded=data_quality_degraded,
                 weather_runs_mult=weather_runs_mult,
                 away_pitcher_name=away_pitcher,
                 home_pitcher_name=home_pitcher,
                 game_datetime=safe_get(game, "game_datetime", ""),
                 schedule_game_date=safe_get(game, "game_date", ""),
+                public_betting_missing=public_betting_missing,
             )
 
             if proj.get("skip"):
