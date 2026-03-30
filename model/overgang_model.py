@@ -1323,9 +1323,10 @@ def generate_prediction(
         offense_mult=home_offense_mult,
     )
 
-    # Dynamic per-team cap: flag when raw runs exceeded the applied ceiling (O/U customer-fire gating).
-    projection_cap_hit = (round(float(away_runs_raw), 2) > round(float(away_runs), 2)) or (
-        round(float(home_runs_raw), 2) > round(float(home_runs), 2)
+    # Dynamic per-team cap: flag when raw projection exceeded capped projection (O/U customer-fire gating).
+    # Use raw float inequality, not round-then-compare: Cap_Diff is raw − capped; rounded comparisons can disagree.
+    projection_cap_hit = (float(away_runs_raw) > float(away_runs)) or (
+        float(home_runs_raw) > float(home_runs)
     )
 
     projected_total = round(away_runs + home_runs, 2)
