@@ -56,6 +56,10 @@ def main() -> None:
         print(f"Error: Missing required columns: {missing}", file=sys.stderr)
         sys.exit(1)
 
+    # read_csv often infers CLV/CLV_Result as float64 when empty; cast before string assignment (loop below).
+    df["CLV"] = df["CLV"].astype(object)
+    df["CLV_Result"] = df["CLV_Result"].astype(object)
+
     # Coerce to numeric; non-numeric become NaN
     df["Bet_Line"] = pd.to_numeric(df["Bet_Line"], errors="coerce")
     df["Closing_Line"] = pd.to_numeric(df["Closing_Line"], errors="coerce")
@@ -70,10 +74,6 @@ def main() -> None:
             df.at[i, "CLV"] = clv_val if not pd.isna(clv_val) else ""
             df.at[i, "CLV_Result"] = clv_result(clv_val)
             updated += 1
-
-    for col in ("Closing_Line", "CLV", "CLV_Result"):
-        if col in df.columns:
-            df[col] = df[col].astype(object)
 
     try:
         df.to_csv(csv_path, index=False)
