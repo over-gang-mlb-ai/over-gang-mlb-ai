@@ -662,6 +662,22 @@ class DataManager:
                 mid = int(mid)
             except (TypeError, ValueError):
                 continue
+            if DataManager.normalize_name(str(name).strip()) == "logan gilbert":
+                join_ip_prev_raw = float(r["IP_prev"]) if pd.notna(r.get("IP_prev")) else None
+                nk_cur = _norm_key(r.get("Name_cur"))
+                in_prev_lookup = bool(nk_cur) and nk_cur in prev_lookup
+                if has_cur and has_prev:
+                    blend_branch = "both"
+                elif has_cur:
+                    blend_branch = "cur_only"
+                else:
+                    blend_branch = "prev_only"
+                print(
+                    "[TEMP DEBUG] Gilbert blend row:",
+                    f"mlb_id={mid} name={name!r} ip_cur={ip_cur!r} join_IP_prev_raw={join_ip_prev_raw!r} "
+                    f"ip_prev_after_fallback={ip_prev!r} norm_name_in_prev_lookup={in_prev_lookup} "
+                    f"branch={blend_branch!r} low_ip={low_ip!r}",
+                )
             out_rows.append(
                 {"mlb_id": mid, "Name": name, "xERA": x_bl, "WHIP": whip_bl, "IP": ip_final, "LowIP": low_ip}
             )
@@ -744,6 +760,10 @@ class DataManager:
             out["Name"] = out["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
             out = out.drop_duplicates(subset="Name", keep="first")
             refresh_n = len(out)
+            print(
+                "[TEMP DEBUG] logan gilbert in out['Name']:",
+                bool("logan gilbert" in set(out["Name"].astype(str).tolist())),
+            )
 
             # Load existing canonical base (broad universe) before row-count guard and merge.
             existing_canon = pd.DataFrame(columns=["Name", "xERA", "WHIP", "IP", "LowIP"])
@@ -792,6 +812,9 @@ class DataManager:
                 final_out = out.copy()
             final_out = final_out.drop_duplicates(subset="Name", keep="first")
             final_n = len(final_out)
+            _gmask = final_out["Name"].astype(str) == "logan gilbert"
+            if _gmask.any():
+                print("[TEMP DEBUG] final_out row logan gilbert:", final_out.loc[_gmask].iloc[0].to_dict())
 
             narrow_refresh = existing_n > 0 and refresh_n < existing_n
             print(
