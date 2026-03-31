@@ -215,6 +215,9 @@ MIN_ML_WIN_PROB_FOR_FIRE = 0.55
 # Customer Telegram only (CSV/export unchanged): min confidence to send a message.
 TELEGRAM_OU_MIN_CONFIDENCE_PCT = 75.0
 TELEGRAM_ML_MIN_CONFIDENCE_PCT = 70.0
+# ML calibration: global shrink toward 50%, then hard ceiling on displayed/fired/Kelly probs.
+ml_compression_k = 0.75
+max_ml_cap = 0.80
 DATA_DIR = "data"
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
@@ -3090,7 +3093,7 @@ def run_predictions():
 
             home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
 
-            # Shrink toward 50% so ml_quality_penalty < 1 reduces confidence/Kelly/ML_Fired without breaking sum-to-1.
+            # Step 1: global compression → Step 2: quality penalty → Step 3: hard cap (max_ml_cap).
             ml_quality_penalty = 1.0
             if "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
                 ml_quality_penalty *= 0.85
@@ -3098,8 +3101,12 @@ def run_predictions():
             _ml_home_low_ip = bool(safe_get(home_stats, "LowIP", False))
             if _ml_away_low_ip or _ml_home_low_ip:
                 ml_quality_penalty *= 0.90
-            adjusted_home_win_prob = 0.5 + (home_win_prob - 0.5) * ml_quality_penalty
-            adjusted_away_win_prob = 0.5 + (away_win_prob - 0.5) * ml_quality_penalty
+            compressed_home = 0.5 + (home_win_prob - 0.5) * ml_compression_k
+            compressed_away = 0.5 + (away_win_prob - 0.5) * ml_compression_k
+            quality_home = 0.5 + (compressed_home - 0.5) * ml_quality_penalty
+            quality_away = 0.5 + (compressed_away - 0.5) * ml_quality_penalty
+            adjusted_home_win_prob = min(max_ml_cap, quality_home)
+            adjusted_away_win_prob = min(max_ml_cap, quality_away)
 
             try:
                 odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
