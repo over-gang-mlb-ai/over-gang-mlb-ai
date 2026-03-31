@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+from datetime import date, datetime
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,35 @@ def _tally_today(rows: List[Dict[str, str]]) -> Tuple[int, int, int, int, int, i
 
 def _fmt_wlp(w: int, l: int, p: int) -> str:
     return f"{w}-{l}-{p}"
+
+
+_SEP = "━━━━━━━━━━━━━━━━━━━━━"
+
+
+def _win_rate_pct(wins: int, losses: int) -> float:
+    d = wins + losses
+    if d == 0:
+        return 0.0
+    return 100.0 * wins / d
+
+
+def _parse_wlp_str(s: str) -> Tuple[int, int, int]:
+    try:
+        parts = s.strip().split("-")
+        if len(parts) != 3:
+            return 0, 0, 0
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except (ValueError, TypeError):
+        return 0, 0, 0
+
+
+def _header_date(archive_path: Path) -> str:
+    m = re.match(r"predictions_(\d{8})_\d{4}\.csv", archive_path.name, re.IGNORECASE)
+    if m:
+        dt = datetime.strptime(m.group(1), "%Y%m%d")
+        return f"{dt.strftime('%B')} {dt.day}, {dt.year}"
+    d = date.today()
+    return f"{d.strftime('%B')} {d.day}, {d.year}"
 
 
 def _parse_season_simple_lines(text: str) -> Optional[Tuple[str, str, str]]:
@@ -215,27 +245,50 @@ def _telegram_send_plain(text: str) -> bool:
 
 
 def _build_message(
-    today_ou: str,
-    today_ml: str,
-    today_cb: str,
-    season_ou: str,
-    season_ml: str,
-    season_cb: str,
+    archive_path: Path,
+    ow: int,
+    ol: int,
+    op: int,
+    ml_w: int,
+    ml_l: int,
+    ml_p: int,
+    dw: int,
+    dl: int,
+    dp: int,
+    sow: int,
+    sol: int,
+    sop: int,
+    smw: int,
+    sml: int,
+    smp: int,
+    sdw: int,
+    sdl: int,
+    sdp: int,
 ) -> str:
+    owr = _win_rate_pct(ow, ol)
+    mwr = _win_rate_pct(ml_w, ml_l)
+    dwr = _win_rate_pct(dw, dl)
+    sowr = _win_rate_pct(sow, sol)
+    smwr = _win_rate_pct(smw, sml)
+    sdwr = _win_rate_pct(sdw, sdl)
+    dline = _header_date(archive_path)
+    sep = _SEP
     return (
-        "📊 OVER GANG DAILY RESULTS\n"
+        "⚾ OVER GANG DAILY REPORT\n"
+        f"{sep}\n"
+        f"📅 {dline}\n"
         "\n"
-        "Today:\n"
-        f"O/U: {today_ou}\n"
-        f"ML: {today_ml}\n"
-        f"Combined: {today_cb}\n"
-        "\n"
-        "Season:\n"
-        f"O/U: {season_ou}\n"
-        f"ML: {season_ml}\n"
-        f"Combined: {season_cb}\n"
-        "\n"
-        "📎 Full Report Attached"
+        "TODAY\n"
+        f"🎯 O/U:   {ow}W · {ol}L · {op}P │ {owr:.1f}%\n"
+        f"🏆 ML:    {ml_w}W · {ml_l}L · {ml_p}P │ {mwr:.1f}%\n"
+        f"📊 Day:   {dw}W · {dl}L · {dp}P │ {dwr:.1f}%\n"
+        f"{sep}\n"
+        "SEASON YTD 📈\n"
+        f"🎯 O/U:   {sow}W · {sol}L · {sop}P │ {sowr:.1f}%\n"
+        f"🏆 ML:    {smw}W · {sml}L · {smp}P │ {smwr:.1f}%\n"
+        f"📊 Total: {sdw}W · {sdl}L · {sdp}P │ {sdwr:.1f}%\n"
+        f"{sep}\n"
+        "📎 Full card attached"
     )
 
 
@@ -271,9 +324,6 @@ def main() -> int:
         return 1
 
     ou_w, ou_l, ou_p, ml_w, ml_l, ml_p, c_w, c_l, c_p = _tally_today(rows)
-    today_ou = _fmt_wlp(ou_w, ou_l, ou_p)
-    today_ml = _fmt_wlp(ml_w, ml_l, ml_p)
-    today_cb = _fmt_wlp(c_w, c_l, c_p)
 
     try:
         season_ou, season_ml, season_cb = _load_season_triples(season_path)
@@ -281,7 +331,31 @@ def main() -> int:
         print(f"{e}", file=sys.stderr)
         return 1
 
-    msg = _build_message(today_ou, today_ml, today_cb, season_ou, season_ml, season_cb)
+    sow, sol, sop = _parse_wlp_str(season_ou)
+    smw, sml, smp = _parse_wlp_str(season_ml)
+    sdw, sdl, sdp = _parse_wlp_str(season_cb)
+
+    msg = _build_message(
+        arch,
+        ou_w,
+        ou_l,
+        ou_p,
+        ml_w,
+        ml_l,
+        ml_p,
+        c_w,
+        c_l,
+        c_p,
+        sow,
+        sol,
+        sop,
+        smw,
+        sml,
+        smp,
+        sdw,
+        sdl,
+        sdp,
+    )
     if _telegram_send_plain(msg):
         print("Telegram summary sent.")
         return 0
