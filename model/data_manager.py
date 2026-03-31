@@ -609,11 +609,12 @@ class DataManager:
             wc = r.get("WHIP_cur")
             wp = r.get("WHIP_prev")
 
-            if has_cur and not has_prev:
-                cur_nm = str(r["Name_cur"]).strip() if pd.notna(r.get("Name_cur")) else ""
-                norm = DataManager.normalize_name(cur_nm)
-                if norm and norm in prev_by_norm:
-                    prow = prev_by_norm[norm]
+            if ip_cur is not None and ip_prev is None:
+                norm_name = DataManager.normalize_name(
+                    str(r["Name_cur"]).strip() if pd.notna(r.get("Name_cur")) else ""
+                )
+                if norm_name and norm_name in prev_by_norm:
+                    prow = prev_by_norm[norm_name]
                     if pd.notna(prow.get("IP")):
                         try:
                             ip_prev = float(prow["IP"])
