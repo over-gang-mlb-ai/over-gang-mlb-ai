@@ -758,6 +758,36 @@ class DataManager:
                 savant_prev["player_id"] = pd.Series(dtype=int)
                 savant_prev["xERA"] = pd.Series(dtype=float)
 
+            # StatsAPI prior-year responses can be truncated; supplement missing IDs from Savant so
+            # blend/join see full prior-season coverage (ERA/WHIP/IP schema matches _mlb_pitching_stats_by_id).
+            if len(mlb_prev) < 200 and not savant_prev.empty:
+                print("[Pitcher update] WARNING: MLB prior-year data incomplete, using Savant fallback")
+                sp = savant_prev.drop_duplicates(subset=["player_id"], keep="first")
+                mlb_ids_known = set()
+                if not mlb_prev.empty and "mlb_id" in mlb_prev.columns:
+                    mlb_ids_known = set(
+                        pd.to_numeric(mlb_prev["mlb_id"], errors="coerce").dropna().astype(int).tolist()
+                    )
+                pid_series = pd.to_numeric(sp["player_id"], errors="coerce")
+                extra = sp.loc[~pid_series.astype("Int64").isin(list(mlb_ids_known))].copy()
+                if not extra.empty:
+                    mlb_ids = pd.to_numeric(extra["player_id"], errors="coerce")
+                    extra_rows = pd.DataFrame(
+                        {
+                            "mlb_id": mlb_ids,
+                            "Name": "Savant",
+                            "ERA": pd.to_numeric(extra["xERA"], errors="coerce").fillna(4.25),
+                            "WHIP": 1.30,
+                            "IP": 50.0,
+                        }
+                    )
+                    extra_rows = extra_rows.dropna(subset=["mlb_id"])
+                    extra_rows["mlb_id"] = extra_rows["mlb_id"].astype(int)
+                    if mlb_prev.empty:
+                        mlb_prev = extra_rows
+                    else:
+                        mlb_prev = pd.concat([mlb_prev, extra_rows], ignore_index=True)
+
             cur_joined = DataManager._mlb_savant_join(mlb_cur, savant_cur)
             prev_joined = DataManager._mlb_savant_join(mlb_prev, savant_prev)
             blended = DataManager._blend_cur_prev_season_pitchers(cur_joined, prev_joined, min_ip)
