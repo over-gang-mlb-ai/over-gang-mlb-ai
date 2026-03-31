@@ -539,14 +539,26 @@ class DataManager:
         Final IP is current-season IP when a current row exists, else prior IP. LowIP is veteran-aware when both seasons exist (see low_ip assignments below).
         """
         cols = ["mlb_id", "Name", "xERA", "WHIP", "IP", "LowIP"]
+
+        def _low_ip_veteran(ip_cur, ip_prev, ip_final: float) -> bool:
+            if ip_cur is not None and ip_prev is not None:
+                return bool((ip_cur < float(min_ip)) and (ip_prev < 50.0))
+            if ip_cur is not None:
+                return bool(ip_cur < float(min_ip))
+            if ip_prev is not None:
+                return bool(ip_prev < 50.0)
+            return bool(ip_final < float(min_ip))
+
         if cur.empty and prev.empty:
             return pd.DataFrame(columns=cols)
         if cur.empty:
             o = prev.copy()
-            o["LowIP"] = o["IP"] < float(min_ip)
+            # Prior-only frame: same as _low_ip_veteran when ip_cur is None (prev-only branch).
+            o["LowIP"] = o["IP"] < 50.0
             return o[cols]
         if prev.empty:
             o = cur.copy()
+            # Current-only frame: same as _low_ip_veteran when ip_prev is None and ip_cur set.
             o["LowIP"] = o["IP"] < float(min_ip)
             return o[cols]
 
@@ -589,12 +601,7 @@ class DataManager:
                 x_bl = w26 * xc_eff + (1.0 - w26) * xp_eff
                 whip_bl = w26 * wc_eff + (1.0 - w26) * wp_eff
                 ip_final = ip_cur if ip_cur is not None else 0.0
-                if ip_cur is not None and ip_prev is not None:
-                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
-                elif ip_cur is not None:
-                    low_ip = (ip_cur < float(min_ip))
-                else:
-                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
+                low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = (
                     str(r["Name_cur"]).strip()
                     if pd.notna(r.get("Name_cur")) and str(r.get("Name_cur")).strip()
@@ -604,23 +611,13 @@ class DataManager:
                 x_bl = _nz(xc, xp, 4.25)
                 whip_bl = _nz(wc, wp, 1.30)
                 ip_final = ip_cur if ip_cur is not None else 0.0
-                if ip_cur is not None and ip_prev is not None:
-                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
-                elif ip_cur is not None:
-                    low_ip = (ip_cur < float(min_ip))
-                else:
-                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
+                low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = str(r["Name_cur"]).strip()
             else:
                 x_bl = _nz(xp, xc, 4.25)
                 whip_bl = _nz(wp, wc, 1.30)
                 ip_final = ip_prev if ip_prev is not None else 0.0
-                if ip_cur is not None and ip_prev is not None:
-                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
-                elif ip_cur is not None:
-                    low_ip = (ip_cur < float(min_ip))
-                else:
-                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
+                low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = str(r["Name_prev"]).strip()
 
             mid = r["mlb_id"]
