@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -17,7 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Project root for optional Telegram config import
+# Project root (Telegram fallback reads model/overgang_model.py as text; no import)
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -84,7 +85,8 @@ def _parse_season_simple_lines(text: str) -> Optional[Tuple[str, str, str]]:
     """Parse lines like 'O/U: 5-3-1', 'ML: 4-2-0', 'Combined: 9-5-1'."""
     ou = ml = cb = None
     pat = re.compile(
-        r"^(?i)(O/U|ML|Combined)\s*:\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*$"
+        r"^(O/U|ML|Combined)\s*:\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*$",
+        re.IGNORECASE,
     )
     for line in text.splitlines():
         m = pat.match(line.strip())
@@ -158,16 +160,32 @@ def _load_season_triples(path: Path) -> Tuple[str, str, str]:
     )
 
 
-def _telegram_send_plain(text: str) -> bool:
-    sys.path.insert(0, str(ROOT))
+def _load_telegram_credentials() -> Tuple[str, str]:
+    """Env first; if either missing, parse assignments from model/overgang_model.py (no import)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if token and chat:
+        return token, chat
+    path = ROOT / "model" / "overgang_model.py"
+    if not path.is_file():
+        return token, chat
     try:
-        from model.overgang_model import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-    except Exception as e:
-        print(f"Failed to load Telegram config: {e}", file=sys.stderr)
-        return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return token, chat
+    if not token:
+        m = re.search(r"^\s*TELEGRAM_BOT_TOKEN\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
+        if m:
+            token = m.group(1).strip()
+    if not chat:
+        m = re.search(r"^\s*TELEGRAM_CHAT_ID\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
+        if m:
+            chat = m.group(1).strip()
+    return token, chat
 
-    token = (TELEGRAM_BOT_TOKEN or "").strip()
-    chat = (TELEGRAM_CHAT_ID or "").strip()
+
+def _telegram_send_plain(text: str) -> bool:
+    token, chat = _load_telegram_credentials()
     if not token or not chat:
         print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing.", file=sys.stderr)
         return False
