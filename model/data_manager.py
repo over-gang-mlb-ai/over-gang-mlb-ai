@@ -566,6 +566,24 @@ class DataManager:
         prev = prev.sort_values("IP", ascending=False).drop_duplicates(subset=["mlb_id"], keep="first")
         joined = cur.merge(prev, on="mlb_id", how="outer", suffixes=("_cur", "_prev"))
 
+        prev_by_norm = {}
+        if not prev.empty:
+            for _, prow in prev.iterrows():
+                nn = DataManager.normalize_name(str(prow.get("Name", "")).strip())
+                if not nn:
+                    continue
+                if nn not in prev_by_norm:
+                    prev_by_norm[nn] = prow
+                else:
+                    try:
+                        old = prev_by_norm[nn]
+                        oip = float(old["IP"]) if pd.notna(old.get("IP")) else -1.0
+                        nip = float(prow["IP"]) if pd.notna(prow.get("IP")) else -1.0
+                        if nip > oip:
+                            prev_by_norm[nn] = prow
+                    except (TypeError, ValueError):
+                        pass
+
         def _nz(a, b, default: float) -> float:
             if a is not None and pd.notna(a):
                 try:
@@ -590,6 +608,20 @@ class DataManager:
             xp = r.get("xERA_prev")
             wc = r.get("WHIP_cur")
             wp = r.get("WHIP_prev")
+
+            if has_cur and not has_prev:
+                cur_nm = str(r["Name_cur"]).strip() if pd.notna(r.get("Name_cur")) else ""
+                norm = DataManager.normalize_name(cur_nm)
+                if norm and norm in prev_by_norm:
+                    prow = prev_by_norm[norm]
+                    if pd.notna(prow.get("IP")):
+                        try:
+                            ip_prev = float(prow["IP"])
+                            xp = prow.get("xERA")
+                            wp = prow.get("WHIP")
+                        except (TypeError, ValueError):
+                            pass
+            has_prev = ip_prev is not None
 
             if has_cur and has_prev:
                 xc_eff = _nz(xc, xp, 4.25)
