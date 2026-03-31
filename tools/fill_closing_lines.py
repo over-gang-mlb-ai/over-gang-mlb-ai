@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fills Closing_Line in an Over Gang predictions CSV using SportsDataIO odds for the same date.
+Fills Closing_Line in an Over Gang predictions CSV using The Odds API (same source as run_predictions).
 Does not compute CLV; use update_clv.py after filling closing lines if needed.
 """
 import argparse
@@ -16,7 +16,7 @@ REQUIRED_COLUMNS = ["Game", "Bet_Line", "Closing_Line"]
 
 
 def _ensure_core_on_path() -> None:
-    """Ensure project root is on sys.path so core.sportsdataio can be imported."""
+    """Ensure project root is on sys.path so core.* modules can be imported."""
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -51,7 +51,7 @@ def game_to_odds_key(game_str: str) -> Optional[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fill Closing_Line in a predictions CSV using SportsDataIO odds."
+        description="Fill Closing_Line in a predictions CSV using The Odds API (core.odds_api)."
     )
     parser.add_argument("csv_path", help="Path to the predictions CSV file")
     args = parser.parse_args()
@@ -81,10 +81,10 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        from core.sportsdataio import fetch_mlb_odds_by_date
-        odds_map = fetch_mlb_odds_by_date(target_date)
+        from core.odds_api import fetch_mlb_odds
+        odds_map = fetch_mlb_odds(target_date=target_date)
     except Exception as e:
-        print(f"Error fetching SportsDataIO odds: {e}", file=sys.stderr)
+        print(f"Error fetching Odds API odds: {e}", file=sys.stderr)
         sys.exit(1)
 
     filled = 0
