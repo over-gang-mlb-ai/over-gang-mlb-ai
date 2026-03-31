@@ -536,7 +536,7 @@ class DataManager:
 
         w26 = min(max(ip_current, 0), blend_ip_cap) / blend_ip_cap
         blended xERA = w26 * xERA_cur + (1 - w26) * xERA_prev (with coalesce when one side is missing).
-        Final IP is current-season IP when a current row exists, else prior IP. LowIP uses current IP when present.
+        Final IP is current-season IP when a current row exists, else prior IP. LowIP is veteran-aware when both seasons exist (see low_ip assignments below).
         """
         cols = ["mlb_id", "Name", "xERA", "WHIP", "IP", "LowIP"]
         if cur.empty and prev.empty:
@@ -589,7 +589,12 @@ class DataManager:
                 x_bl = w26 * xc_eff + (1.0 - w26) * xp_eff
                 whip_bl = w26 * wc_eff + (1.0 - w26) * wp_eff
                 ip_final = ip_cur if ip_cur is not None else 0.0
-                low_ip = ip_final < float(min_ip)
+                if ip_cur is not None and ip_prev is not None:
+                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
+                elif ip_cur is not None:
+                    low_ip = (ip_cur < float(min_ip))
+                else:
+                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
                 name = (
                     str(r["Name_cur"]).strip()
                     if pd.notna(r.get("Name_cur")) and str(r.get("Name_cur")).strip()
@@ -599,13 +604,23 @@ class DataManager:
                 x_bl = _nz(xc, xp, 4.25)
                 whip_bl = _nz(wc, wp, 1.30)
                 ip_final = ip_cur if ip_cur is not None else 0.0
-                low_ip = ip_final < float(min_ip)
+                if ip_cur is not None and ip_prev is not None:
+                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
+                elif ip_cur is not None:
+                    low_ip = (ip_cur < float(min_ip))
+                else:
+                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
                 name = str(r["Name_cur"]).strip()
             else:
                 x_bl = _nz(xp, xc, 4.25)
                 whip_bl = _nz(wp, wc, 1.30)
                 ip_final = ip_prev if ip_prev is not None else 0.0
-                low_ip = ip_final < float(min_ip)
+                if ip_cur is not None and ip_prev is not None:
+                    low_ip = (ip_cur < float(min_ip)) and (ip_prev < 50.0)
+                elif ip_cur is not None:
+                    low_ip = (ip_cur < float(min_ip))
+                else:
+                    low_ip = (ip_prev < 50.0) if ip_prev is not None else (ip_final < float(min_ip))
                 name = str(r["Name_prev"]).strip()
 
             mid = r["mlb_id"]
