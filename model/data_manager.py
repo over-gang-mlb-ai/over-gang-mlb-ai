@@ -356,6 +356,11 @@ class DataManager:
                 continue
             player = sp.get("player") or {}
             st = sp.get("stat") or {}
+            try:
+                if player.get("id") is not None and int(player.get("id")) == 669302:
+                    print("[DEBUG RAW GILBERT SPLIT FOUND]", sp)
+            except (TypeError, ValueError):
+                pass
             pid = player.get("id")
             name_full = (player.get("fullName") or "").strip()
             if pid is None:
@@ -397,6 +402,8 @@ class DataManager:
                         ip = float(ip_raw)
                     except Exception:
                         pass
+            if pid == 669302:
+                print("[DEBUG PARSED GILBERT]", era, whip, ip)
             if any(v is not None for v in (era, whip, ip)):
                 rows.append({
                     "mlb_id": pid,
@@ -430,6 +437,11 @@ class DataManager:
                         continue
                     player = sp.get("player") or {}
                     st = sp.get("stat") or {}
+                    try:
+                        if player.get("id") is not None and int(player.get("id")) == 669302:
+                            print("[DEBUG RAW GILBERT SPLIT FOUND]", sp)
+                    except (TypeError, ValueError):
+                        pass
                     pid = player.get("id")
                     name_full = (player.get("fullName") or "").strip()
                     if pid is None:
@@ -471,6 +483,8 @@ class DataManager:
                                 ip = float(ip_raw)
                             except Exception:
                                 pass
+                    if pid == 669302:
+                        print("[DEBUG PARSED GILBERT]", era, whip, ip)
                     if any(v is not None for v in (era, whip, ip)):
                         rows.append({
                             "mlb_id": pid,
@@ -491,6 +505,9 @@ class DataManager:
                 "[Pitcher update] Prior-year regular-season fallback accepted "
                 f"({len(rows)} pitchers with ERA/WHIP/IP; preseason — not gated by MIN_PITCHER_SAVE_COUNT={MIN_PITCHER_SAVE_COUNT})."
             )
+        print("[DEBUG] total_raw_splits:", total_raw_splits)
+        print("[DEBUG] total_rows_kept:", len(rows))
+        print("[DEBUG] gilbert_in_rows:", any(r["mlb_id"] == 669302 for r in rows))
         rows_after_filter = len(rows)
         print(f"[Pitcher update] Raw splits returned: {total_raw_splits}, Rows with ERA/WHIP/IP: {rows_after_filter}")
 
