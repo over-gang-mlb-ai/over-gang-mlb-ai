@@ -3094,7 +3094,9 @@ def run_predictions():
             ml_quality_penalty = 1.0
             if "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
                 ml_quality_penalty *= 0.85
-            if (away_stats and away_stats.get("LowIP")) or (home_stats and home_stats.get("LowIP")):
+            _ml_away_low_ip = bool(safe_get(away_stats, "LowIP", False))
+            _ml_home_low_ip = bool(safe_get(home_stats, "LowIP", False))
+            if _ml_away_low_ip or _ml_home_low_ip:
                 ml_quality_penalty *= 0.90
             adjusted_home_win_prob = 0.5 + (home_win_prob - 0.5) * ml_quality_penalty
             adjusted_away_win_prob = 0.5 + (away_win_prob - 0.5) * ml_quality_penalty
