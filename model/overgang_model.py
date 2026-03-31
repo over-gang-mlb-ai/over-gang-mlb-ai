@@ -3090,6 +3090,15 @@ def run_predictions():
 
             home_win_prob, away_win_prob = calculate_team_win_probability(home_ml_data, away_ml_data)
 
+            # Shrink toward 50% so ml_quality_penalty < 1 reduces confidence/Kelly/ML_Fired without breaking sum-to-1.
+            ml_quality_penalty = 1.0
+            if "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or ""):
+                ml_quality_penalty *= 0.85
+            if (away_stats and away_stats.get("LowIP")) or (home_stats and home_stats.get("LowIP")):
+                ml_quality_penalty *= 0.90
+            adjusted_home_win_prob = 0.5 + (home_win_prob - 0.5) * ml_quality_penalty
+            adjusted_away_win_prob = 0.5 + (away_win_prob - 0.5) * ml_quality_penalty
+
             try:
                 odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
                 odds_value = float(odds_str) if isinstance(odds_str, (int, float)) else float(str(odds_str).strip())
@@ -3102,24 +3111,24 @@ def run_predictions():
 
             implied_away = 1 - implied_home
 
-            home_kelly = calculate_kelly_units(home_win_prob, implied_home)
-            away_kelly = calculate_kelly_units(away_win_prob, implied_away)
+            home_kelly = calculate_kelly_units(adjusted_home_win_prob, implied_home)
+            away_kelly = calculate_kelly_units(adjusted_away_win_prob, implied_away)
 
-            if home_win_prob > away_win_prob:
+            if adjusted_home_win_prob > adjusted_away_win_prob:
                 ml_pick = f"{home_team.upper()} ML"
-                ml_conf = f"{round(home_win_prob * 100)}%"
-                ml_value = f"{round((home_win_prob - implied_home) * 100)}%"
+                ml_conf = f"{round(adjusted_home_win_prob * 100)}%"
+                ml_value = f"{round((adjusted_home_win_prob - implied_home) * 100)}%"
                 ml_kelly = f"{round(home_kelly, 2)}u"
             else:
                 ml_pick = f"{away_team.upper()} ML"
-                ml_conf = f"{round(away_win_prob * 100)}%"
-                ml_value = f"{round((away_win_prob - implied_away) * 100)}%"
+                ml_conf = f"{round(adjusted_away_win_prob * 100)}%"
+                ml_value = f"{round((adjusted_away_win_prob - implied_away) * 100)}%"
                 ml_kelly = f"{round(away_kelly, 2)}u"
 
             _league_avg_pitcher = (
                 "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")
             )
-            ml_win_max = max(home_win_prob, away_win_prob)
+            ml_win_max = max(adjusted_home_win_prob, adjusted_away_win_prob)
             # Fire on probability only; League Avg probable = degraded tag, not a hard ML block.
             ml_fired = bool(ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
             ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
@@ -3136,6 +3145,7 @@ def run_predictions():
                 "ML_Fired": ml_fired,
                 "No_Fire_ML_Reason": no_fire_ml,
                 "ML_Quality_Flag": ml_quality_flag,
+                "ML_Quality_Factor": ml_quality_penalty,
             })
 
             if isinstance(public, dict):
@@ -3251,7 +3261,7 @@ def run_predictions():
         "Line_Status", "Fallback_Used", "Data_Quality_Flag",
         "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
         "OU_Result", "ML_Result",
-        "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag",
+        "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag", "ML_Quality_Factor",
         "OU_Confidence_Bucket", "ML_Confidence_Bucket",
     ]
     eligible_export = [
