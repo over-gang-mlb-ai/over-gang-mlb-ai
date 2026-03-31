@@ -82,7 +82,7 @@ def _fmt_wlp(w: int, l: int, p: int) -> str:
     return f"{w}-{l}-{p}"
 
 
-_SEP = "━━━━━━━━━━━━━━━━━━━━━"
+_SEP = "━━━━━━━━━━━━━━"
 
 
 def _win_rate_pct(wins: int, losses: int) -> float:
@@ -281,12 +281,14 @@ def _build_message(
         "TODAY\n"
         f"🎯 O/U:   {ow}W · {ol}L · {op}P │ {owr:.1f}%\n"
         f"🏆 ML:    {ml_w}W · {ml_l}L · {ml_p}P │ {mwr:.1f}%\n"
-        f"📊 Day:   {dw}W · {dl}L · {dp}P │ {dwr:.1f}%\n"
+        f"📊 Total: {dw}W · {dl}L · {dp}P │ {dwr:.1f}%\n"
+        "\n"
         f"{sep}\n"
         "SEASON YTD 📈\n"
         f"🎯 O/U:   {sow}W · {sol}L · {sop}P │ {sowr:.1f}%\n"
         f"🏆 ML:    {smw}W · {sml}L · {smp}P │ {smwr:.1f}%\n"
         f"📊 Total: {sdw}W · {sdl}L · {sdp}P │ {sdwr:.1f}%\n"
+        "\n"
         f"{sep}\n"
         "📎 Full card attached"
     )
