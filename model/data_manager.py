@@ -566,21 +566,27 @@ class DataManager:
         prev = prev.sort_values("IP", ascending=False).drop_duplicates(subset=["mlb_id"], keep="first")
         joined = cur.merge(prev, on="mlb_id", how="outer", suffixes=("_cur", "_prev"))
 
-        prev_by_norm = {}
+        def _norm_key(name) -> str:
+            """Same key as norm_name in update_pitcher_stats: strip + DataManager.normalize_name (lower, punctuation stripped)."""
+            if name is None or (isinstance(name, float) and pd.isna(name)):
+                return ""
+            return DataManager.normalize_name(str(name).strip())
+
+        prev_lookup = {}
         if not prev.empty:
             for _, prow in prev.iterrows():
-                nn = DataManager.normalize_name(str(prow.get("Name", "")).strip())
-                if not nn:
+                key = _norm_key(prow.get("Name"))
+                if not key:
                     continue
-                if nn not in prev_by_norm:
-                    prev_by_norm[nn] = prow
+                if key not in prev_lookup:
+                    prev_lookup[key] = prow
                 else:
                     try:
-                        old = prev_by_norm[nn]
+                        old = prev_lookup[key]
                         oip = float(old["IP"]) if pd.notna(old.get("IP")) else -1.0
                         nip = float(prow["IP"]) if pd.notna(prow.get("IP")) else -1.0
                         if nip > oip:
-                            prev_by_norm[nn] = prow
+                            prev_lookup[key] = prow
                     except (TypeError, ValueError):
                         pass
 
@@ -610,16 +616,14 @@ class DataManager:
             wp = r.get("WHIP_prev")
 
             if ip_cur is not None and ip_prev is None:
-                norm_name = DataManager.normalize_name(
-                    str(r["Name_cur"]).strip() if pd.notna(r.get("Name_cur")) else ""
-                )
-                if norm_name and norm_name in prev_by_norm:
-                    prow = prev_by_norm[norm_name]
-                    if pd.notna(prow.get("IP")):
+                norm_name = _norm_key(r.get("Name_cur"))
+                if norm_name and norm_name in prev_lookup:
+                    prior_row = prev_lookup[norm_name]
+                    if pd.notna(prior_row.get("IP")):
                         try:
-                            ip_prev = float(prow["IP"])
-                            xp = prow.get("xERA")
-                            wp = prow.get("WHIP")
+                            ip_prev = float(prior_row["IP"])
+                            xp = prior_row.get("xERA")
+                            wp = prior_row.get("WHIP")
                         except (TypeError, ValueError):
                             pass
             has_prev = ip_prev is not None
