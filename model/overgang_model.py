@@ -408,6 +408,12 @@ def _mlb_targeted_resolve_pitcher_id(probable_name: str):
     """
     if not probable_name or not str(probable_name).strip():
         return None, None
+    norm_t = DataManager.normalize_name(probable_name)
+    if not norm_t:
+        return None, None
+    # Two-way players: search hits may list primaryPosition as DH/OF, so no _is_mlb_pitcher_person match.
+    if norm_t == "shohei ohtani":
+        return 660271, "Shohei Ohtani"
     headers = {"User-Agent": "Mozilla/5.0"}
     search_url = "https://statsapi.mlb.com/api/v1/people/search"
     try:
@@ -424,9 +430,6 @@ def _mlb_targeted_resolve_pitcher_id(probable_name: str):
         print(f"[Targeted backfill] MLB search returned no people for '{probable_name}'")
         return None, None
     pitchers = [p for p in people if isinstance(p, dict) and _is_mlb_pitcher_person(p)]
-    norm_t = DataManager.normalize_name(probable_name)
-    if not norm_t:
-        return None, None
 
     def _pick_id_name(candidate_list):
         if len(candidate_list) == 1:
