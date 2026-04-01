@@ -1382,7 +1382,6 @@ def generate_prediction(
 
     league_avg_penalty = 1.0
     low_ip_penalty = 1.0
-    missing_public_penalty = 1.0
 
     if "League Avg" in away_pitcher or "League Avg" in home_pitcher:
         league_avg_penalty = 0.85
@@ -1390,15 +1389,8 @@ def generate_prediction(
     if safe_get(away_stats, "LowIP", False) or safe_get(home_stats, "LowIP", False):
         low_ip_penalty = 0.90
 
-    if not public_data:
-        missing_public_penalty = 0.95
-
     data_quality_factor = _velo_trust * reliever_mult
-    data_quality_factor *= (
-        league_avg_penalty
-        * low_ip_penalty
-        * missing_public_penalty
-    )
+    data_quality_factor *= league_avg_penalty * low_ip_penalty
 
     market_trust_factor = 1.0
 
