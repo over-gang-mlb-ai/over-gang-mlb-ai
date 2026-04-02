@@ -218,7 +218,41 @@ TELEGRAM_ML_MIN_CONFIDENCE_PCT = 70.0
 # ML calibration: global shrink toward 50%, then hard ceiling on displayed/fired/Kelly probs.
 ml_compression_k = 0.75
 max_ml_cap = 0.80
+# ML fire: both moneylines required (de-vig), no League Avg pitcher shell, penalty must clear floor.
+MIN_ML_QUALITY_PENALTY_FOR_FIRE = 0.90
 DATA_DIR = "data"
+
+
+def _american_odds_to_implied(american):
+    """Implied win probability from American odds; None if missing or invalid."""
+    if american is None:
+        return None
+    try:
+        v = float(american)
+    except (TypeError, ValueError):
+        return None
+    if v == 0:
+        return None
+    if v < 0:
+        return abs(v) / (100.0 + abs(v))
+    return 100.0 / (100.0 + v)
+
+
+def _ml_pair_devig_implied(ml_home_am, ml_away_am) -> tuple:
+    """
+    Proportional de-vig from both sides' American moneylines (Odds API / book).
+    Returns (implied_home, implied_away, status) with status 'ok' | 'missing_market' | 'invalid_odds'.
+    """
+    ih = _american_odds_to_implied(ml_home_am)
+    ia = _american_odds_to_implied(ml_away_am)
+    if ih is None or ia is None:
+        return None, None, "missing_market"
+    s = ih + ia
+    if s <= 0:
+        return None, None, "invalid_odds"
+    return ih / s, ia / s, "ok"
+
+
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
 AUTO_UPDATE_DATA = True
@@ -2989,6 +3023,15 @@ def run_predictions():
                 'CLV_Result': '',
                 'OU_Result': 'PENDING',
                 'ML_Result': 'PENDING',
+                'OU_Edge': '',
+                'OU_Confidence': '',
+                'OU_Side': '',
+                'OU_Bet_Type': 'total',
+                'ML_Edge': '',
+                'ML_Side': '',
+                'ML_Bet_Type': 'moneyline',
+                'ML_Market_OK': False,
+                'ML_Market_Status': '',
             }
 
             # 🔮 Run prediction (compare projection to actual Vegas line; do not pass lineup-adjusted line)
@@ -3103,41 +3146,62 @@ def run_predictions():
             adjusted_home_win_prob = min(max_ml_cap, quality_home)
             adjusted_away_win_prob = min(max_ml_cap, quality_away)
 
-            try:
-                odds_str = public.get("ML_Home", "-130") if isinstance(public, dict) else "-130"
-                odds_value = float(odds_str) if isinstance(odds_str, (int, float)) else float(str(odds_str).strip())
-                if odds_value < 0:
-                    implied_home = abs(odds_value) / (100 + abs(odds_value))
-                else:
-                    implied_home = 100 / (100 + odds_value)
-            except Exception:
-                implied_home = 0.53
+            # Book ML lines from odds_map (both sides required for de-vig; no synthetic defaults).
+            implied_home, implied_away, ml_market_status = _ml_pair_devig_implied(
+                odds_info.get("ml_home"), odds_info.get("ml_away")
+            )
+            ml_market_ok = ml_market_status == "ok"
 
-            implied_away = 1 - implied_home
-
-            home_kelly = calculate_kelly_units(adjusted_home_win_prob, implied_home)
-            away_kelly = calculate_kelly_units(adjusted_away_win_prob, implied_away)
+            if ml_market_ok:
+                home_kelly = calculate_kelly_units(adjusted_home_win_prob, implied_home)
+                away_kelly = calculate_kelly_units(adjusted_away_win_prob, implied_away)
+            else:
+                home_kelly = 0.0
+                away_kelly = 0.0
 
             if adjusted_home_win_prob > adjusted_away_win_prob:
                 ml_pick = f"{home_team.upper()} ML"
                 ml_conf = f"{round(adjusted_home_win_prob * 100)}%"
-                ml_value = f"{round((adjusted_home_win_prob - implied_home) * 100)}%"
+                ml_side = "home"
+                if ml_market_ok:
+                    ml_value = f"{round((adjusted_home_win_prob - implied_home) * 100)}%"
+                    ml_edge_num = float(adjusted_home_win_prob) - float(implied_home)
+                else:
+                    ml_value = ""
+                    ml_edge_num = None
                 ml_kelly = f"{round(home_kelly, 2)}u"
             else:
                 ml_pick = f"{away_team.upper()} ML"
                 ml_conf = f"{round(adjusted_away_win_prob * 100)}%"
-                ml_value = f"{round((adjusted_away_win_prob - implied_away) * 100)}%"
+                ml_side = "away"
+                if ml_market_ok:
+                    ml_value = f"{round((adjusted_away_win_prob - implied_away) * 100)}%"
+                    ml_edge_num = float(adjusted_away_win_prob) - float(implied_away)
+                else:
+                    ml_value = ""
+                    ml_edge_num = None
                 ml_kelly = f"{round(away_kelly, 2)}u"
 
             _league_avg_pitcher = (
                 "League Avg" in (away_pitcher or "") or "League Avg" in (home_pitcher or "")
             )
             ml_win_max = max(adjusted_home_win_prob, adjusted_away_win_prob)
-            # Fire on probability only; League Avg probable = degraded tag, not a hard ML block.
-            ml_fired = bool(ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
+            ml_fire_eligible = (
+                ml_market_ok
+                and (not _league_avg_pitcher)
+                and (ml_quality_penalty >= MIN_ML_QUALITY_PENALTY_FOR_FIRE)
+            )
+            ml_fired = bool(ml_fire_eligible and (ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE))
             ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
+
             if ml_fired:
                 no_fire_ml = ""
+            elif not ml_market_ok:
+                no_fire_ml = "ml_market_missing_or_incomplete"
+            elif _league_avg_pitcher:
+                no_fire_ml = "ml_quality_league_avg_pitcher"
+            elif ml_quality_penalty < MIN_ML_QUALITY_PENALTY_FOR_FIRE:
+                no_fire_ml = "ml_quality_low"
             else:
                 no_fire_ml = "ml_win_prob_below_threshold"
 
@@ -3150,6 +3214,11 @@ def run_predictions():
                 "No_Fire_ML_Reason": no_fire_ml,
                 "ML_Quality_Flag": ml_quality_flag,
                 "ML_Quality_Factor": ml_quality_penalty,
+                "ML_Market_OK": ml_market_ok,
+                "ML_Market_Status": ml_market_status,
+                "ML_Edge": round(ml_edge_num, 2) if ml_edge_num is not None else "",
+                "ML_Side": ml_side,
+                "ML_Bet_Type": "moneyline",
             })
 
             if isinstance(public, dict):
@@ -3175,7 +3244,6 @@ def run_predictions():
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ml_high_signal" if ml_fired else None,
-                "ml_degraded_league_avg_pitcher" if (_league_avg_pitcher and ml_fired) else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "odds_api" if (odds_source == "Odds API") else None,
                 "fallback_line" if (not has_real_total) else None,
@@ -3211,6 +3279,10 @@ def run_predictions():
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
             game_data["Bet_Type"] = "total"
             game_data["Side"] = "over" if "OVER" in (prediction or "").upper() else ("under" if "UNDER" in (prediction or "").upper() else "")
+            game_data["OU_Edge"] = edge
+            game_data["OU_Confidence"] = f"{confidence:.0%}"
+            game_data["OU_Side"] = game_data["Side"]
+            game_data["OU_Bet_Type"] = "total"
             line_status = "market" if bool(odds_info.get("_has_real_total", False)) else "fallback"
             game_data["Line_Status"] = line_status
             game_data["Fallback_Used"] = not bool(odds_info.get("_has_real_total", False))
@@ -3228,6 +3300,8 @@ def run_predictions():
                 dq_parts.append("fallback_pitcher")
             if _away_low or _home_low:
                 dq_parts.append("low_ip")
+            if not ml_market_ok:
+                dq_parts.append("ml_market_missing")
             game_data["Data_Quality_Flag"] = "|".join(dq_parts)
 
             game_data["OU_Confidence_Bucket"] = _confidence_bucket_5pt(
@@ -3256,6 +3330,8 @@ def run_predictions():
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
+        "OU_Edge", "OU_Confidence", "OU_Side", "OU_Bet_Type",
+        "ML_Edge", "ML_Side", "ML_Bet_Type", "ML_Market_OK", "ML_Market_Status",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
