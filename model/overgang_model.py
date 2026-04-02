@@ -746,6 +746,9 @@ BULLPEN_IP_SHARE = 0.40
 WHIP_LEAGUE = 1.30            # baseline WHIP for modifier
 EDGE_THRESHOLD = 0.25        # min |edge| to recommend OVER/UNDER (runs); tune up (e.g. 0.35) if too aggressive
 EDGE_FOR_FULL_UNIT = 0.5     # edge >= this gets 1.0 unit; scale below; tune up (e.g. 0.6) for conservative sizing
+# O/U confidence (generate_prediction only): multiplicative trims on pitcher primitives — not derived CSV labels.
+LEAGUE_AVG_OU_CONFIDENCE_MULT = 0.75  # "League Avg" pitcher name shell
+LOW_IP_OU_CONFIDENCE_MULT = 0.78      # LowIP on either starter stats row
 # Unified bullpen workload fatigue (single run multiplier — do not stack with a second IP rule):
 # expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
 # fatigue_ratio = IP_Week / expected_weekly_ip — no penalty at or below neutral; modest +runs when elevated.
@@ -1424,10 +1427,10 @@ def generate_prediction(
     low_ip_penalty = 1.0
 
     if "League Avg" in away_pitcher or "League Avg" in home_pitcher:
-        league_avg_penalty = 0.85
+        league_avg_penalty = LEAGUE_AVG_OU_CONFIDENCE_MULT
 
     if safe_get(away_stats, "LowIP", False) or safe_get(home_stats, "LowIP", False):
-        low_ip_penalty = 0.90
+        low_ip_penalty = LOW_IP_OU_CONFIDENCE_MULT
 
     data_quality_factor = _velo_trust * reliever_mult
     data_quality_factor *= league_avg_penalty * low_ip_penalty
