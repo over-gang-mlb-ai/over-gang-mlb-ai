@@ -3,6 +3,14 @@ set -e
 
 cd /home/ubuntu/over-gang-mlb-ai
 
+# Cron/minimal shells often lack project env; export .env so child Python sees ODDS_API_KEY (fill_closing_lines / fetch_mlb_odds).
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 LATEST=$(/bin/ls -1t archive/predictions_*.csv 2>/dev/null | /usr/bin/head -1)
 [ -n "$LATEST" ] || { echo "No predictions archive found"; exit 0; }
 
