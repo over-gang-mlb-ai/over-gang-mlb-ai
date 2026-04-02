@@ -220,6 +220,8 @@ ml_compression_k = 0.75
 max_ml_cap = 0.80
 # ML fire: both moneylines required (de-vig), no League Avg pitcher shell, penalty must clear floor.
 MIN_ML_QUALITY_PENALTY_FOR_FIRE = 0.90
+# Picked-side edge (adjusted prob minus de-vig implied); blocks thin ML_Fired when win prob alone clears.
+MIN_ML_EDGE_FOR_FIRE = 0.05
 DATA_DIR = "data"
 
 
@@ -3191,7 +3193,15 @@ def run_predictions():
                 and (not _league_avg_pitcher)
                 and (ml_quality_penalty >= MIN_ML_QUALITY_PENALTY_FOR_FIRE)
             )
-            ml_fired = bool(ml_fire_eligible and (ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE))
+            ml_edge_meets_min = (
+                ml_edge_num is not None
+                and float(ml_edge_num) >= float(MIN_ML_EDGE_FOR_FIRE)
+            )
+            ml_fired = bool(
+                ml_fire_eligible
+                and (ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
+                and ml_edge_meets_min
+            )
             ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
 
             if ml_fired:
@@ -3202,6 +3212,10 @@ def run_predictions():
                 no_fire_ml = "ml_quality_league_avg_pitcher"
             elif ml_quality_penalty < MIN_ML_QUALITY_PENALTY_FOR_FIRE:
                 no_fire_ml = "ml_quality_low"
+            elif ml_win_max < MIN_ML_WIN_PROB_FOR_FIRE:
+                no_fire_ml = "ml_win_prob_below_threshold"
+            elif not ml_edge_meets_min:
+                no_fire_ml = "ml_edge_below_threshold"
             else:
                 no_fire_ml = "ml_win_prob_below_threshold"
 
