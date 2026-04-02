@@ -875,7 +875,8 @@ def project_team_runs(
     lineup_impact: smaller adjustment from LineupImpact.score_lineup (capped by LINEUP_IMPACT_CAP).
     opponent_bullpen_relievers: active reliever count for expected weekly IP baseline (workload fatigue ratio).
 
-    Returns (capped_runs, raw_runs): per-team dynamic cap applied only to capped_runs; raw_runs is pre-cap for analysis.
+    Returns (analytical_runs, safety_capped_runs): analytical_runs is the uncapped model output;
+    safety_capped_runs is min(runs, dynamic cap) for risk control only (not the O/U analytical path).
     """
     if opponent_low_ip:
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
@@ -930,7 +931,7 @@ def project_team_runs(
         lineup_impact,
     )
     capped_runs = min(runs, _cap)
-    return round(capped_runs, 2), round(raw_runs, 2)
+    return round(raw_runs, 2), round(capped_runs, 2)
 
 
 # ================================
@@ -1339,7 +1340,7 @@ def generate_prediction(
 
     # ---------- Project runs for each team ----------
     # Away offense faces home pitcher + home bullpen; away_offense_mult from Batters.offense_vs_hand_dict(away_team vs home_hand)
-    away_runs, away_runs_raw = project_team_runs(
+    away_runs, away_runs_safety = project_team_runs(
         opponent_starter_xera=home_xera,
         opponent_starter_whip=home_whip,
         opponent_bullpen_era=bullpen_home_era,
@@ -1352,7 +1353,7 @@ def generate_prediction(
         offense_mult=away_offense_mult,
     )
     # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
-    home_runs, home_runs_raw = project_team_runs(
+    home_runs, home_runs_safety = project_team_runs(
         opponent_starter_xera=away_xera,
         opponent_starter_whip=away_whip,
         opponent_bullpen_era=bullpen_away_era,
@@ -1365,10 +1366,13 @@ def generate_prediction(
         offense_mult=home_offense_mult,
     )
 
-    # Dynamic per-team cap: flag when raw projection exceeded capped projection (O/U customer-fire gating).
-    # Use raw float inequality, not round-then-compare: Cap_Diff is raw − capped; rounded comparisons can disagree.
-    projection_cap_hit = (float(away_runs_raw) > float(away_runs)) or (
-        float(home_runs_raw) > float(home_runs)
+    # Analytical truth for O/U (uncapped); cap is parallel safety only.
+    away_runs_raw = away_runs
+    home_runs_raw = home_runs
+
+    # Dynamic per-team cap: flag when analytical projection exceeds safety-capped projection (O/U customer-fire gating).
+    projection_cap_hit = (float(away_runs) > float(away_runs_safety)) or (
+        float(home_runs) > float(home_runs_safety)
     )
 
     projected_total = round(away_runs + home_runs, 2)
@@ -1489,6 +1493,8 @@ def generate_prediction(
         "home_runs": home_runs,
         "away_runs_raw": away_runs_raw,
         "home_runs_raw": home_runs_raw,
+        "away_runs_safety": away_runs_safety,
+        "home_runs_safety": home_runs_safety,
         "projection_cap_hit": projection_cap_hit,
         "vegas_line": vegas_line,
         "edge": edge,
@@ -3072,6 +3078,8 @@ def run_predictions():
             home_runs = proj["home_runs"]
             away_runs_raw = proj["away_runs_raw"]
             home_runs_raw = proj["home_runs_raw"]
+            away_runs_safety = proj["away_runs_safety"]
+            home_runs_safety = proj["home_runs_safety"]
             edge = proj["edge"]
             recommended_units = proj["recommended_units"]
             projection_cap_hit = bool(proj.get("projection_cap_hit", False))
@@ -3097,8 +3105,10 @@ def run_predictions():
                 "Home_Runs": home_runs,
                 "Away_Runs_Raw": away_runs_raw,
                 "Home_Runs_Raw": home_runs_raw,
-                "Away_Cap_Diff": round(float(away_runs_raw) - float(away_runs), 2),
-                "Home_Cap_Diff": round(float(home_runs_raw) - float(home_runs), 2),
+                "Away_Runs_Safety": away_runs_safety,
+                "Home_Runs_Safety": home_runs_safety,
+                "Away_Cap_Diff": round(float(away_runs) - float(away_runs_safety), 2),
+                "Home_Cap_Diff": round(float(home_runs) - float(home_runs_safety), 2),
                 "Projection_Cap_Flag": projection_cap_hit,
                 "Lineup_Impact_Away": round(float(away_impact), 4),
                 "Lineup_Impact_Home": round(float(home_impact), 4),
@@ -3340,7 +3350,8 @@ def run_predictions():
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
         "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs",
-        "Away_Runs_Raw", "Home_Runs_Raw", "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
+        "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
+        "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
