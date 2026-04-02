@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Same-day Closing_Line capture: run via cron while The Odds API still lists today's slate
-# (e.g. late afternoon/evening on game day). Updates the latest archive in place.
+# Same-day Closing_Line capture: recurring cron calls this; gated script picks active slate,
+# earliest first pitch (statsapi), matching archive, pregame buffer window, and once-per-slate lock.
 # Nightly run_nightly_reports.sh continues to grade/export; CLV runs there after this fill.
 set -e
 
-cd /home/ubuntu/over-gang-mlb-ai
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 if [ -f .env ]; then
   set -a
@@ -13,7 +14,4 @@ if [ -f .env ]; then
   set +a
 fi
 
-LATEST=$(/bin/ls -1t archive/predictions_*.csv 2>/dev/null | /usr/bin/head -1)
-[ -n "$LATEST" ] || { echo "No predictions archive found"; exit 0; }
-
-./venv/bin/python3 tools/fill_closing_lines.py "$LATEST"
+./venv/bin/python3 tools/run_closing_capture_gated.py
