@@ -3118,7 +3118,7 @@ def run_predictions():
                 "Lineup_Mode_Home": (home_scope if home_scope and str(home_scope).lower() != "none" else ""),
                 "Lineup_Cap_Hit_Away": bool(abs(float(away_impact)) >= 0.20),
                 "Lineup_Cap_Hit_Home": bool(abs(float(home_impact)) >= 0.20),
-                "Vegas_Line": total_current if (total_current is not None and total_current != 0) else vegas_line,
+                "Vegas_Line": vegas_line,
                 "Edge": edge,
                 "Prediction": prediction,
                 "Confidence": f"{confidence:.0%}",
