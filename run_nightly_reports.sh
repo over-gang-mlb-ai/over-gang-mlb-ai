@@ -11,8 +11,9 @@ if [ -f .env ]; then
   set +a
 fi
 
-LATEST=$(/bin/ls -1t archive/predictions_*.csv 2>/dev/null | /usr/bin/head -1)
-[ -n "$LATEST" ] || { echo "No predictions archive found"; exit 0; }
+# Active slate only (America/Denver rollover); prefer archive with closing/CLV filled over a newer empty re-run.
+LATEST=$(./venv/bin/python3 tools/select_slate_predictions_archive.py)
+[ -n "$LATEST" ] || { echo "No predictions archive found for active slate"; exit 0; }
 
 ./venv/bin/python3 tools/fill_closing_lines.py "$LATEST"
 ./venv/bin/python3 tools/update_clv.py "$LATEST"
