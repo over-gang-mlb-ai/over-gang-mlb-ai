@@ -13,6 +13,7 @@ Prints a single absolute path, or nothing if no candidate exists.
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import sys
@@ -41,7 +42,10 @@ def _nonempty_cell_count(series: pd.Series | None) -> int:
 
 
 def main() -> int:
-    slate_date, _ = active_slate_date_mt()
+    # active_slate_date_mt() prints [SLATE] to stdout; suppress so shell $(...) only captures the path below.
+    with open(os.devnull, "w", encoding="utf-8") as _devnull:
+        with contextlib.redirect_stdout(_devnull):
+            slate_date, _ = active_slate_date_mt()
     slate = slate_date.strftime("%Y%m%d")
     archive = ROOT / "archive"
     if not archive.is_dir():
