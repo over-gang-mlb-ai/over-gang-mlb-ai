@@ -49,6 +49,13 @@ def game_to_odds_key(game_str: str) -> Optional[str]:
         return None
 
 
+def _has_existing_closing_line(val) -> bool:
+    if pd.isna(val):
+        return False
+    s = str(val).strip()
+    return bool(s) and s.lower() != "nan"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Fill Closing_Line in a predictions CSV using The Odds API (core.odds_api)."
@@ -89,6 +96,8 @@ def main() -> None:
 
     filled = 0
     for i in range(len(df)):
+        if _has_existing_closing_line(df.at[i, "Closing_Line"]):
+            continue
         game_val = df.at[i, "Game"]
         key = game_to_odds_key(game_val)
         if not key or key not in odds_map:

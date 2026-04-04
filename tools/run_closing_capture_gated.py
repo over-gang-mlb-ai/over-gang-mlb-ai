@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Gated same-day Closing_Line capture: active slate date (same rules as run_predictions),
-earliest first pitch from statsapi.schedule, archive glob for that slate, time window + lock.
+Repeatable same-day Closing_Line capture for the active slate: earliest first pitch opens
+the window, canonical archive selection chooses the target file, and a transient lock
+prevents overlapping runs without enforcing one-shot-per-slate behavior.
 """
 from __future__ import annotations
 
@@ -74,20 +75,32 @@ def _buffer_minutes() -> int:
 def _lock_path(slate_yyyymmdd: str) -> Path:
     base = os.environ.get("OG_CLOSING_CAPTURE_LOCK_DIR", "").strip()
     if base:
-        return Path(base) / f".closing_capture_done_{slate_yyyymmdd}"
-    return ROOT / "data" / f".closing_capture_done_{slate_yyyymmdd}"
+        return Path(base) / f".closing_capture_running_{slate_yyyymmdd}"
+    return ROOT / "data" / f".closing_capture_running_{slate_yyyymmdd}"
 
 
-def _newest_archive_for_slate(slate_yyyymmdd: str) -> Path | None:
-    pat = f"predictions_{slate_yyyymmdd}_*.csv"
-    archive = ROOT / "archive"
-    if not archive.is_dir():
+def _canonical_archive_for_slate(slate_date: date) -> Path | None:
+    selector = ROOT / "tools" / "select_slate_predictions_archive.py"
+    if not selector.is_file():
         return None
-    matches = list(archive.glob(pat))
-    if not matches:
+    env = os.environ.copy()
+    env["OVERGANG_TARGET_DATE"] = slate_date.strftime("%Y-%m-%d")
+    try:
+        res = subprocess.run(
+            [sys.executable, str(selector)],
+            check=True,
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"{LOG_PREFIX} selector failed: {e}", file=sys.stderr)
         return None
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0]
+    out = (res.stdout or "").strip()
+    if not out:
+        return None
+    return Path(out)
 
 
 def main() -> None:
@@ -98,11 +111,11 @@ def main() -> None:
 
     if lock_file.is_file():
         print(
-            f"{LOG_PREFIX} already captured for slate {slate_yyyymmdd} (lock: {lock_file})"
+            f"{LOG_PREFIX} capture already running for slate {slate_yyyymmdd} (lock: {lock_file})"
         )
         sys.exit(0)
 
-    csv_path = _newest_archive_for_slate(slate_yyyymmdd)
+    csv_path = _canonical_archive_for_slate(slate_date)
     if csv_path is None:
         print(
             f"{LOG_PREFIX} no archive file for active slate "
@@ -139,13 +152,6 @@ def main() -> None:
         )
         sys.exit(0)
 
-    if now_utc >= earliest:
-        print(
-            f"{LOG_PREFIX} past earliest first pitch: now_utc={now_utc.isoformat()} "
-            f"earliest_first_pitch_utc={earliest.isoformat()} — not running"
-        )
-        sys.exit(0)
-
     try:
         lock_file.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(
@@ -157,7 +163,7 @@ def main() -> None:
             lf.write(f"slate={slate_yyyymmdd}\nstarted_utc={now_utc.isoformat()}\n")
     except FileExistsError:
         print(
-            f"{LOG_PREFIX} already captured or in progress (lock appeared: {lock_file})"
+            f"{LOG_PREFIX} capture already running (lock appeared: {lock_file})"
         )
         sys.exit(0)
 
@@ -170,14 +176,15 @@ def main() -> None:
     try:
         subprocess.run(cmd, check=True, cwd=str(ROOT))
     except subprocess.CalledProcessError as e:
+        print(f"{LOG_PREFIX} fill_closing_lines failed: {e}", file=sys.stderr)
+        sys.exit(e.returncode if e.returncode else 1)
+    finally:
         try:
             lock_file.unlink(missing_ok=True)
         except OSError:
             pass
-        print(f"{LOG_PREFIX} fill_closing_lines failed: {e}", file=sys.stderr)
-        sys.exit(e.returncode if e.returncode else 1)
 
-    print(f"{LOG_PREFIX} success; lock={lock_file}")
+    print(f"{LOG_PREFIX} pass complete for {csv_path.name}")
 
 
 if __name__ == "__main__":
