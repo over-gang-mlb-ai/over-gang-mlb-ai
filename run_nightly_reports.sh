@@ -11,9 +11,10 @@ if [ -f .env ]; then
   set +a
 fi
 
-# Active slate only (America/Denver rollover); prefer archive with closing/CLV filled over a newer empty re-run.
-LATEST=$(./venv/bin/python3 tools/select_slate_predictions_archive.py)
-[ -n "$LATEST" ] || { echo "No predictions archive found for active slate"; exit 0; }
+# Nightly grading/reporting always targets the completed prior slate in America/Denver.
+TARGET_SLATE=$(./venv/bin/python3 -c "from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; now_mt = datetime.now(ZoneInfo('America/Denver')); print((now_mt.date() - timedelta(days=1)).strftime('%Y-%m-%d'))")
+LATEST=$(OVERGANG_TARGET_DATE="$TARGET_SLATE" ./venv/bin/python3 tools/select_slate_predictions_archive.py)
+[ -n "$LATEST" ] || { echo "No predictions archive found for prior slate $TARGET_SLATE"; exit 0; }
 
 ./venv/bin/python3 tools/fill_closing_lines.py "$LATEST"
 ./venv/bin/python3 tools/update_clv.py "$LATEST"
