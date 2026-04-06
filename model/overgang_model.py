@@ -1384,12 +1384,10 @@ def generate_prediction(
     # ---------- Pick: OVER / UNDER based on edge vs threshold ----------
     if edge >= EDGE_THRESHOLD:
         pick = "OVER"
-        strength = "🚨 " if edge >= 0.6 else ""
-        prediction_str = f"{strength}OVER {vegas_line:.1f}"
+        prediction_str = f"OVER {vegas_line:.1f}"
     elif edge <= -EDGE_THRESHOLD:
         pick = "UNDER"
-        strength = "🔒 " if edge <= -0.6 else ""
-        prediction_str = f"{strength}UNDER {vegas_line:.1f}"
+        prediction_str = f"UNDER {vegas_line:.1f}"
     else:
         pick = "LEAN_OVER" if edge > 0 else "LEAN_UNDER"
         prediction_str = f"LEAN {'OVER' if edge > 0 else 'UNDER'} {vegas_line:.1f} (proj {projected_total:.1f})"
