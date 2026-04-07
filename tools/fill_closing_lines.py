@@ -56,6 +56,16 @@ def _has_existing_closing_line(val) -> bool:
     return bool(s) and s.lower() != "nan"
 
 
+def _row_datetime(df: pd.DataFrame, idx: int) -> Optional[str]:
+    if "Datetime" not in df.columns:
+        return None
+    val = df.at[idx, "Datetime"]
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    return s or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Fill Closing_Line in a predictions CSV using The Odds API (core.odds_api)."
@@ -88,7 +98,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        from core.odds_api import fetch_mlb_odds
+        from core.odds_api import fetch_mlb_odds, get_game_odds
         odds_map = fetch_mlb_odds(target_date=target_date)
     except Exception as e:
         print(f"Error fetching Odds API odds: {e}", file=sys.stderr)
@@ -100,10 +110,21 @@ def main() -> None:
             continue
         game_val = df.at[i, "Game"]
         key = game_to_odds_key(game_val)
-        if not key or key not in odds_map:
+        if not key:
             continue
-        row_odds = odds_map[key]
-        total_line = row_odds.get("total_line")
+        parts = str(game_val).split(" @ ", 1)
+        if len(parts) != 2:
+            continue
+        row_odds = get_game_odds(
+            parts[0].strip(),
+            parts[1].strip(),
+            odds_map,
+            commence_time=_row_datetime(df, i),
+        )
+        raw_total_line = row_odds.get("_raw_total_line")
+        if not row_odds.get("_match_found") or raw_total_line in (None, ""):
+            continue
+        total_line = raw_total_line
         try:
             if total_line is not None and total_line != "":
                 val = float(total_line)

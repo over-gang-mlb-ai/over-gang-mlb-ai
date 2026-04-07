@@ -99,6 +99,7 @@ def _parse_final_game_detail(g: dict) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         return None
     return {
+        "game_id": g.get("game_id") or g.get("gamePk"),
         "away_name": away_name,
         "home_name": home_name,
         "away_runs": ar,
@@ -107,11 +108,12 @@ def _parse_final_game_detail(g: dict) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_final_games_by_key(
+def fetch_final_games(
     date_yyyy_mm_dd: str, game_to_key_fn
-) -> Tuple[Dict[str, Dict[str, Any]], dict]:
-    """Normalized 'away @ home' -> detail dict with runs and total. Second value is fetch diagnostics."""
-    out: Dict[str, Dict[str, Any]] = {}
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], dict]:
+    """Return finalized games keyed by matchup and by Game_ID, plus fetch diagnostics."""
+    by_key: Dict[str, Dict[str, Any]] = {}
+    by_id: Dict[str, Dict[str, Any]] = {}
     diag: dict = {
         "statsapi_games": 0,
         "statsapi_error": None,
@@ -140,11 +142,14 @@ def fetch_final_games_by_key(
         key = game_to_key_fn(f"{det['away_name']} @ {det['home_name']}")
         if not key:
             diag["statsapi_key_drops"] += 1
-            continue
-        out[key] = det
+        else:
+            by_key[key] = det
+        game_id = det.get("game_id")
+        if game_id is not None and str(game_id).strip():
+            by_id[str(game_id).strip()] = det
 
-    if out:
-        return out, diag
+    if by_key or by_id:
+        return by_key, by_id, diag
 
     try:
         import requests
@@ -155,7 +160,7 @@ def fetch_final_games_by_key(
         data = r.json()
     except Exception as e:
         diag["http_error"] = str(e)
-        return out, diag
+        return by_key, by_id, diag
 
     http_games: list = []
     for d in data.get("dates") or []:
@@ -171,9 +176,28 @@ def fetch_final_games_by_key(
         key = game_to_key_fn(f"{det['away_name']} @ {det['home_name']}")
         if not key:
             diag["http_key_drops"] += 1
-            continue
-        out[key] = det
-    return out, diag
+        else:
+            by_key[key] = det
+        game_id = det.get("game_id")
+        if game_id is not None and str(game_id).strip():
+            by_id[str(game_id).strip()] = det
+    return by_key, by_id, diag
+
+
+def _row_game_id(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, float) and pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    if s.endswith(".0"):
+        try:
+            return str(int(float(s)))
+        except Exception:
+            return s
+    return s
 
 
 def _print_fetch_diagnostics_if_empty(
@@ -324,16 +348,22 @@ def main() -> int:
             df[col] = "PENDING"
 
     _ensure_root_path()
-    games, fetch_diag = fetch_final_games_by_key(target_date, game_to_key_fn)
-    _print_fetch_diagnostics_if_empty(target_date, games, fetch_diag)
+    games_by_key, games_by_id, fetch_diag = fetch_final_games(target_date, game_to_key_fn)
+    _print_fetch_diagnostics_if_empty(target_date, games_by_key or games_by_id, fetch_diag)
 
     ou_set = ml_set = 0
     ou_still = ml_still = 0
 
     for i in range(len(df)):
-        game_val = df.at[i, "Game"]
-        key = game_to_key_fn(str(game_val)) if game_val is not None else None
-        det = games.get(key) if key else None
+        det = None
+        if "Game_ID" in df.columns:
+            row_game_id = _row_game_id(df.at[i, "Game_ID"])
+            if row_game_id:
+                det = games_by_id.get(row_game_id)
+        if det is None:
+            game_val = df.at[i, "Game"]
+            key = game_to_key_fn(str(game_val)) if game_val is not None else None
+            det = games_by_key.get(key) if key else None
 
         if det is None:
             if _is_pending_result(df.at[i, "OU_Result"]):
@@ -382,7 +412,7 @@ def main() -> int:
         return 1
 
     print(f"Slate date: {target_date}")
-    print(f"Final games loaded: {len(games)}")
+    print(f"Final games loaded: {max(len(games_by_key), len(games_by_id))}")
     print(f"OU_Result set: {ou_set} | still pending: {ou_still}")
     print(f"ML_Result set: {ml_set} | still pending: {ml_still}")
     print(f"Wrote {csv_path}")

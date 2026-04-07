@@ -6,7 +6,7 @@ Target-date filtering: only keep events whose commence_time (in Mountain Time) m
 """
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from dotenv import load_dotenv
@@ -85,6 +85,25 @@ def _game_key(away_team, home_team):
         return f"{(away_team or '').lower().strip()} @ {(home_team or '').lower().strip()}"
 
 
+def _canonical_commence_time(commence_time_str):
+    """Normalize an ISO-like UTC time to YYYY-MM-DDTHH:MM:SSZ, else ''."""
+    if not commence_time_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(commence_time_str).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return str(commence_time_str).strip()
+
+
+def _event_key(away_team, home_team, commence_time_str=None):
+    coarse = _game_key(away_team, home_team)
+    ct = _canonical_commence_time(commence_time_str)
+    return f"{coarse} @@ {ct}" if coarse and ct else coarse
+
+
 def _parse_totals_and_h2h(book):
     """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away)."""
     total_line = DEFAULT_TOTAL
@@ -120,7 +139,7 @@ def fetch_mlb_odds(target_date=None):
     target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). If set, we pass
     commenceTimeFrom/commenceTimeTo so the API returns only events on that date (MT), and we keep
     only events whose commence_time falls on that date.
-    Returns dict: game_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }.
+    Returns dict: event_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }.
     Note: The API returns only events that bookmakers have posted; there is no param to "request
     more events" for a date—if no odds exist for that date, the response will be empty.
     """
@@ -196,7 +215,8 @@ def fetch_mlb_odds(target_date=None):
 
         home = (event.get("home_team") or "").strip()
         away = (event.get("away_team") or "").strip()
-        key = _game_key(away, home)
+        key = _event_key(away, home, commence_str)
+        coarse_key = _game_key(away, home)
         if not key or key in result:
             if skip_log_count < skip_log_cap:
                 reason = "empty key" if not key else "duplicate key (already in result)"
@@ -245,6 +265,8 @@ def fetch_mlb_odds(target_date=None):
                 "ml_home": None,
                 "ml_away": None,
                 "book": "",
+                "_coarse_game_key": coarse_key,
+                "_commence_time": _canonical_commence_time(commence_str),
             }
             continue
 
@@ -264,6 +286,8 @@ def fetch_mlb_odds(target_date=None):
             "ml_home": ml_home,
             "ml_away": ml_away,
             "book": (best.get("title") or best.get("key") or ""),
+            "_coarse_game_key": coarse_key,
+            "_commence_time": _canonical_commence_time(commence_str),
         }
 
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
@@ -277,7 +301,7 @@ def fetch_mlb_odds(target_date=None):
     return result
 
 
-def get_game_odds(away_team, home_team, odds_map=None):
+def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
     """
     Get odds for one game. odds_map from fetch_mlb_odds() or None to fetch now.
     Returns dict: total_line, over_juice, under_juice, ml_home, ml_away, book.
@@ -285,8 +309,39 @@ def get_game_odds(away_team, home_team, odds_map=None):
     """
     if odds_map is None:
         odds_map = fetch_mlb_odds()
-    key = _game_key(away_team, home_team)
-    row = odds_map.get(key)
+    coarse_key = _game_key(away_team, home_team)
+    strong_key = _event_key(away_team, home_team, commence_time) if commence_time else ""
+    row = None
+    matched_key = ""
+    if strong_key:
+        row = odds_map.get(strong_key)
+        if row:
+            matched_key = strong_key
+    if row is None:
+        row = odds_map.get(coarse_key)
+        if row:
+            matched_key = coarse_key
+    if row is None:
+        candidates = []
+        wanted_commence = _canonical_commence_time(commence_time)
+        for k, v in (odds_map or {}).items():
+            if not isinstance(v, dict):
+                continue
+            if v.get("_coarse_game_key") == coarse_key:
+                candidates.append((k, v))
+        if candidates:
+            if wanted_commence:
+                for k, v in candidates:
+                    if (v.get("_commence_time") or "") == wanted_commence:
+                        row = v
+                        matched_key = k
+                        break
+            if row is not None:
+                candidates = []
+        if row is None and candidates:
+            candidates.sort(key=lambda kv: str(kv[1].get("_commence_time") or ""))
+            row = candidates[0][1]
+            matched_key = candidates[0][0]
     if row:
         raw_line = row.get("total_line")
         if raw_line is None or raw_line == "":
@@ -312,14 +367,21 @@ def get_game_odds(away_team, home_team, odds_map=None):
                 under_juice = int(raw_under)
             except (TypeError, ValueError):
                 under_juice = DEFAULT_JUICE
-        return {
+        out = dict(row)
+        out.update({
             "total_line": total_line,
             "over_juice": over_juice,
             "under_juice": under_juice,
             "ml_home": row.get("ml_home"),
             "ml_away": row.get("ml_away"),
             "book": row.get("book") or "",
-        }
+            "_match_found": True,
+            "_lookup_key": matched_key or coarse_key,
+            "_coarse_game_key": row.get("_coarse_game_key") or coarse_key,
+            "_commence_time": row.get("_commence_time") or _canonical_commence_time(commence_time),
+            "_raw_total_line": raw_line,
+        })
+        return out
     return {
         "total_line": DEFAULT_TOTAL,
         "over_juice": DEFAULT_JUICE,
@@ -327,4 +389,9 @@ def get_game_odds(away_team, home_team, odds_map=None):
         "ml_home": None,
         "ml_away": None,
         "book": "",
+        "_match_found": False,
+        "_lookup_key": strong_key or coarse_key,
+        "_coarse_game_key": coarse_key,
+        "_commence_time": _canonical_commence_time(commence_time),
+        "_raw_total_line": None,
     }

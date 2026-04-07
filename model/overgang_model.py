@@ -1105,7 +1105,7 @@ def _load_manual_totals():
 
 class VegasLines:
     @staticmethod
-    def get_vegas_line(home_team, away_team, odds_map=None, *, emit_live_total_diagnostics=True):
+    def get_vegas_line(home_team, away_team, odds_map=None, game_datetime=None, *, emit_live_total_diagnostics=True):
         """
         Return (vegas_line_float, odds_info_dict).
         odds_info_dict has total_line, over_juice, under_juice, ml_home, ml_away, book.
@@ -1132,22 +1132,11 @@ class VegasLines:
 
         # 2) API / merged odds map
         if odds_map is not None:
-            match_found = lookup_key in odds_map
-            row = get_game_odds(away_team, home_team, odds_map)
-            # get_game_odds returns DEFAULT_TOTAL when there is no map row OR when the row has no total_line.
-            # Real-total classification must use the matched map row only — never treat default 8.5 as a book line.
-            if match_found:
-                mrow = odds_map.get(lookup_key) or {}
-                raw_line = mrow.get("total_line")
-                src_for_flags = mrow
-                info = dict(row)
-                for _k in ("sportsbook_id", "sportsbook_url", "odd_type"):
-                    if _k in mrow:
-                        info[_k] = mrow.get(_k)
-            else:
-                raw_line = None
-                src_for_flags = row
-                info = dict(row)
+            row = get_game_odds(away_team, home_team, odds_map, commence_time=game_datetime)
+            match_found = bool(row.get("_match_found", False))
+            raw_line = row.get("_raw_total_line")
+            src_for_flags = row
+            info = dict(row)
             raw_line_missing = raw_line is None or raw_line == ""
             try:
                 line = float(row.get("total_line", 8.5))
@@ -1168,7 +1157,7 @@ class VegasLines:
             else:
                 source = "8.5 fallback (no match in odds_map)"
             info["_source"] = source
-            info["_lookup_key"] = lookup_key
+            info["_lookup_key"] = row.get("_lookup_key", lookup_key)
             info["_match_found"] = match_found
             info["_has_real_total"] = bool(has_real_total)
             if match_found:
@@ -1186,7 +1175,7 @@ class VegasLines:
                         if book_empty:
                             _raw_detail = {}
                             if isinstance(odds_map, dict):
-                                _raw_detail = odds_map.get(lookup_key) or {}
+                                _raw_detail = odds_map.get(info.get("_lookup_key", lookup_key)) or {}
                             _sportsbook_id = _raw_detail.get("sportsbook_id") or _raw_detail.get("SportsbookId") or _raw_detail.get("sportsbookId") or ""
                             _sportsbook_url = _raw_detail.get("sportsbook_url") or _raw_detail.get("SportsbookUrl") or _raw_detail.get("sportsbookUrl") or ""
                             _odd_type = _raw_detail.get("odd_type") or _raw_detail.get("OddType") or _raw_detail.get("oddType") or ""
@@ -1772,7 +1761,7 @@ def _preflight_count_games_with_real_totals(games, odds_map):
             home_team = safe_get(g, "home_name", "")
             away_team = safe_get(g, "away_name", "")
             _, info = VegasLines.get_vegas_line(
-                home_team, away_team, odds_map, emit_live_total_diagnostics=False
+                home_team, away_team, odds_map, game_datetime=safe_get(g, "game_datetime", ""), emit_live_total_diagnostics=False
             )
             if bool(info.get("_has_real_total")):
                 n += 1
@@ -1821,7 +1810,7 @@ def _preflight_count_games_with_non_manual_real_totals(games, odds_map):
             home_team = safe_get(g, "home_name", "")
             away_team = safe_get(g, "away_name", "")
             _, info = VegasLines.get_vegas_line(
-                home_team, away_team, odds_map, emit_live_total_diagnostics=False
+                home_team, away_team, odds_map, game_datetime=safe_get(g, "game_datetime", ""), emit_live_total_diagnostics=False
             )
             if bool(info.get("_has_real_total")) and not _vegas_line_info_is_manual_trusted_total(info):
                 n += 1
@@ -2768,7 +2757,12 @@ def run_predictions():
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
             away_team = safe_get(game, 'away_name', 'Away Team')
-            vegas_line, odds_info = VegasLines.get_vegas_line(home_team, away_team, odds_map)
+            vegas_line, odds_info = VegasLines.get_vegas_line(
+                home_team,
+                away_team,
+                odds_map,
+                game_datetime=safe_get(game, "game_datetime", ""),
+            )
             print(f"[ODDS] Game: {away_team} @ {home_team}")
             print(f"[ODDS]   Lookup key: {odds_info.get('_lookup_key', '?')}")
             print(f"[ODDS]   Match found in odds_map: {odds_info.get('_match_found', '?')}")
@@ -2988,11 +2982,15 @@ def run_predictions():
             game_name = f"{away_team} @ {home_team}"
 
             game_data = {
+                'Game_ID': game.get('game_id') or game.get('gamePk') or '',
+                'Game_Num': game.get('game_num') or game.get('gameNumber') or '',
+                'Doubleheader': game.get('doubleheader') or game.get('doubleHeader') or '',
+                'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
+                'Game_Date': game.get('game_date') or '',
                 'Game': game_name,
                 'Game_Status': _game_status_for_export(game),
                 'Venue': venue,
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
-                'Datetime': safe_get(game, 'game_datetime', datetime.utcnow().isoformat()),
                 'vegas_line': vegas_line,
                 'Total_Is_Real': bool(odds_info.get('_has_real_total', False)),
                 'Odds_Line': odds_info.get('total_line', 8.5) if odds_info.get('_has_real_total', False) else '',
@@ -3353,6 +3351,7 @@ def run_predictions():
 
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
+        "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
         "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
