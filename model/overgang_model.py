@@ -1797,6 +1797,28 @@ def _result_row_is_manual_trusted_total(r):
     )
 
 
+def _trusted_total_source_row_for_game(game, trusted_total_source_map):
+    """
+    Resolve the trusted total-source row for a slate game using the same event-aware lookup
+    behavior as live odds resolution. Reporting/readiness only; does not change betting logic.
+    """
+    if not isinstance(trusted_total_source_map, dict) or not isinstance(game, dict):
+        return None
+    away_team = safe_get(game, "away_name", "")
+    home_team = safe_get(game, "home_name", "")
+    row = get_game_odds(
+        away_team,
+        home_team,
+        trusted_total_source_map,
+        commence_time=safe_get(game, "game_datetime", ""),
+    )
+    if not bool(row.get("_match_found", False)):
+        return None
+    if row.get("_raw_total_line") in (None, ""):
+        return None
+    return row
+
+
 def _preflight_count_games_with_non_manual_real_totals(games, odds_map):
     """
     Count slate games with a real O/U from VegasLines that is NOT manual_totals.csv / Manual book.
@@ -2115,10 +2137,10 @@ def run_predictions():
             away_norm = normalize_team_name(safe_get(g, "away_name", ""))
             home_norm = normalize_team_name(safe_get(g, "home_name", ""))
             game_key = f"{away_norm} @ {home_norm}"
-            trow = trusted_total_source_map.get(game_key)
+            trow = _trusted_total_source_row_for_game(g, trusted_total_source_map)
             if trow is not None and trow != {}:
                 t_source = trow.get("_trusted_source", "trusted")
-                t_total = trow.get("total_line")
+                t_total = trow.get("_raw_total_line")
                 t_book = trow.get("book") or ""
                 t_ok = True
             else:
@@ -2576,8 +2598,8 @@ def run_predictions():
         if public_missing:
             opening_missing_public_betting += 1
 
-        trow = trusted_total_source_map.get(game_key) if isinstance(trusted_total_source_map, dict) else None
-        trusted_exists = isinstance(trow, dict) and trow.get("total_line") is not None
+        trow = _trusted_total_source_row_for_game(game, trusted_total_source_map)
+        trusted_exists = isinstance(trow, dict)
         if not trusted_exists:
             opening_missing_trusted_totals += 1
 
