@@ -1386,11 +1386,11 @@ def generate_prediction(
     # market_trust_factor = reserved multiplicative market trust (1.0); public + line = small additive market nudges.
     abs_edge = abs(edge)
     if abs_edge >= 1.0:
-        base_confidence = 0.85
-    elif abs_edge >= 0.5:
         base_confidence = 0.75
+    elif abs_edge >= 0.5:
+        base_confidence = 0.67
     elif abs_edge >= EDGE_THRESHOLD:
-        base_confidence = 0.65
+        base_confidence = 0.58
     else:
         base_confidence = 0.45
 
