@@ -3280,7 +3280,7 @@ def run_predictions():
                 game_data["total_current"] = public.get("total_current", "?")
 
             is_manual_trusted = (odds_info.get("_source") == "manual_totals_csv") and has_real_total
-            fire_threshold = 0.79 if is_manual_trusted else MIN_CONFIDENCE_ALERT
+            fire_threshold = 0.79 if is_manual_trusted else 0.79
             ou_fired = (
                 (confidence >= fire_threshold)
                 and has_real_total
