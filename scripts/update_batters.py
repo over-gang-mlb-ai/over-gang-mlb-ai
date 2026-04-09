@@ -224,7 +224,12 @@ def fetch_person_stats_overall(player_id: int, season: int) -> Optional[dict]:
         if block.get("group", {}).get("displayName") == "hitting" and block.get("type", {}).get("displayName") == "season":
             splits = block.get("splits") or []
             if splits:
-                return splits[0].get("stat") or {}
+                split0 = splits[0] or {}
+                stat = dict(split0.get("stat") or {})
+                team = split0.get("team") or {}
+                stat["_team_id"] = team.get("id")
+                stat["_team_name"] = team.get("name")
+                return stat
     return None
 
 
@@ -260,7 +265,10 @@ def fetch_person_splits_vs_pitching(player_id: int, season: int) -> Tuple[Option
         if block.get("type", {}).get("displayName") != "statSplits":
             continue
         for sp in block.get("splits") or []:
-            stat = sp.get("stat") or {}
+            stat = dict(sp.get("stat") or {})
+            team = sp.get("team") or {}
+            stat["_team_id"] = team.get("id")
+            stat["_team_name"] = team.get("name")
             split_meta = sp.get("split")
             code = None
             if isinstance(split_meta, dict):
@@ -313,6 +321,30 @@ def collect_hitters(season: int) -> pd.DataFrame:
 
             total_players += 1
             core = fetch_person_stats_overall(pid, season) or {}
+            # Prefer the season-stats team as the authoritative identity signal; if missing,
+            # fall back to the split response before accepting the roster membership.
+            vsR, vsL = fetch_person_splits_vs_pitching(pid, season)
+            auth_team_id = core.get("_team_id")
+            auth_team_name = core.get("_team_name") or ""
+            if auth_team_id is None:
+                split_team = (vsR or vsL) or {}
+                auth_team_id = split_team.get("_team_id")
+                auth_team_name = split_team.get("_team_name") or auth_team_name
+            if auth_team_id is not None:
+                try:
+                    auth_team_mismatch = int(auth_team_id) != int(team_id)
+                except Exception:
+                    auth_team_mismatch = str(auth_team_id) != str(team_id)
+            else:
+                auth_team_mismatch = bool(auth_team_name) and norm_key(auth_team_name) != norm_key(team_name or "")
+            if auth_team_mismatch:
+                warn(
+                    f"Skipping hitter with roster/team mismatch: roster={team_name} ({team_id}) "
+                    f"stats={auth_team_name or 'unknown'} ({auth_team_id}) "
+                    f"player={name} ({pid})"
+                )
+                continue
+
             row = PlayerRow(
                 player_id=pid,
                 name=name,
@@ -332,7 +364,6 @@ def collect_hitters(season: int) -> pd.DataFrame:
             )
 
             # Try vs-hand splits
-            vsR, vsL = fetch_person_splits_vs_pitching(pid, season)
             if vsR:
                 row.vsR_PA = _safe_int(vsR.get("plateAppearances"))
                 row.vsR_OBP = _safe_float(vsR.get("obp"))
