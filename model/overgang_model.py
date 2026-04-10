@@ -3032,6 +3032,7 @@ def run_predictions():
                 'Game': game_name,
                 'Game_Status': _game_status_for_export(game),
                 'Venue': venue,
+                'Weather_Runs_Mult': weather_runs_mult,
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
                 'vegas_line': vegas_line,
                 'Total_Is_Real': bool(odds_info.get('_has_real_total', False)),
@@ -3394,7 +3395,7 @@ def run_predictions():
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
         "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
-        "Game", "Game_Status", "Projected_Total", "Away_Runs", "Home_Runs",
+        "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Projected_Total", "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
