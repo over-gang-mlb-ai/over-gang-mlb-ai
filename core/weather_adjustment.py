@@ -149,6 +149,9 @@ def _mult_from_temp_wind(temp_c: float, wind_ms: float) -> float:
     return max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, m))
 
 
+_ALWAYS_ENCLOSED_VENUES: set[str] = {"Tropicana Field"}
+
+
 def compute_weather_runs_mult(venue_name: Optional[str], game_datetime: Optional[str]) -> float:
     """
     Return a bounded multiplier in [WEATHER_RUNS_MULT_MIN, WEATHER_RUNS_MULT_MAX], or 1.0 when
@@ -160,6 +163,8 @@ def compute_weather_runs_mult(venue_name: Optional[str], game_datetime: Optional
         return 1.0
     key = str(venue_name).strip()
     if key == "Unknown":
+        return 1.0
+    if key in _ALWAYS_ENCLOSED_VENUES:
         return 1.0
     coords = VENUE_LAT_LON.get(key)
     if not coords:
