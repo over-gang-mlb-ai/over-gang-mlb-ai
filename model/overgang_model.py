@@ -1454,10 +1454,12 @@ def generate_prediction(
     except Exception as e:
         print(f"⚠️ Public data ou_pct error: {e}")
 
-    if total_current > total_open:
-        confidence += 0.02
-    elif total_current < total_open:
-        confidence -= 0.02
+    if pick in ("OVER", "UNDER"):
+        line_sign = 1 if pick == "OVER" else -1
+        if total_current > total_open:
+            confidence += line_sign * 0.02
+        elif total_current < total_open:
+            confidence -= line_sign * 0.02
 
     confidence = max(0.01, min(confidence, 0.99))
     if not has_real_total:
