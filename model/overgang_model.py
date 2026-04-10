@@ -775,13 +775,13 @@ PARK_FACTORS = {
     "Coors Field": (1.25, 0.80),
     "Fenway Park": (1.15, 0.90),
     "Globe Life Field": (1.15, 0.90),
-    "Camden Yards": (1.10, 0.92),
+    "Oriole Park at Camden Yards": (1.10, 0.92),
     "Great American Ball Park": (1.12, 0.91),
     "Wrigley Field": (1.08, 0.95),
     "Petco Park": (0.92, 1.10),
     "Oracle Park": (0.85, 1.15),
     "Citi Field": (0.90, 1.12),
-    "Dodger Stadium": (0.95, 1.08),
+    "UNIQLO Field at Dodger Stadium": (0.95, 1.08),
     "T-Mobile Park": (0.88, 1.14),
     "Unknown": (1.0, 1.0)
 }

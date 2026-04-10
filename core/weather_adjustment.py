@@ -34,13 +34,13 @@ VENUE_LAT_LON: dict[str, Tuple[float, float]] = {
     "Coors Field": (39.7559, -104.9942),
     "Fenway Park": (42.3467, -71.0972),
     "Globe Life Field": (32.7512, -97.0828),
-    "Camden Yards": (39.2839, -76.6217),
+    "Oriole Park at Camden Yards": (39.2839, -76.6217),
     "Great American Ball Park": (39.0974, -84.5066),
     "Wrigley Field": (41.9484, -87.6553),
     "Petco Park": (32.7073, -117.1570),
     "Oracle Park": (37.7786, -122.3893),
     "Citi Field": (40.7571, -73.8458),
-    "Dodger Stadium": (34.0736, -118.2400),
+    "UNIQLO Field at Dodger Stadium": (34.0736, -118.2400),
     "T-Mobile Park": (47.5914, -122.3325),
 }
 
