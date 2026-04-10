@@ -229,6 +229,39 @@ def _optional_bool_cohort(df: pd.DataFrame, bool_col: str, result_col: str, titl
     )
 
 
+def _weather_runs_mult_bin_label(v: float) -> str:
+    if v < 0.995:
+        return "below_neutral"
+    if v <= 1.005:
+        return "near_neutral"
+    return "above_neutral"
+
+
+def _weather_runs_mult_cohort(df: pd.DataFrame) -> None:
+    wm = _numeric_series(df, "Weather_Runs_Mult")
+    if wm is None or "OU_Result" not in df.columns:
+        print("\nO/U by Weather_Runs_Mult\n------------------------\n(required columns missing)")
+        return
+    work = df.copy()
+    work["_wm_bin"] = wm.map(
+        lambda x: _weather_runs_mult_bin_label(float(x)) if pd.notna(x) else ""
+    )
+    work = work.loc[work["_wm_bin"] != ""]
+    order = ["below_neutral", "near_neutral", "above_neutral"]
+    rows = []
+    for bucket in order:
+        sub = work.loc[work["_wm_bin"] == bucket]
+        if sub.empty:
+            continue
+        n, w, l, p, hit = _result_summary(sub, "OU_Result")
+        rows.append([bucket, str(n), str(w), str(l), str(p), hit, _avg_clv_str(sub)])
+    _print_table(
+        "O/U by Weather_Runs_Mult",
+        ["weather_bin", "rows", "wins", "losses", "pushes", "hit_rate", "avg_clv"],
+        rows,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Performance validation report from archived graded predictions CSVs."
@@ -281,6 +314,8 @@ def main() -> int:
     _ou_edge_calibration(df)
     _optional_bool_cohort(df, "Total_Is_Real", "OU_Result", "O/U by Total_Is_Real")
     _optional_bool_cohort(df, "Projection_Cap_Flag", "OU_Result", "O/U by Projection_Cap_Flag")
+    _optional_bool_cohort(df, "Retractable_Roof_Weather", "OU_Result", "O/U by Retractable_Roof_Weather")
+    _weather_runs_mult_cohort(df)
     return 0
 
 
