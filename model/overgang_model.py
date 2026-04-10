@@ -804,6 +804,16 @@ PARK_FACTORS = {
     "Unknown": (1.0, 1.0)
 }
 
+# MLB Stats API venue_name strings; outdoor weather may not apply when roof is closed (no roof-state source yet).
+RETRACTABLE_ROOF_VENUES = frozenset({
+    "American Family Field",
+    "Chase Field",
+    "Globe Life Field",
+    "loanDepot park",
+    "Rogers Centre",
+    "T-Mobile Park",
+})
+
 
 def _opponent_velocity_run_multiplier(opponent_velo_drop: float) -> float:
     """
@@ -3033,6 +3043,7 @@ def run_predictions():
                 'Game_Status': _game_status_for_export(game),
                 'Venue': venue,
                 'Weather_Runs_Mult': weather_runs_mult,
+                'Retractable_Roof_Weather': venue in RETRACTABLE_ROOF_VENUES,
                 'Pitchers': f"{away_pitcher} vs {home_pitcher}",
                 'vegas_line': vegas_line,
                 'Total_Is_Real': bool(odds_info.get('_has_real_total', False)),
@@ -3395,7 +3406,7 @@ def run_predictions():
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
         "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
-        "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Projected_Total", "Away_Runs", "Home_Runs",
+        "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Retractable_Roof_Weather", "Projected_Total", "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
