@@ -68,7 +68,8 @@ def get_pyth_win_pct(team_name):
 
 def calculate_team_win_probability(home: dict, away: dict) -> tuple:
     """
-    Estimate win probabilities using team quality, starter skill, and bullpen quality/freshness.
+    Estimate win probabilities using starter matchup, bullpen quality/freshness,
+    and team strength (pyth win%).
 
     Inputs:
     - home: dict with keys: 'pyth_win', 'starter_xera', 'bullpen_era',
@@ -78,27 +79,50 @@ def calculate_team_win_probability(home: dict, away: dict) -> tuple:
     Returns:
     - (home_win_prob, away_win_prob)
     """
-    # Normalize each factor (lower xERA / bullpen ERA is better)
-    pyth_score = home['pyth_win'] - away['pyth_win']  # Higher = better
-    xera_score = away['starter_xera'] - home['starter_xera']  # Lower = better
-    pen_score = away['bullpen_era'] - home['bullpen_era']     # Lower = better
-    pen_xera_score = away['bullpen_xera'] - home['bullpen_xera']  # Lower = better
+    # --- raw deltas (positive = home advantage) ---
+    pyth_delta = home['pyth_win'] - away['pyth_win']
+    xera_delta = away['starter_xera'] - home['starter_xera']
+    pen_era_delta = away['bullpen_era'] - home['bullpen_era']
+    pen_xera_delta = away['bullpen_xera'] - home['bullpen_xera']
+
     home_fatigue = _bullpen_fatigue_ratio(home)
     away_fatigue = _bullpen_fatigue_ratio(away)
-    freshness_score = max(-1.0, min(1.0, away_fatigue - home_fatigue))
+    freshness_delta = max(-1.0, min(1.0, away_fatigue - home_fatigue))
 
-    # Combine weighted score
+    # --- weights: matchup-dominant, pyth as light prior ---
+    #   starter xERA  45%  (was 30% with /5 damping — now the primary signal)
+    #   bullpen ERA   22%  (was 15% with /5 damping)
+    #   pyth win%     15%  (was 45% — demoted to seasonal prior)
+    #   bullpen xERA   8%  (was 5% with /5 damping)
+    #   freshness     10%  (was 5%)
+    W_XERA = 0.45
+    W_PEN_ERA = 0.22
+    W_PYTH = 0.15
+    W_PEN_XERA = 0.08
+    W_FRESH = 0.10
+
+    # Pitching deltas are in ERA units (typical range ±2.0, extreme ±3.5).
+    # Divide by league-average ERA to express as a fraction of league baseline,
+    # keeping them comparable to pyth_delta (0-1 scale) without the old /5
+    # over-compression.
+    LEAGUE_ERA_NORM = 4.25
+
     score = (
-        0.45 * pyth_score +
-        0.3 * (xera_score / 5) +
-        0.15 * (pen_score / 5) +
-        0.05 * (pen_xera_score / 5) +
-        0.05 * freshness_score
+        W_XERA * (xera_delta / LEAGUE_ERA_NORM) +
+        W_PEN_ERA * (pen_era_delta / LEAGUE_ERA_NORM) +
+        W_PYTH * pyth_delta +
+        W_PEN_XERA * (pen_xera_delta / LEAGUE_ERA_NORM) +
+        W_FRESH * freshness_delta
     )
 
-    # Convert to probability using logistic-like function
-    home_win_prob = 1 / (1 + 10 ** (-score * 5))
-    away_win_prob = 1 - home_win_prob
+    # Logistic mapping.  Steepness chosen so that realistic MLB inputs
+    # produce ~0.38-0.67 for the favorite (base-10 logistic, k=4).
+    #   mild edge   score≈0.07  → prob≈0.56
+    #   strong edge score≈0.18  → prob≈0.63
+    #   extreme     score≈0.30  → prob≈0.70
+    LOGISTIC_K = 4.0
+    home_win_prob = 1.0 / (1.0 + 10.0 ** (-score * LOGISTIC_K))
+    away_win_prob = 1.0 - home_win_prob
 
     return round(home_win_prob, 3), round(away_win_prob, 3)
 
