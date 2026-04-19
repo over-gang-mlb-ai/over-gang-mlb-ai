@@ -1,5 +1,5 @@
 """
-The Odds API integration for MLB.
+Parlay API integration for MLB.
 Loads ODDS_API_KEY from .env; fetches totals + moneylines (American odds).
 Prefer sharp book first; return safe fallbacks when unavailable.
 Target-date filtering: only keep events whose commence_time (in Mountain Time) matches target_date (YYYY-MM-DD).
@@ -16,7 +16,7 @@ except ImportError:
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 MLB_SPORT_KEY = "baseball_mlb"
-ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+ODDS_BASE_URL = "https://parlay-api.com/v1"
 # Prefer sharp / liquid books first; fall back to first available
 BOOK_PRIORITY = (
     "pinnacle",
