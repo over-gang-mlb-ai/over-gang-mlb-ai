@@ -275,10 +275,42 @@ def fetch_mlb_odds(target_date=None):
             print(f"[ODDS API] Event parsed: away={repr(away)} home={repr(home)} key={repr(key)} book={book_name} (from_fallback_loop={used_fallback_loop})")
             book_choice_log_count += 1
 
+        # Select h2h-capable book independently using the same BOOK_PRIORITY ranking.
+        # Sharp totals books (e.g. pinnacle) may lack h2h; moneylines then come from the
+        # highest-ranked h2h-capable book on the same event. Totals still come from `best`,
+        # so `book` continues to reflect the totals-source book for O/U logic.
+        best_ml = None
+        best_ml_rank = len(BOOK_PRIORITY) + 1
+        for book in event.get("bookmakers") or []:
+            book_key = (book.get("key") or "").lower()
+            try:
+                rank = BOOK_PRIORITY.index(book_key)
+            except ValueError:
+                rank = len(BOOK_PRIORITY)
+            if rank >= best_ml_rank:
+                continue
+            has_h2h = any((m.get("key") == "h2h") for m in (book.get("markets") or []))
+            if not has_h2h:
+                continue
+            best_ml_rank = rank
+            best_ml = book
+        if best_ml is None:
+            for book in event.get("bookmakers") or []:
+                if any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
+                    best_ml = book
+                    break
+
         # Inject home/away for h2h parsing
         best["_home"] = home
         best["_away"] = away
-        total_line, over_juice, under_juice, ml_home, ml_away = _parse_totals_and_h2h(best)
+        total_line, over_juice, under_juice, _, _ = _parse_totals_and_h2h(best)
+        if best_ml is not None:
+            best_ml["_home"] = home
+            best_ml["_away"] = away
+            _, _, _, ml_home, ml_away = _parse_totals_and_h2h(best_ml)
+        else:
+            ml_home = None
+            ml_away = None
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
