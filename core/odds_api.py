@@ -345,6 +345,9 @@ def fetch_mlb_odds(target_date=None):
                     break
 
         if best is None:
+            # No totals book on this event: keep the diagnostic log but do NOT early-exit.
+            # Totals fields stay at defaults; the h2h / per-book ML passes below still run so
+            # moneyline markets and sharpness inputs aren't discarded along with missing totals.
             if no_totals_log_count < no_totals_log_cap:
                 book_keys = [b.get("key") or "?" for b in (event.get("bookmakers") or [])]
                 market_keys_per_book = []
@@ -354,19 +357,8 @@ def fetch_mlb_odds(target_date=None):
                 print(f"[ODDS API] Event has no book with totals market: away={repr(away)} home={repr(home)}")
                 print(f"[ODDS API]   books: {book_keys}; markets per book: {market_keys_per_book}")
                 no_totals_log_count += 1
-            result[key] = {
-                "total_line": DEFAULT_TOTAL,
-                "over_juice": DEFAULT_JUICE,
-                "under_juice": DEFAULT_JUICE,
-                "ml_home": None,
-                "ml_away": None,
-                "book": "",
-                "_coarse_game_key": coarse_key,
-                "_commence_time": _canonical_commence_time(commence_str),
-            }
-            continue
 
-        if book_choice_log_count < book_choice_log_cap:
+        if best is not None and book_choice_log_count < book_choice_log_cap:
             book_name = best.get("title") or best.get("key") or "?"
             print(f"[ODDS API] Event parsed: away={repr(away)} home={repr(home)} key={repr(key)} book={book_name} (from_fallback_loop={used_fallback_loop})")
             book_choice_log_count += 1
@@ -396,10 +388,16 @@ def fetch_mlb_odds(target_date=None):
                     best_ml = book
                     break
 
-        # Inject home/away for h2h parsing
-        best["_home"] = home
-        best["_away"] = away
-        total_line, over_juice, under_juice, _, _ = _parse_totals_and_h2h(best)
+        # Totals parsing (only when a totals book exists). When best is None, totals fields
+        # remain at the defaults declared above — matching the prior no-totals row shape.
+        if best is not None:
+            best["_home"] = home
+            best["_away"] = away
+            total_line, over_juice, under_juice, _, _ = _parse_totals_and_h2h(best)
+        else:
+            total_line = DEFAULT_TOTAL
+            over_juice = DEFAULT_JUICE
+            under_juice = DEFAULT_JUICE
         if best_ml is not None:
             best_ml["_home"] = home
             best_ml["_away"] = away
@@ -414,7 +412,7 @@ def fetch_mlb_odds(target_date=None):
             "under_juice": under_juice,
             "ml_home": ml_home,
             "ml_away": ml_away,
-            "book": (best.get("title") or best.get("key") or ""),
+            "book": (best.get("title") or best.get("key") or "") if best is not None else "",
             "_coarse_game_key": coarse_key,
             "_commence_time": _canonical_commence_time(commence_str),
             **per_book_ml,
