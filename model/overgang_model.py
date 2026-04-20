@@ -2098,9 +2098,10 @@ def run_predictions():
             if total < 5 or total > 15:
                 return False
             book = str(row.get("book") or "").strip()
+            if not book:
+                return False
             if book.lower().strip() == "scrambled":
                 return False
-            # Empty book is OK when other signals mark a real line (Odds API usually sets book).
             return True
 
         # Trusted real-total lane: Odds API only
