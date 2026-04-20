@@ -104,6 +104,56 @@ def _event_key(away_team, home_team, commence_time_str=None):
     return f"{coarse} @@ {ct}" if coarse and ct else coarse
 
 
+def _h2h_name_matches(outcome_name, event_team):
+    """True when an h2h outcome `name` refers to `event_team`, tolerant of provider
+    abbreviations / aliases (e.g. "ARI Diamondbacks" vs "Arizona Diamondbacks",
+    "CHI White Sox" vs "Chicago White Sox", "Braves" vs "Atlanta Braves").
+
+    Matching order (each rejects fast on empty inputs; first match wins):
+      1) byte-equal (preserves original behavior for exact matches).
+      2) case- and whitespace-collapsed equality.
+      3) alias normalization on both sides via core.public_betting_loader
+         .normalize_team_name (direct lookup + partial-substring fallback).
+      4) bounded token-sweep: every consecutive-token substring of the outcome
+         name is tested as a direct TEAM_ALIASES key; if any resolves to the
+         same canonical full name as the event team, it matches. This handles
+         leading-code abbreviations like "ARI Diamondbacks" where neither full
+         string is an alias key but "diamondbacks" alone is.
+
+    Does not invent prices. Does not modify caller state. Returns bool.
+    """
+    if not outcome_name or not event_team:
+        return False
+    a = str(outcome_name).strip()
+    b = str(event_team).strip()
+    if a == b:
+        return True
+    a_lc = " ".join(a.lower().split())
+    b_lc = " ".join(b.lower().split())
+    if a_lc and a_lc == b_lc:
+        return True
+    try:
+        from core.public_betting_loader import normalize_team_name, TEAM_ALIASES
+    except Exception:
+        return False
+    b_norm = normalize_team_name(b_lc) if b_lc else ""
+    if not b_norm:
+        return False
+    a_norm = normalize_team_name(a_lc) if a_lc else ""
+    if a_norm and a_norm == b_norm:
+        return True
+    tokens = a_lc.split()
+    for start in range(len(tokens)):
+        for end in range(start + 1, len(tokens) + 1):
+            frag = " ".join(tokens[start:end])
+            if not frag:
+                continue
+            resolved = TEAM_ALIASES.get(frag)
+            if resolved and resolved == b_norm:
+                return True
+    return False
+
+
 def _parse_totals_and_h2h(book):
     """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away).
 
@@ -113,6 +163,10 @@ def _parse_totals_and_h2h(book):
     before ``int()`` / ``float()`` is invoked. Return shape and existing semantics are unchanged
     when values are valid; missing/null totals fall through to DEFAULT_TOTAL / DEFAULT_JUICE, and
     a missing/null h2h price for a side leaves that side's ML value as ``None``.
+
+    Team-label matching on the h2h branch goes through ``_h2h_name_matches`` which accepts
+    provider abbreviations / aliases (e.g. ``"ARI Diamondbacks"`` vs ``"Arizona Diamondbacks"``)
+    in addition to exact-string equality. Does not invent prices.
     """
     total_line = DEFAULT_TOTAL
     over_juice = under_juice = DEFAULT_JUICE
@@ -152,9 +206,9 @@ def _parse_totals_and_h2h(book):
                     p = int(raw_price)
                 except (TypeError, ValueError):
                     continue
-                if n == home:
+                if _h2h_name_matches(n, home):
                     ml_home = p
-                elif n == away:
+                elif _h2h_name_matches(n, away):
                     ml_away = p
     return total_line, over_juice, under_juice, ml_home, ml_away
 
