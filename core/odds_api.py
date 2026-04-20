@@ -1,5 +1,5 @@
 """
-The Odds API integration for MLB.
+Parlay API integration for MLB.
 Loads ODDS_API_KEY from .env; fetches totals + moneylines (American odds).
 Prefer sharp book first; return safe fallbacks when unavailable.
 Target-date filtering: only keep events whose commence_time (in Mountain Time) matches target_date (YYYY-MM-DD).
@@ -16,7 +16,7 @@ except ImportError:
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 MLB_SPORT_KEY = "baseball_mlb"
-ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+ODDS_BASE_URL = "https://parlay-api.com/v1"
 # Prefer sharp / liquid books first; fall back to first available
 BOOK_PRIORITY = (
     "pinnacle",
@@ -104,8 +104,70 @@ def _event_key(away_team, home_team, commence_time_str=None):
     return f"{coarse} @@ {ct}" if coarse and ct else coarse
 
 
+def _h2h_name_matches(outcome_name, event_team):
+    """True when an h2h outcome `name` refers to `event_team`, tolerant of provider
+    abbreviations / aliases (e.g. "ARI Diamondbacks" vs "Arizona Diamondbacks",
+    "CHI White Sox" vs "Chicago White Sox", "Braves" vs "Atlanta Braves").
+
+    Matching order (each rejects fast on empty inputs; first match wins):
+      1) byte-equal (preserves original behavior for exact matches).
+      2) case- and whitespace-collapsed equality.
+      3) alias normalization on both sides via core.public_betting_loader
+         .normalize_team_name (direct lookup + partial-substring fallback).
+      4) bounded token-sweep: every consecutive-token substring of the outcome
+         name is tested as a direct TEAM_ALIASES key; if any resolves to the
+         same canonical full name as the event team, it matches. This handles
+         leading-code abbreviations like "ARI Diamondbacks" where neither full
+         string is an alias key but "diamondbacks" alone is.
+
+    Does not invent prices. Does not modify caller state. Returns bool.
+    """
+    if not outcome_name or not event_team:
+        return False
+    a = str(outcome_name).strip()
+    b = str(event_team).strip()
+    if a == b:
+        return True
+    a_lc = " ".join(a.lower().split())
+    b_lc = " ".join(b.lower().split())
+    if a_lc and a_lc == b_lc:
+        return True
+    try:
+        from core.public_betting_loader import normalize_team_name, TEAM_ALIASES
+    except Exception:
+        return False
+    b_norm = normalize_team_name(b_lc) if b_lc else ""
+    if not b_norm:
+        return False
+    a_norm = normalize_team_name(a_lc) if a_lc else ""
+    if a_norm and a_norm == b_norm:
+        return True
+    tokens = a_lc.split()
+    for start in range(len(tokens)):
+        for end in range(start + 1, len(tokens) + 1):
+            frag = " ".join(tokens[start:end])
+            if not frag:
+                continue
+            resolved = TEAM_ALIASES.get(frag)
+            if resolved and resolved == b_norm:
+                return True
+    return False
+
+
 def _parse_totals_and_h2h(book):
-    """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away)."""
+    """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away).
+
+    None-safe for `price` and `point`: Parlay (exchange-sourced feeds in particular) can return
+    outcomes with explicit ``"price": null`` / ``"point": null`` for illiquid sides. ``dict.get``
+    returns the stored ``None`` rather than the default in that case, so each cast is guarded
+    before ``int()`` / ``float()`` is invoked. Return shape and existing semantics are unchanged
+    when values are valid; missing/null totals fall through to DEFAULT_TOTAL / DEFAULT_JUICE, and
+    a missing/null h2h price for a side leaves that side's ML value as ``None``.
+
+    Team-label matching on the h2h branch goes through ``_h2h_name_matches`` which accepts
+    provider abbreviations / aliases (e.g. ``"ARI Diamondbacks"`` vs ``"Arizona Diamondbacks"``)
+    in addition to exact-string equality. Does not invent prices.
+    """
     total_line = DEFAULT_TOTAL
     over_juice = under_juice = DEFAULT_JUICE
     ml_home = ml_away = None
@@ -114,23 +176,111 @@ def _parse_totals_and_h2h(book):
             outcomes = market.get("outcomes") or []
             for o in outcomes:
                 name = (o.get("name") or "").lower()
+                if name not in ("over", "under"):
+                    continue
+                raw_point = o.get("point")
+                raw_price = o.get("price")
+                try:
+                    pt = float(raw_point) if raw_point is not None else DEFAULT_TOTAL
+                except (TypeError, ValueError):
+                    pt = DEFAULT_TOTAL
+                try:
+                    pr = int(raw_price) if raw_price is not None else DEFAULT_JUICE
+                except (TypeError, ValueError):
+                    pr = DEFAULT_JUICE
                 if name == "over":
-                    total_line = float(o.get("point", DEFAULT_TOTAL))
-                    over_juice = int(o.get("price", DEFAULT_JUICE))
-                elif name == "under":
-                    total_line = float(o.get("point", DEFAULT_TOTAL))
-                    under_juice = int(o.get("price", DEFAULT_JUICE))
+                    total_line = pt
+                    over_juice = pr
+                else:
+                    total_line = pt
+                    under_juice = pr
         elif market.get("key") == "h2h":
             home = book.get("_home")  # we'll set this from event
             away = book.get("_away")
             for o in market.get("outcomes") or []:
                 n = (o.get("name") or "").strip()
-                p = int(o.get("price", 0))
-                if n == home:
+                raw_price = o.get("price")
+                if raw_price is None:
+                    continue
+                try:
+                    p = int(raw_price)
+                except (TypeError, ValueError):
+                    continue
+                if _h2h_name_matches(n, home):
                     ml_home = p
-                elif n == away:
+                elif _h2h_name_matches(n, away):
                     ml_away = p
     return total_line, over_juice, under_juice, ml_home, ml_away
+
+
+def _extract_per_book_ml_flags(event, home, away):
+    """Additive overlay for Novig / ProphetX / Pinnacle h2h prices plus presence flags.
+
+    Does not alter the existing totals/h2h book selection. Purely additive fields
+    consumed downstream as a parallel ML sharpness / market-truth fire gate.
+
+    Uses case-insensitive substring match on bookmaker.key so vendor variants
+    (e.g. 'novig' / 'novig_exchange', 'prophetx' / 'prophet_x', 'pinnacle') all
+    resolve to their logical book. For each target, picks the first bookmaker
+    whose key contains the substring and which carries an h2h market.
+
+    Returns a dict with:
+      novig_ml_home, novig_ml_away,
+      prophetx_ml_home, prophetx_ml_away,
+      pinnacle_ml_home, pinnacle_ml_away,
+      exchange_present (bool; True when novig or prophetx has a usable h2h pair),
+      prophetx_present (bool; ProphetX h2h pair usable — observational only),
+      pinnacle_present (bool; Pinnacle h2h pair usable).
+    Missing values default to None / False.
+    """
+    result = {
+        "novig_ml_home": None,
+        "novig_ml_away": None,
+        "prophetx_ml_home": None,
+        "prophetx_ml_away": None,
+        "pinnacle_ml_home": None,
+        "pinnacle_ml_away": None,
+        "exchange_present": False,
+        "prophetx_present": False,
+        "pinnacle_present": False,
+    }
+    targets = (
+        ("novig", "novig_ml_home", "novig_ml_away"),
+        ("prophetx", "prophetx_ml_home", "prophetx_ml_away"),
+        ("pinnacle", "pinnacle_ml_home", "pinnacle_ml_away"),
+    )
+    for sub, home_key, away_key in targets:
+        chosen = None
+        for book in event.get("bookmakers") or []:
+            bk = (book.get("key") or "").lower()
+            if sub not in bk:
+                continue
+            if not any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
+                continue
+            chosen = book
+            break
+        if chosen is None:
+            continue
+        chosen["_home"] = home
+        chosen["_away"] = away
+        try:
+            _, _, _, mh, ma = _parse_totals_and_h2h(chosen)
+        except Exception:
+            mh = None
+            ma = None
+        result[home_key] = mh
+        result[away_key] = ma
+        pair_present = (mh is not None) and (ma is not None)
+        if sub == "novig":
+            if pair_present:
+                result["exchange_present"] = True
+        elif sub == "prophetx":
+            result["prophetx_present"] = pair_present
+            if pair_present:
+                result["exchange_present"] = True
+        elif sub == "pinnacle":
+            result["pinnacle_present"] = pair_present
+    return result
 
 
 def fetch_mlb_odds(target_date=None):
@@ -249,6 +399,9 @@ def fetch_mlb_odds(target_date=None):
                     break
 
         if best is None:
+            # No totals book on this event: keep the diagnostic log but do NOT early-exit.
+            # Totals fields stay at defaults; the h2h / per-book ML passes below still run so
+            # moneyline markets and sharpness inputs aren't discarded along with missing totals.
             if no_totals_log_count < no_totals_log_cap:
                 book_keys = [b.get("key") or "?" for b in (event.get("bookmakers") or [])]
                 market_keys_per_book = []
@@ -258,36 +411,107 @@ def fetch_mlb_odds(target_date=None):
                 print(f"[ODDS API] Event has no book with totals market: away={repr(away)} home={repr(home)}")
                 print(f"[ODDS API]   books: {book_keys}; markets per book: {market_keys_per_book}")
                 no_totals_log_count += 1
-            result[key] = {
-                "total_line": DEFAULT_TOTAL,
-                "over_juice": DEFAULT_JUICE,
-                "under_juice": DEFAULT_JUICE,
-                "ml_home": None,
-                "ml_away": None,
-                "book": "",
-                "_coarse_game_key": coarse_key,
-                "_commence_time": _canonical_commence_time(commence_str),
-            }
-            continue
 
-        if book_choice_log_count < book_choice_log_cap:
+        if best is not None and book_choice_log_count < book_choice_log_cap:
             book_name = best.get("title") or best.get("key") or "?"
             print(f"[ODDS API] Event parsed: away={repr(away)} home={repr(home)} key={repr(key)} book={book_name} (from_fallback_loop={used_fallback_loop})")
             book_choice_log_count += 1
 
-        # Inject home/away for h2h parsing
-        best["_home"] = home
-        best["_away"] = away
-        total_line, over_juice, under_juice, ml_home, ml_away = _parse_totals_and_h2h(best)
+        # Select h2h-capable book independently using the same BOOK_PRIORITY ranking.
+        # Sharp totals books (e.g. pinnacle) may lack h2h; moneylines then come from the
+        # highest-ranked h2h-capable book on the same event. Totals still come from `best`,
+        # so `book` continues to reflect the totals-source book for O/U logic.
+        #
+        # Two-sided preference: for each ranked h2h bookmaker we call _parse_totals_and_h2h
+        # to see whether it yields BOTH ml_home and ml_away. The first such book wins.
+        # If no ranked book is two-sided, we fall back to the best ranked one-sided book,
+        # and finally to the first bookmaker with any h2h market (matching the prior
+        # fallback order). Team-label injection is required on the probe copy so the h2h
+        # branch in _parse_totals_and_h2h can match outcome.name == _home/_away.
+        best_ml = None
+        best_ml_rank = len(BOOK_PRIORITY) + 1
+        best_ml_is_two_sided = False
+        best_ml_one_sided_candidate = None
+        best_ml_one_sided_rank = len(BOOK_PRIORITY) + 1
+        for book in event.get("bookmakers") or []:
+            book_key = (book.get("key") or "").lower()
+            try:
+                rank = BOOK_PRIORITY.index(book_key)
+            except ValueError:
+                rank = len(BOOK_PRIORITY)
+            has_h2h = any((m.get("key") == "h2h") for m in (book.get("markets") or []))
+            if not has_h2h:
+                continue
+            book["_home"] = home
+            book["_away"] = away
+            try:
+                _, _, _, probe_home, probe_away = _parse_totals_and_h2h(book)
+            except Exception:
+                probe_home = None
+                probe_away = None
+            two_sided = (probe_home is not None) and (probe_away is not None)
+            one_sided = (probe_home is not None) or (probe_away is not None)
+            if two_sided and rank < best_ml_rank:
+                best_ml = book
+                best_ml_rank = rank
+                best_ml_is_two_sided = True
+            if (not best_ml_is_two_sided) and one_sided and rank < best_ml_one_sided_rank:
+                best_ml_one_sided_candidate = book
+                best_ml_one_sided_rank = rank
+        if best_ml is None:
+            best_ml = best_ml_one_sided_candidate
+        if best_ml is None:
+            for book in event.get("bookmakers") or []:
+                if any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
+                    best_ml = book
+                    break
+
+        # Totals parsing (only when a totals book exists). When best is None, totals fields
+        # remain at the defaults declared above — matching the prior no-totals row shape.
+        if best is not None:
+            best["_home"] = home
+            best["_away"] = away
+            total_line, over_juice, under_juice, _, _ = _parse_totals_and_h2h(best)
+        else:
+            total_line = DEFAULT_TOTAL
+            over_juice = DEFAULT_JUICE
+            under_juice = DEFAULT_JUICE
+        if best_ml is not None:
+            best_ml["_home"] = home
+            best_ml["_away"] = away
+            _, _, _, ml_home, ml_away = _parse_totals_and_h2h(best_ml)
+        else:
+            ml_home = None
+            ml_away = None
+        per_book_ml = _extract_per_book_ml_flags(event, home, away)
+
+        # Missing-side backfill: if selected-book parsing left ml_home or ml_away as None,
+        # fill the missing side from already-computed per-book ML pairs in priority order
+        # (Pinnacle → Novig → ProphetX). `book` stays tied to the totals source for O/U
+        # logic; this only populates the ML scalars. No downstream contract changes.
+        if ml_home is None:
+            for _src_home in ("pinnacle_ml_home", "novig_ml_home", "prophetx_ml_home"):
+                _v = per_book_ml.get(_src_home)
+                if _v is not None:
+                    ml_home = _v
+                    break
+        if ml_away is None:
+            for _src_away in ("pinnacle_ml_away", "novig_ml_away", "prophetx_ml_away"):
+                _v = per_book_ml.get(_src_away)
+                if _v is not None:
+                    ml_away = _v
+                    break
+
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
             "under_juice": under_juice,
             "ml_home": ml_home,
             "ml_away": ml_away,
-            "book": (best.get("title") or best.get("key") or ""),
+            "book": (best.get("title") or best.get("key") or "") if best is not None else "",
             "_coarse_game_key": coarse_key,
             "_commence_time": _canonical_commence_time(commence_str),
+            **per_book_ml,
         }
 
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
@@ -380,6 +604,15 @@ def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
             "_coarse_game_key": row.get("_coarse_game_key") or coarse_key,
             "_commence_time": row.get("_commence_time") or _canonical_commence_time(commence_time),
             "_raw_total_line": raw_line,
+            "novig_ml_home": row.get("novig_ml_home"),
+            "novig_ml_away": row.get("novig_ml_away"),
+            "prophetx_ml_home": row.get("prophetx_ml_home"),
+            "prophetx_ml_away": row.get("prophetx_ml_away"),
+            "pinnacle_ml_home": row.get("pinnacle_ml_home"),
+            "pinnacle_ml_away": row.get("pinnacle_ml_away"),
+            "exchange_present": bool(row.get("exchange_present", False)),
+            "prophetx_present": bool(row.get("prophetx_present", False)),
+            "pinnacle_present": bool(row.get("pinnacle_present", False)),
         })
         return out
     return {
@@ -394,4 +627,13 @@ def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
         "_coarse_game_key": coarse_key,
         "_commence_time": _canonical_commence_time(commence_time),
         "_raw_total_line": None,
+        "novig_ml_home": None,
+        "novig_ml_away": None,
+        "prophetx_ml_home": None,
+        "prophetx_ml_away": None,
+        "pinnacle_ml_home": None,
+        "pinnacle_ml_away": None,
+        "exchange_present": False,
+        "prophetx_present": False,
+        "pinnacle_present": False,
     }

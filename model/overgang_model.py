@@ -222,6 +222,11 @@ max_ml_cap = 0.80
 MIN_ML_QUALITY_PENALTY_FOR_FIRE = 0.90
 # Picked-side edge (adjusted prob minus de-vig implied); blocks thin ML_Fired when win prob alone clears.
 MIN_ML_EDGE_FOR_FIRE = 0.05
+# ML sharpness / market-truth parallel fire gate: max allowed absolute gap (fraction, 0.10 = 10pp)
+# between Novig-exchange and Pinnacle-sharp de-vigged implied probability on the picked side.
+# Fail-open when sharpness inputs are absent/invalid — the gate can only block a fire that
+# would otherwise pass; it never changes confidence, Kelly, Telegram send, or O/U behavior.
+MAX_EXCHANGE_VS_SHARP_GAP = 0.10
 DATA_DIR = "data"
 
 
@@ -3217,6 +3222,20 @@ def run_predictions():
             )
             ml_market_ok = ml_market_status == "ok"
 
+            # Parallel ML sharpness / market-truth gate (observational + blocking).
+            # Uses additive per-book fields emitted by core/odds_api.py:
+            #   novig_ml_home/away, pinnacle_ml_home/away, exchange_present, pinnacle_present, prophetx_present.
+            # Never alters ml_conf, adjusted_*_win_prob, Kelly, or Telegram confidence gate.
+            _novig_ih, _novig_ia, _novig_status = _ml_pair_devig_implied(
+                odds_info.get("novig_ml_home"), odds_info.get("novig_ml_away")
+            )
+            _pinn_ih, _pinn_ia, _pinn_status = _ml_pair_devig_implied(
+                odds_info.get("pinnacle_ml_home"), odds_info.get("pinnacle_ml_away")
+            )
+            exchange_present_flag = bool(odds_info.get("exchange_present", False))
+            prophetx_present_flag = bool(odds_info.get("prophetx_present", False))
+            pinnacle_present_flag = bool(odds_info.get("pinnacle_present", False))
+
             if ml_market_ok:
                 home_kelly = calculate_kelly_units(adjusted_home_win_prob, implied_home)
                 away_kelly = calculate_kelly_units(adjusted_away_win_prob, implied_away)
@@ -3260,10 +3279,36 @@ def run_predictions():
                 ml_edge_num is not None
                 and float(ml_edge_num) >= float(MIN_ML_EDGE_FOR_FIRE)
             )
+
+            # ML sharpness parallel gate: observed on picked side only. Fail-open when
+            # either novig or pinnacle de-vigged implied is unavailable for that side.
+            # Never modifies ml_conf, adjusted probs, ml_edge_num, or Kelly.
+            _picked_novig_implied = (
+                _novig_ih if ml_side == "home" else _novig_ia
+            )
+            _picked_pinn_implied = (
+                _pinn_ih if ml_side == "home" else _pinn_ia
+            )
+            if (_picked_novig_implied is not None) and (_picked_pinn_implied is not None):
+                ml_exchange_vs_sharp_gap = float(
+                    _picked_novig_implied
+                ) - float(_picked_pinn_implied)
+                ml_sharpness_inputs_ok = True
+            else:
+                ml_exchange_vs_sharp_gap = None
+                ml_sharpness_inputs_ok = False
+            if ml_sharpness_inputs_ok:
+                ml_sharpness_ok = abs(ml_exchange_vs_sharp_gap) <= float(
+                    MAX_EXCHANGE_VS_SHARP_GAP
+                )
+            else:
+                ml_sharpness_ok = True  # fail-open: gate cannot block without both inputs
+
             ml_fired = bool(
                 ml_fire_eligible
                 and (ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
                 and ml_edge_meets_min
+                and ml_sharpness_ok
             )
             ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
 
@@ -3279,6 +3324,8 @@ def run_predictions():
                 no_fire_ml = "ml_win_prob_below_threshold"
             elif not ml_edge_meets_min:
                 no_fire_ml = "ml_edge_below_threshold"
+            elif not ml_sharpness_ok:
+                no_fire_ml = "ml_sharpness_gap_exceeded"
             else:
                 no_fire_ml = "ml_win_prob_below_threshold"
 
@@ -3293,6 +3340,16 @@ def run_predictions():
                 "ML_Quality_Factor": ml_quality_penalty,
                 "ML_Market_OK": ml_market_ok,
                 "ML_Market_Status": ml_market_status,
+                "ML_Exchange_Present": exchange_present_flag,
+                "ML_Prophetx_Present": prophetx_present_flag,
+                "ML_Pinnacle_Present": pinnacle_present_flag,
+                "ML_Sharpness_Inputs_OK": ml_sharpness_inputs_ok,
+                "ML_Sharpness_OK": ml_sharpness_ok,
+                "ML_Exchange_Vs_Sharp_Gap": (
+                    round(ml_exchange_vs_sharp_gap, 4)
+                    if ml_exchange_vs_sharp_gap is not None
+                    else ""
+                ),
                 "ML_Edge": round(ml_edge_num, 2) if ml_edge_num is not None else "",
                 "ML_Side": ml_side,
                 "ML_Bet_Type": "moneyline",
@@ -3424,6 +3481,8 @@ def run_predictions():
         "Bet_Line", "Closing_Line", "CLV", "CLV_Result",
         "OU_Result", "ML_Result",
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag", "ML_Quality_Factor",
+        "ML_Exchange_Present", "ML_Prophetx_Present", "ML_Pinnacle_Present",
+        "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Exchange_Vs_Sharp_Gap",
         "OU_Confidence_Bucket", "ML_Confidence_Bucket",
     ]
     eligible_export = [
