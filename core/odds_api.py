@@ -105,7 +105,15 @@ def _event_key(away_team, home_team, commence_time_str=None):
 
 
 def _parse_totals_and_h2h(book):
-    """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away)."""
+    """From one bookmaker, extract totals (line, over_juice, under_juice) and h2h (ml_home, ml_away).
+
+    None-safe for `price` and `point`: Parlay (exchange-sourced feeds in particular) can return
+    outcomes with explicit ``"price": null`` / ``"point": null`` for illiquid sides. ``dict.get``
+    returns the stored ``None`` rather than the default in that case, so each cast is guarded
+    before ``int()`` / ``float()`` is invoked. Return shape and existing semantics are unchanged
+    when values are valid; missing/null totals fall through to DEFAULT_TOTAL / DEFAULT_JUICE, and
+    a missing/null h2h price for a side leaves that side's ML value as ``None``.
+    """
     total_line = DEFAULT_TOTAL
     over_juice = under_juice = DEFAULT_JUICE
     ml_home = ml_away = None
@@ -114,18 +122,36 @@ def _parse_totals_and_h2h(book):
             outcomes = market.get("outcomes") or []
             for o in outcomes:
                 name = (o.get("name") or "").lower()
+                if name not in ("over", "under"):
+                    continue
+                raw_point = o.get("point")
+                raw_price = o.get("price")
+                try:
+                    pt = float(raw_point) if raw_point is not None else DEFAULT_TOTAL
+                except (TypeError, ValueError):
+                    pt = DEFAULT_TOTAL
+                try:
+                    pr = int(raw_price) if raw_price is not None else DEFAULT_JUICE
+                except (TypeError, ValueError):
+                    pr = DEFAULT_JUICE
                 if name == "over":
-                    total_line = float(o.get("point", DEFAULT_TOTAL))
-                    over_juice = int(o.get("price", DEFAULT_JUICE))
-                elif name == "under":
-                    total_line = float(o.get("point", DEFAULT_TOTAL))
-                    under_juice = int(o.get("price", DEFAULT_JUICE))
+                    total_line = pt
+                    over_juice = pr
+                else:
+                    total_line = pt
+                    under_juice = pr
         elif market.get("key") == "h2h":
             home = book.get("_home")  # we'll set this from event
             away = book.get("_away")
             for o in market.get("outcomes") or []:
                 n = (o.get("name") or "").strip()
-                p = int(o.get("price", 0))
+                raw_price = o.get("price")
+                if raw_price is None:
+                    continue
+                try:
+                    p = int(raw_price)
+                except (TypeError, ValueError):
+                    continue
                 if n == home:
                     ml_home = p
                 elif n == away:
