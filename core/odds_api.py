@@ -367,21 +367,45 @@ def fetch_mlb_odds(target_date=None):
         # Sharp totals books (e.g. pinnacle) may lack h2h; moneylines then come from the
         # highest-ranked h2h-capable book on the same event. Totals still come from `best`,
         # so `book` continues to reflect the totals-source book for O/U logic.
+        #
+        # Two-sided preference: for each ranked h2h bookmaker we call _parse_totals_and_h2h
+        # to see whether it yields BOTH ml_home and ml_away. The first such book wins.
+        # If no ranked book is two-sided, we fall back to the best ranked one-sided book,
+        # and finally to the first bookmaker with any h2h market (matching the prior
+        # fallback order). Team-label injection is required on the probe copy so the h2h
+        # branch in _parse_totals_and_h2h can match outcome.name == _home/_away.
         best_ml = None
         best_ml_rank = len(BOOK_PRIORITY) + 1
+        best_ml_is_two_sided = False
+        best_ml_one_sided_candidate = None
+        best_ml_one_sided_rank = len(BOOK_PRIORITY) + 1
         for book in event.get("bookmakers") or []:
             book_key = (book.get("key") or "").lower()
             try:
                 rank = BOOK_PRIORITY.index(book_key)
             except ValueError:
                 rank = len(BOOK_PRIORITY)
-            if rank >= best_ml_rank:
-                continue
             has_h2h = any((m.get("key") == "h2h") for m in (book.get("markets") or []))
             if not has_h2h:
                 continue
-            best_ml_rank = rank
-            best_ml = book
+            book["_home"] = home
+            book["_away"] = away
+            try:
+                _, _, _, probe_home, probe_away = _parse_totals_and_h2h(book)
+            except Exception:
+                probe_home = None
+                probe_away = None
+            two_sided = (probe_home is not None) and (probe_away is not None)
+            one_sided = (probe_home is not None) or (probe_away is not None)
+            if two_sided and rank < best_ml_rank:
+                best_ml = book
+                best_ml_rank = rank
+                best_ml_is_two_sided = True
+            if (not best_ml_is_two_sided) and one_sided and rank < best_ml_one_sided_rank:
+                best_ml_one_sided_candidate = book
+                best_ml_one_sided_rank = rank
+        if best_ml is None:
+            best_ml = best_ml_one_sided_candidate
         if best_ml is None:
             for book in event.get("bookmakers") or []:
                 if any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
@@ -406,6 +430,24 @@ def fetch_mlb_odds(target_date=None):
             ml_home = None
             ml_away = None
         per_book_ml = _extract_per_book_ml_flags(event, home, away)
+
+        # Missing-side backfill: if selected-book parsing left ml_home or ml_away as None,
+        # fill the missing side from already-computed per-book ML pairs in priority order
+        # (Pinnacle → Novig → ProphetX). `book` stays tied to the totals source for O/U
+        # logic; this only populates the ML scalars. No downstream contract changes.
+        if ml_home is None:
+            for _src_home in ("pinnacle_ml_home", "novig_ml_home", "prophetx_ml_home"):
+                _v = per_book_ml.get(_src_home)
+                if _v is not None:
+                    ml_home = _v
+                    break
+        if ml_away is None:
+            for _src_away in ("pinnacle_ml_away", "novig_ml_away", "prophetx_ml_away"):
+                _v = per_book_ml.get(_src_away)
+                if _v is not None:
+                    ml_away = _v
+                    break
+
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
