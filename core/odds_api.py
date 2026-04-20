@@ -133,6 +133,76 @@ def _parse_totals_and_h2h(book):
     return total_line, over_juice, under_juice, ml_home, ml_away
 
 
+def _extract_per_book_ml_flags(event, home, away):
+    """Additive overlay for Novig / ProphetX / Pinnacle h2h prices plus presence flags.
+
+    Does not alter the existing totals/h2h book selection. Purely additive fields
+    consumed downstream as a parallel ML sharpness / market-truth fire gate.
+
+    Uses case-insensitive substring match on bookmaker.key so vendor variants
+    (e.g. 'novig' / 'novig_exchange', 'prophetx' / 'prophet_x', 'pinnacle') all
+    resolve to their logical book. For each target, picks the first bookmaker
+    whose key contains the substring and which carries an h2h market.
+
+    Returns a dict with:
+      novig_ml_home, novig_ml_away,
+      prophetx_ml_home, prophetx_ml_away,
+      pinnacle_ml_home, pinnacle_ml_away,
+      exchange_present (bool; True when novig or prophetx has a usable h2h pair),
+      prophetx_present (bool; ProphetX h2h pair usable — observational only),
+      pinnacle_present (bool; Pinnacle h2h pair usable).
+    Missing values default to None / False.
+    """
+    result = {
+        "novig_ml_home": None,
+        "novig_ml_away": None,
+        "prophetx_ml_home": None,
+        "prophetx_ml_away": None,
+        "pinnacle_ml_home": None,
+        "pinnacle_ml_away": None,
+        "exchange_present": False,
+        "prophetx_present": False,
+        "pinnacle_present": False,
+    }
+    targets = (
+        ("novig", "novig_ml_home", "novig_ml_away"),
+        ("prophetx", "prophetx_ml_home", "prophetx_ml_away"),
+        ("pinnacle", "pinnacle_ml_home", "pinnacle_ml_away"),
+    )
+    for sub, home_key, away_key in targets:
+        chosen = None
+        for book in event.get("bookmakers") or []:
+            bk = (book.get("key") or "").lower()
+            if sub not in bk:
+                continue
+            if not any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
+                continue
+            chosen = book
+            break
+        if chosen is None:
+            continue
+        chosen["_home"] = home
+        chosen["_away"] = away
+        try:
+            _, _, _, mh, ma = _parse_totals_and_h2h(chosen)
+        except Exception:
+            mh = None
+            ma = None
+        result[home_key] = mh
+        result[away_key] = ma
+        pair_present = (mh is not None) and (ma is not None)
+        if sub == "novig":
+            if pair_present:
+                result["exchange_present"] = True
+        elif sub == "prophetx":
+            result["prophetx_present"] = pair_present
+            if pair_present:
+                result["exchange_present"] = True
+        elif sub == "pinnacle":
+            result["pinnacle_present"] = pair_present
+    return result
+
+
 def fetch_mlb_odds(target_date=None):
     """
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
@@ -311,6 +381,7 @@ def fetch_mlb_odds(target_date=None):
         else:
             ml_home = None
             ml_away = None
+        per_book_ml = _extract_per_book_ml_flags(event, home, away)
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
@@ -320,6 +391,7 @@ def fetch_mlb_odds(target_date=None):
             "book": (best.get("title") or best.get("key") or ""),
             "_coarse_game_key": coarse_key,
             "_commence_time": _canonical_commence_time(commence_str),
+            **per_book_ml,
         }
 
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
@@ -412,6 +484,15 @@ def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
             "_coarse_game_key": row.get("_coarse_game_key") or coarse_key,
             "_commence_time": row.get("_commence_time") or _canonical_commence_time(commence_time),
             "_raw_total_line": raw_line,
+            "novig_ml_home": row.get("novig_ml_home"),
+            "novig_ml_away": row.get("novig_ml_away"),
+            "prophetx_ml_home": row.get("prophetx_ml_home"),
+            "prophetx_ml_away": row.get("prophetx_ml_away"),
+            "pinnacle_ml_home": row.get("pinnacle_ml_home"),
+            "pinnacle_ml_away": row.get("pinnacle_ml_away"),
+            "exchange_present": bool(row.get("exchange_present", False)),
+            "prophetx_present": bool(row.get("prophetx_present", False)),
+            "pinnacle_present": bool(row.get("pinnacle_present", False)),
         })
         return out
     return {
@@ -426,4 +507,13 @@ def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
         "_coarse_game_key": coarse_key,
         "_commence_time": _canonical_commence_time(commence_time),
         "_raw_total_line": None,
+        "novig_ml_home": None,
+        "novig_ml_away": None,
+        "prophetx_ml_home": None,
+        "prophetx_ml_away": None,
+        "pinnacle_ml_home": None,
+        "pinnacle_ml_away": None,
+        "exchange_present": False,
+        "prophetx_present": False,
+        "pinnacle_present": False,
     }
