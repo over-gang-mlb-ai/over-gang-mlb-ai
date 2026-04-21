@@ -1186,7 +1186,7 @@ class VegasLines:
             )
             is_fallback_line = not has_real_total
             if match_found:
-                source = "fallback (scrambled book)" if book_scrambled else ("8.5 fallback" if is_fallback_line else "Odds API")
+                source = "fallback (scrambled book)" if book_scrambled else ("8.5 fallback" if is_fallback_line else "parlay_api")
             else:
                 source = "8.5 fallback (no match in odds_map)"
             info["_source"] = source
@@ -2087,10 +2087,10 @@ def run_predictions():
         public_betting_data = load_public_betting_data()
         target_date_str = today_mt.strftime("%Y-%m-%d")
         # Live odds / totals: Odds API only (SportsDataIO phased out of this path; fetch_mlb_odds_by_date_allow_empty_book remains available elsewhere).
-        print("[ODDS] Fetching Odds API (active live odds source; SportsDataIO not used for odds_map)...")
+        print("[ODDS] Fetching parlay_api (active live odds source; SportsDataIO not used for odds_map)...")
         odds_api_map = fetch_mlb_odds(target_date=target_date_str) or {}
-        print(f"[ODDS] Odds API rows: {len(odds_api_map)}")
-        odds_source = "Odds API" if odds_api_map else "none"
+        print(f"[ODDS] parlay_api rows: {len(odds_api_map)}")
+        odds_source = "parlay_api" if odds_api_map else "none"
 
         def _is_trusted_total_row(row):
             if not isinstance(row, dict):
@@ -2113,7 +2113,7 @@ def run_predictions():
         for k, v in (odds_api_map or {}).items():
             if _is_trusted_total_row(v):
                 trusted_total_source_map[k] = dict(v)
-                trusted_total_source_map[k]["_trusted_source"] = "Odds API"
+                trusted_total_source_map[k]["_trusted_source"] = "parlay_api"
 
         # Base container = Odds API only; strip weak totals, then overlay trusted rows
         odds_map = dict(odds_api_map or {})
@@ -2829,7 +2829,7 @@ def run_predictions():
 
             # LIVE TOTAL BLOCKERS tracking: only count odds_map/API rows (exclude manual_totals_csv + no-match default fallback)
             _src = str(odds_info.get("_source", ""))
-            if odds_info.get("_match_found", False) and _src in {"Odds API", "8.5 fallback", "fallback (scrambled book)"}:
+            if odds_info.get("_match_found", False) and _src in {"parlay_api", "8.5 fallback", "fallback (scrambled book)"}:
                 if odds_info.get("_blocker_scrambled_book"):
                     live_total_scrambled_book += 1
                     k = odds_info.get("_lookup_key")
@@ -3056,6 +3056,7 @@ def run_predictions():
                 'Over_Juice': odds_info.get('over_juice', -110),
                 'Under_Juice': odds_info.get('under_juice', -110),
                 'Odds_Book': odds_info.get('book', ''),
+                'ML_Odds_Book': odds_info.get('ml_book', ''),
                 'Total_Line_Source': str(odds_info.get("_source", "") or ""),
                 'Odds_ML_Home': odds_info.get('ml_home'),
                 'Odds_ML_Away': odds_info.get('ml_away'),
@@ -3382,7 +3383,7 @@ def run_predictions():
                 "ou_high_confidence" if ou_fired else None,
                 "ml_high_signal" if ml_fired else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
-                "odds_api" if (odds_source == "Odds API") else None,
+                "parlay_api" if (odds_source == "parlay_api") else None,
                 "fallback_line" if (not has_real_total) else None,
             ]))
             game_data["Fired_Play"] = ou_fired
@@ -3472,7 +3473,7 @@ def run_predictions():
         "OU_Edge", "OU_Confidence", "OU_Side", "OU_Bet_Type",
         "ML_Edge", "ML_Side", "ML_Bet_Type", "ML_Market_OK", "ML_Market_Status",
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
-        "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book",
+        "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book", "ML_Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
         "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags", "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
         "Model_Notes",
