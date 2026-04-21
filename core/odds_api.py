@@ -315,6 +315,133 @@ def _extract_per_book_ml_flags(event, home, away):
     return result
 
 
+def _extract_per_book_totals_flags(event):
+    """Additive overlay for per-book totals prices.
+
+    Observational only. Does not alter the existing totals-book selection
+    (``best`` in ``fetch_mlb_odds``), ``BOOK_PRIORITY``, the trusted-total
+    filter in ``model/overgang_model.py``, or the final ``total_line``
+    passed downstream. Written into ``result[key]`` so that later inspection
+    can prove whether a Pinnacle-based O/U sharpness pivot is supported by
+    the data already arriving in the Parlay payload. Does not feed totals
+    selection, confidence, O/U fire logic, or any existing export.
+
+    Matching uses case-insensitive substring on ``bookmaker.key`` with the
+    same target set and exclusion rules as ``_extract_per_book_ml_flags``
+    so Pinnacle / Novig / ProphetX / DraftKings / Espn_Draftkings / Bovada /
+    Caesars / Fliff resolve consistently across both overlays. For each
+    target, picks the first bookmaker whose key contains the substring, is
+    not excluded, and which carries a ``totals`` market.
+
+    For the selected book, reads the ``totals`` market only; ``total_line``,
+    ``over_juice``, ``under_juice`` are recorded as raw parsed values (no
+    ``DEFAULT_TOTAL`` / ``DEFAULT_JUICE`` fallback) so downstream inspection
+    can tell "book absent" and "value null" apart from a real price. Does
+    not invent prices.
+
+    Returns a dict with (per target):
+      <book>_total_line, <book>_over_juice, <book>_under_juice
+    and the presence flags:
+      pinnacle_totals_present (bool),
+      prophetx_totals_present (bool),
+      exchange_totals_present (bool; Novig or ProphetX totals pair present).
+    Missing values default to None / False.
+    """
+    result = {
+        "pinnacle_total_line": None,
+        "pinnacle_over_juice": None,
+        "pinnacle_under_juice": None,
+        "novig_total_line": None,
+        "novig_over_juice": None,
+        "novig_under_juice": None,
+        "prophetx_total_line": None,
+        "prophetx_over_juice": None,
+        "prophetx_under_juice": None,
+        "draftkings_total_line": None,
+        "draftkings_over_juice": None,
+        "draftkings_under_juice": None,
+        "espn_draftkings_total_line": None,
+        "espn_draftkings_over_juice": None,
+        "espn_draftkings_under_juice": None,
+        "bovada_total_line": None,
+        "bovada_over_juice": None,
+        "bovada_under_juice": None,
+        "caesars_total_line": None,
+        "caesars_over_juice": None,
+        "caesars_under_juice": None,
+        "fliff_total_line": None,
+        "fliff_over_juice": None,
+        "fliff_under_juice": None,
+        "pinnacle_totals_present": False,
+        "prophetx_totals_present": False,
+        "exchange_totals_present": False,
+    }
+    targets = (
+        ("novig", "novig", ()),
+        ("prophetx", "prophetx", ()),
+        ("pinnacle", "pinnacle", ()),
+        ("espn_draftkings", "espn_draftkings", ()),
+        ("draftkings", "draftkings", ("espn_",)),
+        ("bovada", "bovada", ()),
+        ("caesars", "caesars", ()),
+        ("fliff", "fliff", ()),
+    )
+    for sub, prefix, excludes in targets:
+        chosen = None
+        for book in event.get("bookmakers") or []:
+            bk = (book.get("key") or "").lower()
+            if sub not in bk:
+                continue
+            if excludes and any(ex in bk for ex in excludes):
+                continue
+            if not any((m.get("key") == "totals") for m in (book.get("markets") or [])):
+                continue
+            chosen = book
+            break
+        if chosen is None:
+            continue
+        tl = None
+        oj = None
+        uj = None
+        for market in chosen.get("markets") or []:
+            if market.get("key") != "totals":
+                continue
+            for o in market.get("outcomes") or []:
+                name = (o.get("name") or "").lower()
+                if name not in ("over", "under"):
+                    continue
+                raw_point = o.get("point")
+                raw_price = o.get("price")
+                try:
+                    pt = float(raw_point) if raw_point is not None else None
+                except (TypeError, ValueError):
+                    pt = None
+                try:
+                    pr = int(raw_price) if raw_price is not None else None
+                except (TypeError, ValueError):
+                    pr = None
+                if pt is not None:
+                    tl = pt
+                if name == "over":
+                    oj = pr
+                else:
+                    uj = pr
+        result[f"{prefix}_total_line"] = tl
+        result[f"{prefix}_over_juice"] = oj
+        result[f"{prefix}_under_juice"] = uj
+        totals_pair = (tl is not None) and (oj is not None) and (uj is not None)
+        if sub == "pinnacle":
+            result["pinnacle_totals_present"] = totals_pair
+        elif sub == "prophetx":
+            result["prophetx_totals_present"] = totals_pair
+            if totals_pair:
+                result["exchange_totals_present"] = True
+        elif sub == "novig":
+            if totals_pair:
+                result["exchange_totals_present"] = True
+    return result
+
+
 def fetch_mlb_odds(target_date=None):
     """
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
@@ -388,6 +515,8 @@ def fetch_mlb_odds(target_date=None):
     date_skip_count = 0
     ml_incomplete_log_cap = 8
     ml_incomplete_log_count = 0
+    ou_diag_log_cap = 8
+    ou_diag_log_count = 0
     for event in data:
         commence_str = event.get("commence_time") or ""
         event_date_mt = _event_date_mt(commence_str)
@@ -553,6 +682,53 @@ def fetch_mlb_odds(target_date=None):
             print(f"[ODDS API]   per_book_ml_snapshot={per_book_ml_snapshot}")
             ml_incomplete_log_count += 1
 
+        # Observational-only per-book totals overlay. Mirrors the ML overlay
+        # pattern and is written into result[key] so later inspection can
+        # prove whether a Pinnacle-based O/U sharpness pivot is supported by
+        # the data already arriving in the Parlay payload. Does NOT change
+        # totals-book selection, BOOK_PRIORITY, the trusted-total filter,
+        # the selected `total_line`, O/U confidence, O/U fire logic, or any
+        # existing export contract.
+        per_book_totals = _extract_per_book_totals_flags(event)
+
+        # Capped O/U diagnostic: surface events where per-book totals truth
+        # diverges from the selected-book scalar. Fires when at least two
+        # tracked books carry totals, or Pinnacle totals exist but were not
+        # chosen as `best`, or the event has no totals book at all. Does
+        # not alter any selection or gating; purely evidence-gathering.
+        _selected_book_key = (
+            ((best.get("key") or "") if best is not None else "").lower()
+        )
+        _pinnacle_total = per_book_totals.get("pinnacle_total_line")
+        _books_with_totals = sum(
+            1
+            for _k, _v in per_book_totals.items()
+            if _k.endswith("_total_line") and _v is not None
+        )
+        _should_log_ou_diag = (
+            (_books_with_totals >= 2)
+            or (_pinnacle_total is not None and "pinnacle" not in _selected_book_key)
+            or (best is None)
+        )
+        if _should_log_ou_diag and ou_diag_log_count < ou_diag_log_cap:
+            per_book_totals_snapshot = {
+                _k: _v
+                for _k, _v in per_book_totals.items()
+                if _k.endswith("_total_line")
+                or _k.endswith("_over_juice")
+                or _k.endswith("_under_juice")
+            }
+            print(
+                f"[ODDS API] O/U per-book totals snapshot: away={repr(away)} home={repr(home)} "
+                f"key={repr(key)} selected_total_line={total_line if best is not None else None} "
+                f"selected_book={repr((best.get('title') or best.get('key') or '') if best is not None else '')} "
+                f"books_with_totals={_books_with_totals} pinnacle_total={_pinnacle_total} "
+                f"pinnacle_totals_present={per_book_totals.get('pinnacle_totals_present')} "
+                f"exchange_totals_present={per_book_totals.get('exchange_totals_present')}"
+            )
+            print(f"[ODDS API]   per_book_totals_snapshot={per_book_totals_snapshot}")
+            ou_diag_log_count += 1
+
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
@@ -564,6 +740,7 @@ def fetch_mlb_odds(target_date=None):
             "_coarse_game_key": coarse_key,
             "_commence_time": _canonical_commence_time(commence_str),
             **per_book_ml,
+            **per_book_totals,
         }
 
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")

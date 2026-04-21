@@ -1,0 +1,19 @@
+Date,Game,Bet_Type,Pick,Result,Confidence,Confidence_Bucket,Bet_Line,Final_Total,Source_File
+2026-04-20,Houston Astros @ Cleveland Guardians,O/U,OVER 7.5,WIN,75%,75-79,7.5,,predictions_20260420_1537.csv
+2026-04-20,Houston Astros @ Cleveland Guardians,ML,CLEVELAND GUARDIANS ML,LOSS,74%,70-74,,,predictions_20260420_1537.csv
+2026-04-20,Cincinnati Reds @ Tampa Bay Rays,O/U,UNDER 8.0,WIN,46%,45-49,8.0,,predictions_20260420_1537.csv
+2026-04-20,Cincinnati Reds @ Tampa Bay Rays,ML,CINCINNATI REDS ML,WIN,70%,70-74,,,predictions_20260420_1537.csv
+2026-04-20,St. Louis Cardinals @ Miami Marlins,O/U,OVER 8.5,LOSS,75%,75-79,8.5,,predictions_20260420_1537.csv
+2026-04-20,St. Louis Cardinals @ Miami Marlins,ML,MIAMI MARLINS ML,WIN,74%,70-74,,,predictions_20260420_1537.csv
+2026-04-20,Atlanta Braves @ Washington Nationals,O/U,OVER 8.0,WIN,67%,65-69,8.0,,predictions_20260420_1537.csv
+2026-04-20,Atlanta Braves @ Washington Nationals,ML,ATLANTA BRAVES ML,WIN,80%,80-84,,,predictions_20260420_1537.csv
+2026-04-20,Baltimore Orioles @ Kansas City Royals,O/U,UNDER 9.0,LOSS,79%,75-79,9.0,,predictions_20260420_1537.csv
+2026-04-20,Baltimore Orioles @ Kansas City Royals,ML,BALTIMORE ORIOLES ML,WIN,65%,65-69,,,predictions_20260420_1537.csv
+2026-04-20,Philadelphia Phillies @ Chicago Cubs,O/U,OVER 7.5,LOSS,75%,75-79,7.5,,predictions_20260420_1537.csv
+2026-04-20,Philadelphia Phillies @ Chicago Cubs,ML,CHICAGO CUBS ML,WIN,59%,55-59,,,predictions_20260420_1537.csv
+2026-04-20,Los Angeles Dodgers @ Colorado Rockies,O/U,UNDER 12.0,LOSS,48%,45-49,12.0,,predictions_20260420_1537.csv
+2026-04-20,Los Angeles Dodgers @ Colorado Rockies,ML,LOS ANGELES DODGERS ML,WIN,80%,80-84,,,predictions_20260420_1537.csv
+2026-04-20,Toronto Blue Jays @ Los Angeles Angels,O/U,UNDER 8.5,WIN,78%,75-79,8.5,,predictions_20260420_1537.csv
+2026-04-20,Toronto Blue Jays @ Los Angeles Angels,ML,LOS ANGELES ANGELS ML,LOSS,57%,55-59,,,predictions_20260420_1537.csv
+2026-04-20,Athletics @ Seattle Mariners,O/U,UNDER 8.5,LOSS,61%,60-64,8.5,,predictions_20260420_1537.csv
+2026-04-20,Athletics @ Seattle Mariners,ML,ATHLETICS ML,WIN,80%,80-84,,,predictions_20260420_1537.csv
