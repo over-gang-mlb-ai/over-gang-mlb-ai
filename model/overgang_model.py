@@ -3142,6 +3142,7 @@ def run_predictions():
             edge = proj["edge"]
             recommended_units = proj["recommended_units"]
             projection_cap_hit = bool(proj.get("projection_cap_hit", False))
+            ou_pick = proj["pick"]
 
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
