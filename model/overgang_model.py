@@ -3145,8 +3145,46 @@ def run_predictions():
 
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
-            confidence = max(0.0, min(1.0, confidence))
             has_real_total = bool(odds_info.get("_has_real_total", False))
+            ou_market_quality_note = ""
+            if has_real_total:
+                try:
+                    _pinn_total = odds_info.get("pinnacle_total_line")
+                    _espn_dk_total = odds_info.get("espn_draftkings_total_line")
+                    if _pinn_total is not None and _espn_dk_total is not None:
+                        _pinn_total = float(_pinn_total)
+                        _espn_dk_total = float(_espn_dk_total)
+                        if (5 <= _pinn_total <= 15) and (5 <= _espn_dk_total <= 15):
+                            _sharp_gap = round(_pinn_total - _espn_dk_total, 2)
+                            _abs_sharp_gap = abs(_sharp_gap)
+                            if _abs_sharp_gap >= 1.0:
+                                _align_boost = 0.04
+                                _conflict_trim = 0.02
+                            elif _abs_sharp_gap >= 0.5:
+                                _align_boost = 0.02
+                                _conflict_trim = 0.01
+                            else:
+                                _align_boost = 0.0
+                                _conflict_trim = 0.0
+                            if _align_boost > 0:
+                                _sharp_dir = "OVER" if _sharp_gap > 0 else "UNDER"
+                                _pick_aligns = (
+                                    (_sharp_dir == "OVER" and ou_pick in ("OVER", "LEAN_OVER"))
+                                    or (_sharp_dir == "UNDER" and ou_pick in ("UNDER", "LEAN_UNDER"))
+                                )
+                                if _pick_aligns:
+                                    confidence += _align_boost
+                                    ou_market_quality_note = (
+                                        f"ou_sharp=+{_align_boost:.2f}@{_abs_sharp_gap:.1f}"
+                                    )
+                                else:
+                                    confidence -= _conflict_trim
+                                    ou_market_quality_note = (
+                                        f"ou_sharp=-{_conflict_trim:.2f}@{_abs_sharp_gap:.1f}"
+                                    )
+                except (TypeError, ValueError):
+                    pass
+            confidence = max(0.0, min(1.0, confidence))
             if not has_real_total:
                 prediction = "NO BET (fallback total only)"
 
@@ -3412,7 +3450,10 @@ def run_predictions():
             game_data["No_Fire_OU_Reason"] = no_fire_ou
             game_data["Play_Status"] = "BETTABLE" if has_real_total else "PROJECTION_ONLY"
             game_data["Bettable"] = bool(has_real_total)
-            game_data["Model_Notes"] = f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
+            game_data["Model_Notes"] = (
+                f"edge={edge:.2f}|conf={confidence:.2f}|book={odds_info.get('book', '')}"
+                + (f"|{ou_market_quality_note}" if ou_market_quality_note else "")
+            )
             game_data["Confidence_Tier"] = "high" if confidence >= 0.85 else ("medium" if confidence >= 0.60 else "low")
             game_data["Edge_Tier"] = "strong" if abs(edge) >= 2.0 else ("medium" if abs(edge) >= 1.0 else "thin")
             game_data["Bet_Type"] = "total"
