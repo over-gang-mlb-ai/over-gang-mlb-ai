@@ -214,20 +214,35 @@ def _parse_totals_and_h2h(book):
 
 
 def _extract_per_book_ml_flags(event, home, away):
-    """Additive overlay for Novig / ProphetX / Pinnacle h2h prices plus presence flags.
+    """Additive overlay for per-book h2h prices plus sharp/exchange presence flags.
 
-    Does not alter the existing totals/h2h book selection. Purely additive fields
-    consumed downstream as a parallel ML sharpness / market-truth fire gate.
+    Does not alter the existing totals/h2h book selection. Purely additive fields.
+
+    The Novig / ProphetX / Pinnacle entries remain the source for the missing-side
+    backfill loop and the sharpness / market-truth fire gate (no change there).
+    The additional DraftKings / Espn_Draftkings / Bovada / Caesars / Fliff entries
+    are **observational only** — they are written into ``odds_info`` so that when
+    a row later exports ``ML_Market_Status='missing_market'`` we can prove from
+    logs / snapshots whether an untracked book actually carried the missing side
+    at capture time. They do not feed backfill, gating, or selection.
 
     Uses case-insensitive substring match on bookmaker.key so vendor variants
-    (e.g. 'novig' / 'novig_exchange', 'prophetx' / 'prophet_x', 'pinnacle') all
-    resolve to their logical book. For each target, picks the first bookmaker
-    whose key contains the substring and which carries an h2h market.
+    (e.g. 'novig' / 'novig_exchange', 'prophetx' / 'prophet_x', 'pinnacle',
+    'draftkings' / 'espn_draftkings') resolve to their logical book. For each
+    target, picks the first bookmaker whose key contains the substring, is not
+    excluded, and which carries an h2h market. The ``draftkings`` target excludes
+    ``espn_`` so it never resolves to the ESPN-branded variant (which has its own
+    entry).
 
     Returns a dict with:
       novig_ml_home, novig_ml_away,
       prophetx_ml_home, prophetx_ml_away,
       pinnacle_ml_home, pinnacle_ml_away,
+      draftkings_ml_home, draftkings_ml_away,
+      espn_draftkings_ml_home, espn_draftkings_ml_away,
+      bovada_ml_home, bovada_ml_away,
+      caesars_ml_home, caesars_ml_away,
+      fliff_ml_home, fliff_ml_away,
       exchange_present (bool; True when novig or prophetx has a usable h2h pair),
       prophetx_present (bool; ProphetX h2h pair usable — observational only),
       pinnacle_present (bool; Pinnacle h2h pair usable).
@@ -240,20 +255,37 @@ def _extract_per_book_ml_flags(event, home, away):
         "prophetx_ml_away": None,
         "pinnacle_ml_home": None,
         "pinnacle_ml_away": None,
+        "draftkings_ml_home": None,
+        "draftkings_ml_away": None,
+        "espn_draftkings_ml_home": None,
+        "espn_draftkings_ml_away": None,
+        "bovada_ml_home": None,
+        "bovada_ml_away": None,
+        "caesars_ml_home": None,
+        "caesars_ml_away": None,
+        "fliff_ml_home": None,
+        "fliff_ml_away": None,
         "exchange_present": False,
         "prophetx_present": False,
         "pinnacle_present": False,
     }
     targets = (
-        ("novig", "novig_ml_home", "novig_ml_away"),
-        ("prophetx", "prophetx_ml_home", "prophetx_ml_away"),
-        ("pinnacle", "pinnacle_ml_home", "pinnacle_ml_away"),
+        ("novig", "novig_ml_home", "novig_ml_away", ()),
+        ("prophetx", "prophetx_ml_home", "prophetx_ml_away", ()),
+        ("pinnacle", "pinnacle_ml_home", "pinnacle_ml_away", ()),
+        ("espn_draftkings", "espn_draftkings_ml_home", "espn_draftkings_ml_away", ()),
+        ("draftkings", "draftkings_ml_home", "draftkings_ml_away", ("espn_",)),
+        ("bovada", "bovada_ml_home", "bovada_ml_away", ()),
+        ("caesars", "caesars_ml_home", "caesars_ml_away", ()),
+        ("fliff", "fliff_ml_home", "fliff_ml_away", ()),
     )
-    for sub, home_key, away_key in targets:
+    for sub, home_key, away_key, excludes in targets:
         chosen = None
         for book in event.get("bookmakers") or []:
             bk = (book.get("key") or "").lower()
             if sub not in bk:
+                continue
+            if excludes and any(ex in bk for ex in excludes):
                 continue
             if not any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
                 continue
@@ -354,6 +386,8 @@ def fetch_mlb_odds(target_date=None):
     book_choice_log_count = 0
     date_skip_log_cap = 5
     date_skip_count = 0
+    ml_incomplete_log_cap = 8
+    ml_incomplete_log_count = 0
     for event in data:
         commence_str = event.get("commence_time") or ""
         event_date_mt = _event_date_mt(commence_str)
@@ -501,6 +535,23 @@ def fetch_mlb_odds(target_date=None):
                 if _v is not None:
                     ml_away = _v
                     break
+
+        # Observational-only: when the tracked-donor backfill cannot complete the ML pair,
+        # emit a single capped diagnostic dumping every per-book ML value we already parsed
+        # (tracked + untracked). This is evidence-gathering to prove whether untracked books
+        # actually carried the missing side. No behavior change: ml_home/ml_away are NOT
+        # altered here, backfill donors are NOT widened.
+        if (ml_home is None or ml_away is None) and ml_incomplete_log_count < ml_incomplete_log_cap:
+            per_book_ml_snapshot = {
+                k: v for k, v in per_book_ml.items() if k.endswith("_ml_home") or k.endswith("_ml_away")
+            }
+            print(
+                f"[ODDS API] ML incomplete after backfill: away={repr(away)} home={repr(home)} "
+                f"key={repr(key)} ml_home={ml_home} ml_away={ml_away} "
+                f"primary_ml_book={repr((best_ml.get('title') or best_ml.get('key') or '') if best_ml is not None else '')}"
+            )
+            print(f"[ODDS API]   per_book_ml_snapshot={per_book_ml_snapshot}")
+            ml_incomplete_log_count += 1
 
         result[key] = {
             "total_line": total_line,
