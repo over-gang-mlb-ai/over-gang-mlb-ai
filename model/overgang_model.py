@@ -3560,6 +3560,23 @@ def run_predictions():
             game_data["Away_WHIP"] = safe_get(away_stats, "WHIP", "N/A")
             game_data["Home_WHIP"] = safe_get(home_stats, "WHIP", "N/A")
 
+            # Export-only explicit archive row-purpose. Aligned with the
+            # downstream eligibility gate `Total_Is_Real OR ML_Fired`.
+            # Note: `ou_only` means archive-eligible because a trusted/real
+            # total exists, NOT necessarily OU_Fired=True. Blank when neither
+            # condition is met (such rows are filtered out by the gate and
+            # never written to the archive CSV).
+            _total_is_real_flag = bool(game_data.get("Total_Is_Real", False))
+            _ml_fired_flag = bool(game_data.get("ML_Fired", False))
+            if _total_is_real_flag and _ml_fired_flag:
+                game_data["Archive_Row_Reason"] = "ou_and_ml"
+            elif _total_is_real_flag:
+                game_data["Archive_Row_Reason"] = "ou_only"
+            elif _ml_fired_flag:
+                game_data["Archive_Row_Reason"] = "ml_only"
+            else:
+                game_data["Archive_Row_Reason"] = ""
+
             # Export-only Mountain Time game-time string for the readable
             # picks board (e.g. "1:10 PM", "7:40 PM"). Mirrors the existing
             # _alert_formatted_time helper but without the " MT" suffix and
@@ -3610,7 +3627,11 @@ def run_predictions():
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag", "ML_Quality_Factor",
         "ML_Exchange_Present", "ML_Prophetx_Present", "ML_Pinnacle_Present",
         "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Exchange_Vs_Sharp_Gap",
+        "OU_Sharpness_Inputs_OK", "OU_Sharpness_OK",
+        "OU_Sharp_Direction", "OU_Sharp_Gap", "OU_Sharp_Modifier",
+        "OU_Pinnacle_Total", "OU_Retail_Total", "OU_Retail_Book",
         "OU_Confidence_Bucket", "ML_Confidence_Bucket",
+        "Archive_Row_Reason",
     ]
     eligible_export = [
         r for r in results
