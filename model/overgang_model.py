@@ -3491,6 +3491,75 @@ def run_predictions():
                 _parse_ml_confidence_percent_optional(game_data)
             )
 
+            # Export-only O/U sharpness fields derived from odds_info + the modifier
+            # note already computed above. Does NOT change behavior, thresholds,
+            # confidence math, or fire gates. Read once here so the picks-board
+            # CSV has a stable, compact sharpness block per row.
+            #
+            # Semantics:
+            #   OU_Sharpness_Inputs_OK -> both Pinnacle and ESPN DK totals exist
+            #   OU_Sharpness_OK        -> meaningful signal (|gap| >= 0.5, same
+            #                              boundary the confidence modifier uses)
+            try:
+                _pinn_export = odds_info.get("pinnacle_total_line")
+                _retail_export = odds_info.get("espn_draftkings_total_line")
+                _retail_book_export = "Espn_Draftkings" if _retail_export is not None else ""
+                _inputs_ok_export = bool(
+                    (_pinn_export is not None) and (_retail_export is not None)
+                )
+                if _inputs_ok_export:
+                    _gap_export = round(float(_pinn_export) - float(_retail_export), 2)
+                    if _gap_export > 0:
+                        _dir_export = "OVER"
+                    elif _gap_export < 0:
+                        _dir_export = "UNDER"
+                    else:
+                        _dir_export = ""
+                    _signal_ok_export = abs(_gap_export) >= 0.5
+                else:
+                    _gap_export = ""
+                    _dir_export = ""
+                    _signal_ok_export = False
+                game_data["OU_Pinnacle_Total"] = _pinn_export if _pinn_export is not None else ""
+                game_data["OU_Retail_Total"] = _retail_export if _retail_export is not None else ""
+                game_data["OU_Retail_Book"] = _retail_book_export
+                game_data["OU_Sharp_Gap"] = _gap_export
+                game_data["OU_Sharp_Direction"] = _dir_export
+                # Numeric applied-delta parsed from the existing note token
+                # (format: "ou_sharp=+0.04@1.5"). Gap/direction are already
+                # separate fields; this column shows only the signed confidence
+                # delta actually applied by the modifier (blank when no delta).
+                _modifier_delta_str = ""
+                if ou_market_quality_note and ou_market_quality_note.startswith("ou_sharp="):
+                    try:
+                        _tok = ou_market_quality_note[len("ou_sharp="):]
+                        _num_str = _tok.split("@", 1)[0]
+                        _modifier_delta_str = f"{float(_num_str):+.2f}"
+                    except (ValueError, IndexError):
+                        _modifier_delta_str = ""
+                game_data["OU_Sharp_Modifier"] = _modifier_delta_str
+                game_data["OU_Sharpness_Inputs_OK"] = _inputs_ok_export
+                game_data["OU_Sharpness_OK"] = _signal_ok_export
+            except (TypeError, ValueError):
+                game_data["OU_Pinnacle_Total"] = ""
+                game_data["OU_Retail_Total"] = ""
+                game_data["OU_Retail_Book"] = ""
+                game_data["OU_Sharp_Gap"] = ""
+                game_data["OU_Sharp_Direction"] = ""
+                game_data["OU_Sharp_Modifier"] = ""
+                game_data["OU_Sharpness_Inputs_OK"] = False
+                game_data["OU_Sharpness_OK"] = False
+
+            # Export-only pitcher context for the readable picks board.
+            # Uses the same pitcher names and stats the model used for this row
+            # (including league-average fallbacks when applicable). No recompute.
+            game_data["Away_Pitcher"] = away_pitcher or ""
+            game_data["Home_Pitcher"] = home_pitcher or ""
+            game_data["Away_xERA"] = safe_get(away_stats, "xERA", "N/A")
+            game_data["Home_xERA"] = safe_get(home_stats, "xERA", "N/A")
+            game_data["Away_WHIP"] = safe_get(away_stats, "WHIP", "N/A")
+            game_data["Home_WHIP"] = safe_get(home_stats, "WHIP", "N/A")
+
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
             if ou_fired:
@@ -3543,6 +3612,49 @@ def run_predictions():
             combined_path,
             caption=f"📊 Over Gang predictions — {datetime.now().strftime('%b %d')}",
         )
+
+        # NEW: readable pregame picks board CSV. Sibling output to
+        # predictions_*.csv and client_predictions_*.csv; does not replace or
+        # alter either. Uses the same eligible_export rows and the same
+        # timestamp as the archive file. Renames internal `Prediction` to
+        # `OU_Pick` for readability without touching the archive schema.
+        picks_board_front_cols = [
+            "Game_Date", "Datetime", "Game",
+            "Away_Pitcher", "Away_xERA", "Away_WHIP",
+            "Home_Pitcher", "Home_xERA", "Home_WHIP",
+            "OU_Pick", "OU_Confidence", "OU_Fired", "OU_Edge",
+            "ML_Pick", "ML_Confidence", "ML_Fired", "ML_Edge",
+            "Fired_Play", "Play_Status", "Bettable",
+            "Vegas_Line", "Odds_Line", "Bet_Line", "Projected_Total",
+            "Odds_Book", "ML_Odds_Book", "Total_Line_Source", "Market_Source",
+        ]
+        picks_board_ou_sharp_cols = [
+            "OU_Sharpness_Inputs_OK", "OU_Sharpness_OK",
+            "OU_Sharp_Direction", "OU_Sharp_Gap",
+            "OU_Sharp_Modifier", "OU_Pinnacle_Total", "OU_Retail_Total",
+            "OU_Retail_Book",
+        ]
+        picks_board_ml_quality_cols = [
+            "ML_Market_OK", "ML_Market_Status",
+            "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK",
+            "ML_Exchange_Vs_Sharp_Gap",
+        ]
+        picks_board_tail_cols = ["Model_Notes", "Data_Quality_Flag"]
+        picks_board_cols = (
+            picks_board_front_cols
+            + picks_board_ou_sharp_cols
+            + picks_board_ml_quality_cols
+            + picks_board_tail_cols
+        )
+        picks_board_rows = []
+        for _r in eligible_export:
+            _row = dict(_r)
+            _row["OU_Pick"] = _r.get("Prediction", "")
+            picks_board_rows.append(_row)
+        picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
+        picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
+        picks_board_df.to_csv(picks_board_path, index=False)
+        print(f"💾 Saved {len(picks_board_rows)} picks-board row(s) → {picks_board_path}")
     elif results:
         print("\nℹ️ No export rows (no trusted O/U games and no ML_Fired games).")
 
