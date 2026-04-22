@@ -3560,6 +3560,21 @@ def run_predictions():
             game_data["Away_WHIP"] = safe_get(away_stats, "WHIP", "N/A")
             game_data["Home_WHIP"] = safe_get(home_stats, "WHIP", "N/A")
 
+            # Export-only Mountain Time game-time string for the readable
+            # picks board (e.g. "1:10 PM", "7:40 PM"). Mirrors the existing
+            # _alert_formatted_time helper but without the " MT" suffix and
+            # with the leading zero stripped for scan-friendliness.
+            _mt_time_str = ""
+            try:
+                _game_utc = datetime.strptime(
+                    game_data.get("Datetime", ""), "%Y-%m-%dT%H:%M:%SZ"
+                )
+                _mt = _game_utc.replace(tzinfo=utc).astimezone(timezone("US/Mountain"))
+                _mt_time_str = _mt.strftime("%I:%M %p").lstrip("0")
+            except Exception:
+                _mt_time_str = ""
+            game_data["Game_Time_MT"] = _mt_time_str
+
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
             if ou_fired:
@@ -3619,7 +3634,7 @@ def run_predictions():
         # timestamp as the archive file. Renames internal `Prediction` to
         # `OU_Pick` for readability without touching the archive schema.
         picks_board_front_cols = [
-            "Game_Date", "Datetime", "Game",
+            "Game_Date", "Game_Time_MT", "Venue", "Doubleheader", "Game",
             "Away_Pitcher", "Away_xERA", "Away_WHIP",
             "Home_Pitcher", "Home_xERA", "Home_WHIP",
             "OU_Pick", "OU_Confidence", "OU_Fired", "OU_Edge",
