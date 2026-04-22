@@ -3655,6 +3655,11 @@ def run_predictions():
         picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
         picks_board_df.to_csv(picks_board_path, index=False)
         print(f"💾 Saved {len(picks_board_rows)} picks-board row(s) → {picks_board_path}")
+        if os.path.exists(picks_board_path):
+            send_telegram_file(
+                picks_board_path,
+                caption=f"📋 Over Gang picks board — {datetime.now().strftime('%b %d')}",
+            )
     elif results:
         print("\nℹ️ No export rows (no trusted O/U games and no ML_Fired games).")
 
