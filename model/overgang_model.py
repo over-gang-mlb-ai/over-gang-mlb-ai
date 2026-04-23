@@ -902,6 +902,7 @@ def project_team_runs(
     opponent_velo_drop: float,
     opponent_low_ip: bool = False,
     offense_mult: float = 1.0,
+    opponent_bullpen_xera: float = None,  # None -> falls back to ERA-only (current behavior)
 ) -> tuple:
     """
     Project expected runs scored by one team in the game (they face opponent starter + bullpen).
@@ -916,8 +917,23 @@ def project_team_runs(
     """
     if opponent_low_ip:
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
+
+    # Stage A: bullpen-quality input for the O/U projection blends raw ERA
+    # with xERA 50/50 when xERA is available and finite. xERA is the more
+    # predictive bullpen-quality signal (already used by the ML path and
+    # already present in data/bullpen_stats.csv); blending it into the O/U
+    # projection path reduces systematic under-bias driven by lagging ERA.
+    # Safe fallback: if xERA is missing or non-finite, use raw ERA so the
+    # projection degrades exactly to current behavior.
+    _bp_era = opponent_bullpen_era
+    _bp_xera = opponent_bullpen_xera
+    if _bp_xera is None or not np.isfinite(_bp_xera):
+        bullpen_quality = _bp_era
+    else:
+        bullpen_quality = 0.5 * _bp_era + 0.5 * _bp_xera
+
     effective_era = (
-        STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * opponent_bullpen_era
+        STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * bullpen_quality
     )
     effective_era = max(2.5, min(7.0, effective_era))
     base_era = 0.90 * effective_era + 0.10 * LEAGUE_ERA
@@ -1027,18 +1043,25 @@ class BullpenManager:
 
     @staticmethod
     def get_bullpen_stats(team: str) -> dict:
-        """Return dict with ERA, IP_Week, Relievers for a team; league-average fallback."""
+        """Return dict with ERA, xERA, IP_Week, Relievers for a team; league-average fallback.
+
+        xERA is read from the same bullpen CSV row that ERA already comes from
+        (column already present; previously unread on the O/U path). When the
+        CSV lacks a usable xERA value, xERA falls back to ERA so the blended
+        bullpen-quality input in project_team_runs degrades to the current
+        ERA-only behavior (safe no-op fallback).
+        """
         # Fix short/common names to MLB API full names
         team_fixed = BullpenManager.TEAM_NAME_FIXES.get(team, team)
 
         df = BullpenManager._safe_read_csv(BullpenManager.BULLPEN_CSV)
         if df.empty:
-            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+            return {'ERA': 4.25, 'xERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
 
         # Normalize
         if "Team" not in df.columns:
             # unexpected schema — fail safe
-            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+            return {'ERA': 4.25, 'xERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
 
         df["Team_norm"] = df["Team"].astype(str).str.strip().str.lower()
         lookup = team_fixed.strip().lower()
@@ -1051,7 +1074,7 @@ class BullpenManager:
 
         if hit.empty:
             print(f"⚠️ Team not found in bullpen file: {team} (resolved: {team_fixed})")
-            return {'ERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
+            return {'ERA': 4.25, 'xERA': 4.25, 'IP_Week': 12.0, 'Relievers': 7, 'source': 'League Avg'}
 
         row = hit.iloc[0].to_dict()
         # ensure numeric; NaN/inf from CSV must not propagate (would break ERA blend + clamp in project_team_runs)
@@ -1065,11 +1088,13 @@ class BullpenManager:
             return x
 
         era = _finite_float(row.get("ERA"), 4.25)
+        xera = _finite_float(row.get("xERA"), era)
         ipw = _finite_float(row.get("IP_Week"), 12.0)
         rel = int(_finite_float(row.get("Relievers"), 7.0))
 
         return {
             "ERA": era,
+            "xERA": xera,
             "IP_Week": ipw,
             "Relievers": rel,
             "source": "MLB Stats API",
@@ -1343,6 +1368,11 @@ def generate_prediction(
     home_whip = safe_get(home_stats, "WHIP", 1.30)
     bullpen_home_era = safe_get(bullpen_home, "ERA", 4.25)
     bullpen_away_era = safe_get(bullpen_away, "ERA", 4.25)
+    # Stage A: pull xERA alongside ERA for the O/U bullpen-quality blend in
+    # project_team_runs. Default (None) preserves current ERA-only behavior
+    # when the bullpen dict lacks xERA (pre-Stage-A loader, test stubs, etc.).
+    bullpen_home_xera = safe_get(bullpen_home, "xERA", None)
+    bullpen_away_xera = safe_get(bullpen_away, "xERA", None)
     bullpen_home_ip_week = safe_get(bullpen_home, "IP_Week", 12.0)
     bullpen_away_ip_week = safe_get(bullpen_away, "IP_Week", 12.0)
     try:
@@ -1376,6 +1406,7 @@ def generate_prediction(
         opponent_velo_drop=velo_drop_home,
         opponent_low_ip=safe_get(home_stats, "LowIP", False),
         offense_mult=away_offense_mult,
+        opponent_bullpen_xera=bullpen_home_xera,
     )
     # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
     home_runs, home_runs_safety = project_team_runs(
@@ -1389,6 +1420,7 @@ def generate_prediction(
         opponent_velo_drop=velo_drop_away,
         opponent_low_ip=safe_get(away_stats, "LowIP", False),
         offense_mult=home_offense_mult,
+        opponent_bullpen_xera=bullpen_away_xera,
     )
 
     # Analytical truth for O/U (uncapped); cap is parallel safety only.

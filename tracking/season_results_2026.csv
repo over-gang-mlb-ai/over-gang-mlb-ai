@@ -47,3 +47,33 @@ Date,Game,Bet_Type,Pick,Result,Confidence,Confidence_Bucket,Bet_Line,Final_Total
 2026-04-21,Chicago White Sox @ Arizona Diamondbacks,ML,ARIZONA DIAMONDBACKS ML,LOSS,60%,60-64,,,predictions_20260421_2027.csv
 2026-04-21,Los Angeles Dodgers @ San Francisco Giants,O/U,UNDER 7.0,WIN,77%,75-79,7.0,,predictions_20260421_2027.csv
 2026-04-21,Los Angeles Dodgers @ San Francisco Giants,ML,LOS ANGELES DODGERS ML,LOSS,66%,65-69,,,predictions_20260421_2027.csv
+2026-04-22,St. Louis Cardinals @ Miami Marlins,O/U,UNDER 8.5,WIN,78%,75-79,8.5,,predictions_20260422_1503.csv
+2026-04-22,St. Louis Cardinals @ Miami Marlins,ML,ST. LOUIS CARDINALS ML,LOSS,53%,50-54,,,predictions_20260422_1503.csv
+2026-04-22,Houston Astros @ Cleveland Guardians,O/U,OVER 8.0,LOSS,56%,55-59,8.0,,predictions_20260422_1503.csv
+2026-04-22,Houston Astros @ Cleveland Guardians,ML,CLEVELAND GUARDIANS ML,LOSS,80%,80-84,,,predictions_20260422_1503.csv
+2026-04-22,Cincinnati Reds @ Tampa Bay Rays,O/U,OVER 8.0,LOSS,76%,75-79,8.0,,predictions_20260422_1503.csv
+2026-04-22,Cincinnati Reds @ Tampa Bay Rays,ML,TAMPA BAY RAYS ML,WIN,65%,65-69,,,predictions_20260422_1503.csv
+2026-04-22,Baltimore Orioles @ Kansas City Royals,O/U,UNDER 9.0,LOSS,77%,75-79,9.0,,predictions_20260422_1503.csv
+2026-04-22,Baltimore Orioles @ Kansas City Royals,ML,KANSAS CITY ROYALS ML,LOSS,55%,55-59,,,predictions_20260422_1503.csv
+2026-04-22,Toronto Blue Jays @ Los Angeles Angels,O/U,UNDER 8.0,LOSS,81%,80-84,8.0,,predictions_20260422_1503.csv
+2026-04-22,Toronto Blue Jays @ Los Angeles Angels,ML,TORONTO BLUE JAYS ML,LOSS,78%,75-79,,,predictions_20260422_1503.csv
+2026-04-22,Athletics @ Seattle Mariners,O/U,UNDER 7.5,LOSS,79%,75-79,7.5,,predictions_20260422_1503.csv
+2026-04-22,Athletics @ Seattle Mariners,ML,SEATTLE MARINERS ML,WIN,64%,60-64,,,predictions_20260422_1503.csv
+2026-04-22,Milwaukee Brewers @ Detroit Tigers,O/U,OVER 8.0,LOSS,57%,55-59,8.0,,predictions_20260422_1503.csv
+2026-04-22,Milwaukee Brewers @ Detroit Tigers,ML,MILWAUKEE BREWERS ML,LOSS,61%,60-64,,,predictions_20260422_1503.csv
+2026-04-22,Atlanta Braves @ Washington Nationals,O/U,OVER 9.0,WIN,54%,50-54,9.0,,predictions_20260422_1503.csv
+2026-04-22,Atlanta Braves @ Washington Nationals,ML,WASHINGTON NATIONALS ML,LOSS,80%,80-84,,,predictions_20260422_1503.csv
+2026-04-22,New York Yankees @ Boston Red Sox,O/U,UNDER 7.5,WIN,64%,60-64,7.5,,predictions_20260422_1503.csv
+2026-04-22,New York Yankees @ Boston Red Sox,ML,NEW YORK YANKEES ML,WIN,69%,65-69,,,predictions_20260422_1503.csv
+2026-04-22,Minnesota Twins @ New York Mets,O/U,UNDER 8.0,WIN,53%,50-54,8.0,,predictions_20260422_1503.csv
+2026-04-22,Minnesota Twins @ New York Mets,ML,NEW YORK METS ML,WIN,59%,55-59,,,predictions_20260422_1503.csv
+2026-04-22,Philadelphia Phillies @ Chicago Cubs,O/U,OVER 8.5,WIN,66%,65-69,8.5,,predictions_20260422_1503.csv
+2026-04-22,Philadelphia Phillies @ Chicago Cubs,ML,CHICAGO CUBS ML,WIN,76%,75-79,,,predictions_20260422_1503.csv
+2026-04-22,Pittsburgh Pirates @ Texas Rangers,O/U,LEAN UNDER 7.0 (proj 7.0),LOSS,51%,50-54,7.0,,predictions_20260422_1503.csv
+2026-04-22,Pittsburgh Pirates @ Texas Rangers,ML,PITTSBURGH PIRATES ML,WIN,62%,60-64,,,predictions_20260422_1503.csv
+2026-04-22,San Diego Padres @ Colorado Rockies,O/U,OVER 8.0,WIN,72%,70-74,8.0,,predictions_20260422_1503.csv
+2026-04-22,San Diego Padres @ Colorado Rockies,ML,SAN DIEGO PADRES ML,LOSS,80%,80-84,,,predictions_20260422_1503.csv
+2026-04-22,Chicago White Sox @ Arizona Diamondbacks,O/U,OVER 9.0,WIN,57%,55-59,9.0,,predictions_20260422_1503.csv
+2026-04-22,Chicago White Sox @ Arizona Diamondbacks,ML,ARIZONA DIAMONDBACKS ML,WIN,80%,80-84,,,predictions_20260422_1503.csv
+2026-04-22,Los Angeles Dodgers @ San Francisco Giants,O/U,LEAN UNDER 7.5 (proj 7.3),WIN,47%,45-49,7.5,,predictions_20260422_1503.csv
+2026-04-22,Los Angeles Dodgers @ San Francisco Giants,ML,LOS ANGELES DODGERS ML,LOSS,80%,80-84,,,predictions_20260422_1503.csv
