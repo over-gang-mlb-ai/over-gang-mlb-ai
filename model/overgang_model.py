@@ -758,7 +758,8 @@ LOW_IP_OU_CONFIDENCE_MULT = 0.78      # LowIP on either starter stats row
 # expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
 # fatigue_ratio = IP_Week / expected_weekly_ip — symmetric around neutral: tired pen (+runs),
 # fresh pen (−runs), with a gentler slope/cap on the fresh side.
-BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK = 3.5
+# Baseline matches observed IP_Week/Relievers (~2.6–2.7) in data/bullpen_stats.csv so routine usage sits near ratio 1.0.
+BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK = 2.65
 BULLPEN_FATIGUE_RATIO_NEUTRAL = 1.0
 BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO = 0.32
 BULLPEN_FATIGUE_RUNS_PER_DEFICIT_RATIO = 0.07
