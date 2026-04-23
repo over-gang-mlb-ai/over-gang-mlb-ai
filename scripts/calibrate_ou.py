@@ -6,6 +6,9 @@ Offline O/U empirical calibration: map signed model edge (runs) to outcome frequ
 Reads graded archive predictions CSVs (OU_Result WIN/LOSS/PUSH), bins by signed edge,
 applies simple Dirichlet smoothing, writes JSON artifact + console summary.
 
+Stratifies diagnostics by Odds_Book and Total_Line_Source when present; flags thin
+cohorts/bins (configurable thresholds). Exploratory / offline only.
+
 Does not modify production prediction logic, fire gates, or odds loading.
 
 Usage:
@@ -14,6 +17,7 @@ Usage:
   python scripts/calibrate_ou.py archive/predictions_20260423_1318.csv
   python scripts/calibrate_ou.py --glob 'archive/predictions_2026*.csv' \\
       --output calibration/ou_edge_calibration.json
+  python scripts/calibrate_ou.py --min-bin-rows 5 --min-cohort-rows 20
 """
 from __future__ import annotations
 
@@ -48,6 +52,9 @@ EDGE_BIN_EDGES: List[float] = [
 
 DIRICHLET_ALPHA = 1.0  # Laplace / uniform prior per outcome (over / under / push)
 PRIOR_STRENGTH = 10.0  # for sample_weight denominator (larger = need more games for full weight)
+
+DEFAULT_MIN_BIN_ROWS = 5
+DEFAULT_MIN_COHORT_ROWS = 15
 
 
 def _bin_label(lo: float, hi: float, idx: int, n_bins: int) -> str:
@@ -298,7 +305,18 @@ def build_calibration_table(
     return work, (dedupe_subset if dedupe else None)
 
 
-def aggregate_bins(work: pd.DataFrame) -> List[Dict[str, Any]]:
+def _stratify_series(work: pd.DataFrame, column: str) -> pd.Series:
+    """Normalize a stratification column; missing column or blank → '(missing)'."""
+    if column not in work.columns:
+        return pd.Series(["(missing)"] * len(work), index=work.index, dtype=object)
+    s = work[column].fillna("").astype(str).str.strip()
+    s = s.replace("", "(missing)")
+    return s
+
+
+def aggregate_bins(
+    work: pd.DataFrame, min_bin_rows: int = DEFAULT_MIN_BIN_ROWS
+) -> List[Dict[str, Any]]:
     n_bins = len(EDGE_BIN_EDGES) - 1
     bin_defs: List[Dict[str, Any]] = []
     for i in range(n_bins):
@@ -333,6 +351,7 @@ def aggregate_bins(work: pd.DataFrame) -> List[Dict[str, Any]]:
 
         sample_weight = games / (games + PRIOR_STRENGTH) if (games + PRIOR_STRENGTH) else 0.0
 
+        adequate = games >= min_bin_rows
         rows.append(
             {
                 "bin_index": i,
@@ -348,12 +367,53 @@ def aggregate_bins(work: pd.DataFrame) -> List[Dict[str, Any]]:
                 "model_prob_under": round(p_under, 6),
                 "model_prob_push": round(p_push, 6),
                 "sample_weight": round(float(sample_weight), 6),
+                "min_bin_rows_threshold": min_bin_rows,
+                "adequate_sample": adequate,
+                "sample_status": "adequate" if adequate else "thin",
             }
         )
     return rows
 
 
-def print_summary(bin_rows: List[Dict[str, Any]]) -> None:
+def build_stratified_reports(
+    work: pd.DataFrame,
+    *,
+    strat_column: str,
+    dimension_name: str,
+    min_cohort_rows: int,
+    min_bin_rows: int,
+) -> List[Dict[str, Any]]:
+    """One calibration table per distinct strat value (diagnostic only)."""
+    s = _stratify_series(work, strat_column)
+    out: List[Dict[str, Any]] = []
+    for cohort in sorted(s.unique(), key=lambda x: (-(s == x).sum(), str(x))):
+        sub = work.loc[s == cohort]
+        n = int(len(sub))
+        adequate_cohort = n >= min_cohort_rows
+        out.append(
+            {
+                "dimension": dimension_name,
+                "source_column": strat_column,
+                "cohort": cohort,
+                "rows_used": n,
+                "min_cohort_rows_threshold": min_cohort_rows,
+                "cohort_sample_status": "adequate" if adequate_cohort else "thin",
+                "cohort_adequate_sample": adequate_cohort,
+                "bins": aggregate_bins(sub, min_bin_rows=min_bin_rows),
+            }
+        )
+    return out
+
+
+def print_summary(
+    bin_rows: List[Dict[str, Any]],
+    *,
+    title: str,
+    cohort_rows: int,
+    cohort_status: str,
+    min_bin_rows: int,
+    min_cohort_rows: int,
+) -> None:
     cols = [
         "label",
         "games",
@@ -365,15 +425,19 @@ def print_summary(bin_rows: List[Dict[str, Any]]) -> None:
         "model_prob_over",
         "model_prob_under",
         "sample_weight",
+        "sample_status",
     ]
-    print("\nO/U signed-edge calibration (empirical + Dirichlet smoothing)\n")
+    if title.strip():
+        print(f"\n{title}")
+    print(
+        f"Cohort rows={cohort_rows} | cohort_status={cohort_status} "
+        f"(min_cohort={min_cohort_rows}, min_bin={min_bin_rows})\n"
+    )
     header = " | ".join(f"{c:>16}" for c in cols)
     print(header)
     print("-" * len(header))
     for r in bin_rows:
-        line = " | ".join(
-            f"{str(r.get(c, '')):>16}" for c in cols
-        )
+        line = " | ".join(f"{str(r.get(c, '')):>16}" for c in cols)
         print(line)
 
 
@@ -405,6 +469,20 @@ def main() -> int:
         action="store_true",
         help="Do not drop duplicate Game (+ Game_Date when present).",
     )
+    parser.add_argument(
+        "--min-bin-rows",
+        type=int,
+        default=DEFAULT_MIN_BIN_ROWS,
+        metavar="N",
+        help=f"Bins with fewer than N graded rows are marked thin (default {DEFAULT_MIN_BIN_ROWS}).",
+    )
+    parser.add_argument(
+        "--min-cohort-rows",
+        type=int,
+        default=DEFAULT_MIN_COHORT_ROWS,
+        metavar="N",
+        help=f"Cohorts (pooled or stratified) with fewer than N rows are marked thin (default {DEFAULT_MIN_COHORT_ROWS}).",
+    )
     args = parser.parse_args()
 
     files = _collect_csv_paths(args.paths, args.glob)
@@ -424,7 +502,26 @@ def main() -> int:
         return 1
 
     rows_used = len(work)
-    bin_rows = aggregate_bins(work)
+    min_bin = max(0, int(args.min_bin_rows))
+    min_cohort = max(0, int(args.min_cohort_rows))
+    pooled_cohort_status = "adequate" if rows_used >= min_cohort else "thin"
+
+    bin_rows = aggregate_bins(work, min_bin_rows=min_bin)
+
+    stratified_odds_book = build_stratified_reports(
+        work,
+        strat_column="Odds_Book",
+        dimension_name="Odds_Book",
+        min_cohort_rows=min_cohort,
+        min_bin_rows=min_bin,
+    )
+    stratified_line_source = build_stratified_reports(
+        work,
+        strat_column="Total_Line_Source",
+        dimension_name="Total_Line_Source",
+        min_cohort_rows=min_cohort,
+        min_bin_rows=min_bin,
+    )
 
     n_bins = len(EDGE_BIN_EDGES) - 1
     bin_definitions = []
@@ -439,8 +536,10 @@ def main() -> int:
             }
         )
 
+    thin_bin_count = sum(1 for b in bin_rows if b.get("sample_status") == "thin")
+
     artifact: Dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "metadata": {
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "input_files": file_names,
@@ -450,6 +549,19 @@ def main() -> int:
             "rows_used": rows_used,
             "dirichlet_alpha_per_outcome": DIRICHLET_ALPHA,
             "prior_strength_for_sample_weight": PRIOR_STRENGTH,
+            "diagnostic_mode": True,
+            "diagnostic_note": (
+                "Exploratory offline calibration only. Stratified views and thin-sample "
+                "flags do not change production behavior. Interpret pooled curves with care "
+                "when cohorts disagree or samples are small."
+            ),
+            "sample_thresholds": {
+                "min_bin_rows": min_bin,
+                "min_cohort_rows": min_cohort,
+            },
+            "pooled_cohort_sample_status": pooled_cohort_status,
+            "pooled_cohort_adequate_sample": pooled_cohort_status == "adequate",
+            "pooled_thin_bin_count": thin_bin_count,
             "filters": {
                 "ou_result_in_win_loss_push": True,
                 "total_is_real_true_when_column_present": True,
@@ -461,6 +573,10 @@ def main() -> int:
         },
         "bin_definitions": bin_definitions,
         "bins": bin_rows,
+        "stratified": {
+            "by_odds_book": stratified_odds_book,
+            "by_total_line_source": stratified_line_source,
+        },
     }
 
     out_path = Path(args.output).resolve()
@@ -470,7 +586,41 @@ def main() -> int:
         f.write("\n")
 
     print(f"Wrote {out_path} ({rows_used} graded firm O/U rows from {rows_read} raw rows, {len(files)} files)")
-    print_summary(bin_rows)
+    print(
+        "\n*** DIAGNOSTIC / OFFLINE ONLY — not production calibration ***\n"
+        f"Pooled cohort: {pooled_cohort_status} (rows={rows_used}, min_cohort={min_cohort}). "
+        f"Thin bins (games < {min_bin}): {thin_bin_count} / {len(bin_rows)}.\n"
+        "Compare stratified.by_odds_book / by_total_line_source in JSON for book vs source effects.\n"
+    )
+    print_summary(
+        bin_rows,
+        title="--- Pooled (all books / sources) ---",
+        cohort_rows=rows_used,
+        cohort_status=pooled_cohort_status,
+        min_bin_rows=min_bin,
+        min_cohort_rows=min_cohort,
+    )
+
+    def _print_strat_block(label: str, items: List[Dict[str, Any]]) -> None:
+        print(f"\n{'=' * 72}\n{label}\n{'=' * 72}")
+        for block in items:
+            st = block["cohort_sample_status"]
+            if st != "adequate":
+                print(f"\n--- {block['dimension']}={block['cohort']!r} (rows={block['rows_used']}, "
+                      f"cohort THIN — interpret cautiously) ---")
+            else:
+                print(f"\n--- {block['dimension']}={block['cohort']!r} (rows={block['rows_used']}, cohort adequate) ---")
+            print_summary(
+                block["bins"],
+                title="",
+                cohort_rows=block["rows_used"],
+                cohort_status=st,
+                min_bin_rows=min_bin,
+                min_cohort_rows=min_cohort,
+            )
+
+    _print_strat_block("Stratified: Odds_Book", stratified_odds_book)
+    _print_strat_block("Stratified: Total_Line_Source", stratified_line_source)
     return 0
 
 
