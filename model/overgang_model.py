@@ -756,11 +756,43 @@ LEAGUE_AVG_OU_CONFIDENCE_MULT = 0.75  # "League Avg" pitcher name shell
 LOW_IP_OU_CONFIDENCE_MULT = 0.78      # LowIP on either starter stats row
 # Unified bullpen workload fatigue (single run multiplier — do not stack with a second IP rule):
 # expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
-# fatigue_ratio = IP_Week / expected_weekly_ip — no penalty at or below neutral; modest +runs when elevated.
+# fatigue_ratio = IP_Week / expected_weekly_ip — symmetric around neutral: tired pen (+runs),
+# fresh pen (−runs), with a gentler slope/cap on the fresh side.
 BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK = 3.5
 BULLPEN_FATIGUE_RATIO_NEUTRAL = 1.0
-BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO = 0.22
+BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO = 0.32
+BULLPEN_FATIGUE_RUNS_PER_DEFICIT_RATIO = 0.07
 BULLPEN_FATIGUE_RUNS_MULT_MAX = 1.08
+BULLPEN_FATIGUE_FRESH_RUNS_MULT_MIN = 0.98
+
+
+def _bullpen_workload_fatigue_multiplier(fatigue_ratio: float) -> float:
+    """
+    Maps workload ratio (IP_Week / expected weekly IP) to a runs multiplier for the
+    offense facing that bullpen. Used by project_team_runs and mirrored in telemetry.
+    """
+    try:
+        r = float(fatigue_ratio)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(r):
+        return 1.0
+    deviation = r - BULLPEN_FATIGUE_RATIO_NEUTRAL
+    if deviation > 0:
+        bump = min(
+            BULLPEN_FATIGUE_RUNS_MULT_MAX - 1.0,
+            BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO * deviation,
+        )
+        return 1.0 + bump
+    if deviation < 0:
+        cut = min(
+            1.0 - BULLPEN_FATIGUE_FRESH_RUNS_MULT_MIN,
+            BULLPEN_FATIGUE_RUNS_PER_DEFICIT_RATIO * (-deviation),
+        )
+        return 1.0 - cut
+    return 1.0
+
+
 # Velocity (Season_Velo - Recent_Velo from VelocityTracker): positive = lost velo vs season baseline.
 # Ignore small scatter; scale conservatively and cap so we do not stack aggressively with starter_fatigue xERA or LowIP.
 VELO_DROP_NOISE_MPH = 0.50
@@ -994,11 +1026,7 @@ def project_team_runs(
             ip_w = 0.0
         if ip_w > 0:
             fatigue_ratio = ip_w / expected_weekly_ip
-            excess = max(0.0, fatigue_ratio - BULLPEN_FATIGUE_RATIO_NEUTRAL)
-            fatigue_mult = 1.0 + min(
-                BULLPEN_FATIGUE_RUNS_MULT_MAX - 1.0,
-                BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO * excess,
-            )
+            fatigue_mult = _bullpen_workload_fatigue_multiplier(fatigue_ratio)
             runs *= fatigue_mult
 
     raw_runs = runs
@@ -1593,11 +1621,7 @@ def generate_prediction(
         if exp_ip <= 0 or ipw <= 0:
             return 0.0, 1.0
         ratio = ipw / exp_ip
-        excess = max(0.0, ratio - BULLPEN_FATIGUE_RATIO_NEUTRAL)
-        mult = 1.0 + min(
-            BULLPEN_FATIGUE_RUNS_MULT_MAX - 1.0,
-            BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO * excess,
-        )
+        mult = _bullpen_workload_fatigue_multiplier(ratio)
         return round(ratio, 4), round(mult, 4)
 
     def _telemetry_bp_quality(era, xera):
