@@ -1493,12 +1493,11 @@ def generate_prediction(
     _velo_trust = (
         _confidence_trim_for_velocity_loss(velo_drop_away) * _confidence_trim_for_velocity_loss(velo_drop_home)
     )
-    relievers = (safe_get(bullpen_away, "Relievers", 7) + safe_get(bullpen_home, "Relievers", 7)) / 14.0
-    reliever_factor = min(1.0, relievers)
-    if pick == "OVER":
-        reliever_mult = 1.0 + (1.0 - reliever_factor) * 0.1
-    else:
-        reliever_mult = 1.0 + reliever_factor * 0.05
+    # Reliever depth used to apply a pick-dependent multiplier (OVER vs UNDER),
+    # giving typical UNDER rows +5% confidence vs OVER at full bullpen depth.
+    # Neutralized: bullpen workload/quality stay in project_team_runs only;
+    # O/U confidence no longer gets a structural UNDER advantage at the gate.
+    reliever_mult = 1.0
 
     away_pitcher = away_pitcher_name or ""
     home_pitcher = home_pitcher_name or ""
