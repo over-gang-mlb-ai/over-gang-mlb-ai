@@ -768,6 +768,10 @@ VELO_DROP_RUNS_PER_MPH = 0.012
 VELO_DROP_RUNS_MULT_MAX = 1.05
 VELO_DROP_CONF_LOSS_MPH = 1.05  # meaningful loss: slight confidence trim only (separate from xERA bumps)
 LINEUP_IMPACT_CAP = 0.15     # cap (1 + lineup_impact) to ±15%; kept smaller than offense_mult
+# Stage C: lineup × bullpen cross-term in project_team_runs only (after lineup_mult).
+# Normalized boost/cut × small coef; does not replace lineup_mult or bullpen blend.
+LINEUP_BULLPEN_INTERACTION_COEF = 0.035
+LINEUP_BULLPEN_INTERACTION_BP_ERA_ARM = 1.5  # ERA pts vs league for full normalized arm
 LOW_IP_XERA_PENALTY = 0.75   # add to xERA when pitcher has low IP (unreliable)
 OFFENSE_MULT_MIN = 0.90      # clamp offense_mult (team offense strength vs pitcher hand)
 OFFENSE_MULT_MAX = 1.10
@@ -946,6 +950,30 @@ def project_team_runs(
 
     lineup_mult = 1.0 + max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, lineup_impact))
     runs *= lineup_mult
+
+    # Stage C: lineup × bullpen interaction (O/U projection). Bounded asymmetric
+    # cross-term: strong lineup + weak bullpen (ERA/xERA blend above league) →
+    # modest +runs; weak lineup + strong bullpen → modest −runs. Uses the same
+    # clamped lineup signal as lineup_mult and bullpen_quality from Stage A.
+    # Telemetry hook: lineup_bullpen_interaction_mult (and boost/cut parts).
+    try:
+        _lu_c = max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, float(lineup_impact)))
+        _bq = float(bullpen_quality)
+    except (TypeError, ValueError):
+        _lu_c = 0.0
+        _bq = float(LEAGUE_ERA)
+    _bp_weak_arm = max(0.0, _bq - LEAGUE_ERA)
+    _bp_strong_arm = max(0.0, LEAGUE_ERA - _bq)
+    _norm_weak = min(1.0, _bp_weak_arm / LINEUP_BULLPEN_INTERACTION_BP_ERA_ARM)
+    _norm_strong = min(1.0, _bp_strong_arm / LINEUP_BULLPEN_INTERACTION_BP_ERA_ARM)
+    _lu_pos = max(0.0, _lu_c) / LINEUP_IMPACT_CAP
+    _lu_neg = max(0.0, -_lu_c) / LINEUP_IMPACT_CAP
+    _lineup_bullpen_inter_boost = _lu_pos * _norm_weak
+    _lineup_bullpen_inter_cut = _lu_neg * _norm_strong
+    lineup_bullpen_interaction_mult = 1.0 + LINEUP_BULLPEN_INTERACTION_COEF * (
+        _lineup_bullpen_inter_boost - _lineup_bullpen_inter_cut
+    )
+    runs *= lineup_bullpen_interaction_mult
 
     whip_mult = opponent_starter_whip / WHIP_LEAGUE
     whip_mult = max(0.90, min(1.15, whip_mult))
