@@ -1479,7 +1479,10 @@ def generate_prediction(
     # market_trust_factor = reserved multiplicative market trust (1.0); public + line = small additive market nudges.
     abs_edge = abs(edge)
     if abs_edge >= 1.0:
-        base_confidence = 0.75
+        # Top bucket: slight lift vs 0.75 so |edge|>=1 rows with routine velo
+        # trims (~0.99) and aligned sharp (+0.04) can reach OU_Fired (0.79)
+        # without lowering the gate or trimming other buckets.
+        base_confidence = 0.76
     elif abs_edge >= 0.5:
         base_confidence = 0.67
     elif abs_edge >= EDGE_THRESHOLD:
