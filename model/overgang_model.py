@@ -1543,6 +1543,93 @@ def generate_prediction(
         f"📦 Projection: {away_runs:.2f} + {home_runs:.2f} = {projected_total:.2f} | "
         f"Edge: {edge:+.2f} | {prediction_str} | Conf: {confidence:.2f}"
     )
+
+    # --- Stage B telemetry (additive, non-behavior-altering) ---
+    # Replays of math already performed inside project_team_runs and the
+    # confidence stack above. Values here are purely observational and do
+    # NOT feed back into projection, confidence, or fire gates. Stamped
+    # onto the archive per row so lineup × bullpen / fatigue / confidence-
+    # stack hypotheses can be validated from the CSV without rerunning.
+    def _telemetry_bp_fatigue(n_rel, ip_week):
+        try:
+            n = max(1, int(round(float(n_rel))))
+        except (TypeError, ValueError):
+            n = 7
+        exp_ip = n * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
+        try:
+            ipw = float(ip_week)
+        except (TypeError, ValueError):
+            ipw = 0.0
+        if exp_ip <= 0 or ipw <= 0:
+            return 0.0, 1.0
+        ratio = ipw / exp_ip
+        excess = max(0.0, ratio - BULLPEN_FATIGUE_RATIO_NEUTRAL)
+        mult = 1.0 + min(
+            BULLPEN_FATIGUE_RUNS_MULT_MAX - 1.0,
+            BULLPEN_FATIGUE_RUNS_PER_EXCESS_RATIO * excess,
+        )
+        return round(ratio, 4), round(mult, 4)
+
+    def _telemetry_bp_quality(era, xera):
+        try:
+            e = float(era)
+        except (TypeError, ValueError):
+            return None
+        if xera is None:
+            return e
+        try:
+            x = float(xera)
+        except (TypeError, ValueError):
+            return e
+        if not np.isfinite(x):
+            return e
+        return 0.5 * e + 0.5 * x
+
+    def _telemetry_starter_adj(x, low_ip):
+        try:
+            xf = float(x)
+        except (TypeError, ValueError):
+            return None
+        return min(xf + LOW_IP_XERA_PENALTY, 6.0) if bool(low_ip) else xf
+
+    _tel_away_bp_ratio, _tel_away_bp_fmult = _telemetry_bp_fatigue(
+        bullpen_away_rel, bullpen_away_ip_week
+    )
+    _tel_home_bp_ratio, _tel_home_bp_fmult = _telemetry_bp_fatigue(
+        bullpen_home_rel, bullpen_home_ip_week
+    )
+
+    _tel_bq_home = _telemetry_bp_quality(bullpen_home_era, bullpen_home_xera)
+    _tel_bq_away = _telemetry_bp_quality(bullpen_away_era, bullpen_away_xera)
+
+    # Mirror the low-IP starter adjustment that project_team_runs applies,
+    # so Effective_ERA telemetry matches what the projection actually used.
+    _tel_opp_starter_for_away = _telemetry_starter_adj(
+        home_xera, safe_get(home_stats, "LowIP", False)
+    )
+    _tel_opp_starter_for_home = _telemetry_starter_adj(
+        away_xera, safe_get(away_stats, "LowIP", False)
+    )
+
+    # Away offense runs projection faces home starter + home bullpen
+    # Home offense runs projection faces away starter + away bullpen
+    if _tel_opp_starter_for_away is not None and _tel_bq_home is not None:
+        _tel_away_eff_era = round(
+            STARTER_IP_SHARE * _tel_opp_starter_for_away
+            + BULLPEN_IP_SHARE * _tel_bq_home,
+            4,
+        )
+    else:
+        _tel_away_eff_era = ""
+    if _tel_opp_starter_for_home is not None and _tel_bq_away is not None:
+        _tel_home_eff_era = round(
+            STARTER_IP_SHARE * _tel_opp_starter_for_home
+            + BULLPEN_IP_SHARE * _tel_bq_away,
+            4,
+        )
+    else:
+        _tel_home_eff_era = ""
+
     return {
         "skip": False,
         "projected_total": projected_total,
@@ -1561,6 +1648,27 @@ def generate_prediction(
         "total_open": total_open,
         "total_current": total_current,
         "recommended_units": recommended_units,
+        "telemetry": {
+            "away_bullpen_era": bullpen_away_era,
+            "home_bullpen_era": bullpen_home_era,
+            "away_bullpen_xera": bullpen_away_xera if bullpen_away_xera is not None else "",
+            "home_bullpen_xera": bullpen_home_xera if bullpen_home_xera is not None else "",
+            "away_bullpen_ip_week": bullpen_away_ip_week,
+            "home_bullpen_ip_week": bullpen_home_ip_week,
+            "away_bullpen_relievers": bullpen_away_rel,
+            "home_bullpen_relievers": bullpen_home_rel,
+            "away_bullpen_fatigue_ratio": _tel_away_bp_ratio,
+            "home_bullpen_fatigue_ratio": _tel_home_bp_ratio,
+            "away_bullpen_fatigue_mult": _tel_away_bp_fmult,
+            "home_bullpen_fatigue_mult": _tel_home_bp_fmult,
+            "away_effective_era": _tel_away_eff_era,
+            "home_effective_era": _tel_home_eff_era,
+            "ou_base_confidence": round(float(base_confidence), 4),
+            "ou_reliever_mult": round(float(reliever_mult), 4),
+            "ou_low_ip_mult": round(float(low_ip_penalty), 4),
+            "ou_league_avg_mult": round(float(league_avg_penalty), 4),
+            "ou_velo_trust_mult": round(float(_velo_trust), 4),
+        },
     }
 
 # ================================
@@ -3624,6 +3732,75 @@ def run_predictions():
                 _mt_time_str = ""
             game_data["Game_Time_MT"] = _mt_time_str
 
+            # Stage B: additive archive telemetry for bullpen quality,
+            # bullpen workload/fatigue, effective ERA, and the O/U
+            # confidence stack. All values are replays of math already
+            # performed upstream; nothing here feeds back into projection,
+            # confidence, or fire gates. Used to validate lineup × bullpen,
+            # fatigue, and confidence-stack hypotheses row-by-row from the
+            # archive CSV without rerunning the model.
+            _tel = proj.get("telemetry", {}) if isinstance(proj, dict) else {}
+            game_data["Away_Bullpen_ERA"] = _tel.get("away_bullpen_era", "")
+            game_data["Home_Bullpen_ERA"] = _tel.get("home_bullpen_era", "")
+            game_data["Away_Bullpen_xERA"] = _tel.get("away_bullpen_xera", "")
+            game_data["Home_Bullpen_xERA"] = _tel.get("home_bullpen_xera", "")
+            game_data["Away_Bullpen_IP_Week"] = _tel.get("away_bullpen_ip_week", "")
+            game_data["Home_Bullpen_IP_Week"] = _tel.get("home_bullpen_ip_week", "")
+            game_data["Away_Bullpen_Relievers"] = _tel.get("away_bullpen_relievers", "")
+            game_data["Home_Bullpen_Relievers"] = _tel.get("home_bullpen_relievers", "")
+            game_data["Away_Bullpen_Fatigue_Ratio"] = _tel.get("away_bullpen_fatigue_ratio", "")
+            game_data["Home_Bullpen_Fatigue_Ratio"] = _tel.get("home_bullpen_fatigue_ratio", "")
+            game_data["Away_Bullpen_Fatigue_Mult"] = _tel.get("away_bullpen_fatigue_mult", "")
+            game_data["Home_Bullpen_Fatigue_Mult"] = _tel.get("home_bullpen_fatigue_mult", "")
+            game_data["Away_Effective_ERA"] = _tel.get("away_effective_era", "")
+            game_data["Home_Effective_ERA"] = _tel.get("home_effective_era", "")
+
+            _tel_base_conf = _tel.get("ou_base_confidence", "")
+            _tel_rel_mult = _tel.get("ou_reliever_mult", "")
+            _tel_low_ip_mult = _tel.get("ou_low_ip_mult", "")
+            _tel_lg_avg_mult = _tel.get("ou_league_avg_mult", "")
+            _tel_velo_mult = _tel.get("ou_velo_trust_mult", "")
+            game_data["OU_Base_Confidence"] = _tel_base_conf
+            game_data["OU_Reliever_Mult"] = _tel_rel_mult
+            game_data["OU_LowIP_Mult"] = _tel_low_ip_mult
+            game_data["OU_LeagueAvg_Mult"] = _tel_lg_avg_mult
+            game_data["OU_Velo_Trust_Mult"] = _tel_velo_mult
+
+            # Numeric applied sharp delta (clean float for analytics).
+            # Parsed from ou_market_quality_note; 0.0 when no modifier was
+            # applied for any reason (missing inputs, sub-threshold gap,
+            # etc.). Paired with OU_Sharpness_Inputs_OK / OU_Sharpness_OK
+            # to disambiguate "not computed" from "computed and zero".
+            _ou_sharp_delta_num = 0.0
+            if ou_market_quality_note and ou_market_quality_note.startswith("ou_sharp="):
+                try:
+                    _tok2 = ou_market_quality_note[len("ou_sharp="):]
+                    _num_str2 = _tok2.split("@", 1)[0]
+                    _ou_sharp_delta_num = float(_num_str2)
+                except (ValueError, IndexError):
+                    _ou_sharp_delta_num = 0.0
+            game_data["OU_Sharp_Modifier_Numeric"] = round(_ou_sharp_delta_num, 4)
+
+            # Compact human-readable confidence stack trace for per-row
+            # debugging. Format mirrors the internal multiplicative pipeline
+            # in generate_prediction: base × velo × reliever × low_ip ×
+            # league_avg (+ sharp delta, additive). Empty cells fall back
+            # gracefully if any component was not computed.
+            def _fmt_conf_component(v, plus_sign=False):
+                try:
+                    f = float(v)
+                    return f"{f:+.2f}" if plus_sign else f"{f:.2f}"
+                except (TypeError, ValueError):
+                    return "?"
+            game_data["OU_Confidence_Stack"] = (
+                f"base={_fmt_conf_component(_tel_base_conf)}"
+                f"|velo={_fmt_conf_component(_tel_velo_mult)}"
+                f"|reliever={_fmt_conf_component(_tel_rel_mult)}"
+                f"|low_ip={_fmt_conf_component(_tel_low_ip_mult)}"
+                f"|league_avg={_fmt_conf_component(_tel_lg_avg_mult)}"
+                f"|sharp={_fmt_conf_component(_ou_sharp_delta_num, plus_sign=True)}"
+            )
+
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
             if ou_fired:
@@ -3664,6 +3841,17 @@ def run_predictions():
         "OU_Pinnacle_Total", "OU_Retail_Total", "OU_Retail_Book",
         "OU_Confidence_Bucket", "ML_Confidence_Bucket",
         "Archive_Row_Reason",
+        # Stage B telemetry (additive, non-behavior-altering).
+        "Away_Bullpen_ERA", "Home_Bullpen_ERA",
+        "Away_Bullpen_xERA", "Home_Bullpen_xERA",
+        "Away_Bullpen_IP_Week", "Home_Bullpen_IP_Week",
+        "Away_Bullpen_Relievers", "Home_Bullpen_Relievers",
+        "Away_Bullpen_Fatigue_Ratio", "Home_Bullpen_Fatigue_Ratio",
+        "Away_Bullpen_Fatigue_Mult", "Home_Bullpen_Fatigue_Mult",
+        "Away_Effective_ERA", "Home_Effective_ERA",
+        "OU_Base_Confidence", "OU_Reliever_Mult",
+        "OU_LowIP_Mult", "OU_LeagueAvg_Mult", "OU_Velo_Trust_Mult",
+        "OU_Sharp_Modifier_Numeric", "OU_Confidence_Stack",
     ]
     eligible_export = [
         r for r in results
