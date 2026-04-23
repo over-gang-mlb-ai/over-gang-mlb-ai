@@ -18,6 +18,7 @@ Usage:
   python scripts/calibrate_ou.py --glob 'archive/predictions_2026*.csv' \\
       --output calibration/ou_edge_calibration.json
   python scripts/calibrate_ou.py --min-bin-rows 5 --min-cohort-rows 20
+  python scripts/calibrate_ou.py --book-filter Pinnacle --source-filter parlay_api
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -55,6 +56,15 @@ PRIOR_STRENGTH = 10.0  # for sample_weight denominator (larger = need more games
 
 DEFAULT_MIN_BIN_ROWS = 5
 DEFAULT_MIN_COHORT_ROWS = 15
+
+# Production-readiness: bounded-edge "core" bins only (exclude (-inf,-2) and [2,inf)).
+def _core_bin_indices() -> Tuple[int, ...]:
+    n = len(EDGE_BIN_EDGES) - 1
+    return tuple(range(1, max(1, n - 1)))
+
+
+DEFAULT_MIN_PRODUCTION_TOTAL_ROWS = 120
+DEFAULT_MIN_PRODUCTION_CORE_BIN_ROWS = 15
 
 
 def _bin_label(lo: float, hi: float, idx: int, n_bins: int) -> str:
@@ -314,6 +324,116 @@ def _stratify_series(work: pd.DataFrame, column: str) -> pd.Series:
     return s
 
 
+def _collect_filter_tokens(raw: Optional[List[str]]) -> List[str]:
+    """Flatten repeatable CLI args; allow comma-separated tokens per flag."""
+    if not raw:
+        return []
+    out: List[str] = []
+    for chunk in raw:
+        for part in str(chunk).split(","):
+            t = part.strip()
+            if t:
+                out.append(t)
+    return out
+
+
+def _filter_match_set(tokens: List[str]) -> Set[str]:
+    return {t.casefold() for t in tokens}
+
+
+def apply_book_source_filters(
+    work: pd.DataFrame,
+    book_filters: List[str],
+    source_filters: List[str],
+) -> pd.DataFrame:
+    """
+    Restrict rows to Odds_Book / Total_Line_Source in filter lists (case-insensitive).
+    Empty list for a dimension means no filter on that dimension.
+    """
+    out = work
+    if book_filters:
+        s = _stratify_series(out, "Odds_Book")
+        allow = _filter_match_set(book_filters)
+        out = out.loc[s.map(lambda x: str(x).casefold() in allow)]
+    if source_filters:
+        s = _stratify_series(out, "Total_Line_Source")
+        allow = _filter_match_set(source_filters)
+        out = out.loc[s.map(lambda x: str(x).casefold() in allow)]
+    return out
+
+
+def evaluate_production_readiness(
+    bin_rows: List[Dict[str, Any]],
+    rows_used: int,
+    *,
+    min_production_total_rows: int,
+    min_production_core_bin_rows: int,
+    diagnostic_min_bin_rows: int,
+) -> Tuple[bool, List[str], bool]:
+    """
+    Declare production_ready when cohort size and core (bounded-edge) bin counts
+    meet production floors. Also reports diagnostic-thin bins in core (games <
+    diagnostic_min_bin_rows).
+
+    Returns (production_ready, reasons, thin_bins_in_core_diagnostic).
+    """
+    reasons: List[str] = []
+    core = _core_bin_indices()
+    by_idx = {int(b["bin_index"]): b for b in bin_rows}
+
+    if rows_used <= 0:
+        reasons.append("fail: no rows in calibration sample after filters")
+        return False, reasons, False
+
+    ok_total = rows_used >= min_production_total_rows
+    reasons.append(
+        f"{'pass' if ok_total else 'fail'}: rows_used={rows_used} vs "
+        f"min_production_total_rows={min_production_total_rows}"
+    )
+
+    thin_core_diag: List[str] = []
+    short_core: List[str] = []
+    for i in core:
+        b = by_idx.get(i)
+        if not b:
+            short_core.append(f"bin_index={i} missing from aggregation")
+            continue
+        games = int(b.get("games", 0))
+        label = str(b.get("label", i))
+        if games < diagnostic_min_bin_rows:
+            thin_core_diag.append(
+                f"{label} (games={games} < diagnostic_min_bin_rows={diagnostic_min_bin_rows})"
+            )
+        if games < min_production_core_bin_rows:
+            short_core.append(
+                f"{label} (games={games} < min_production_core_bin_rows={min_production_core_bin_rows})"
+            )
+
+    thin_in_core = bool(thin_core_diag)
+    if thin_in_core:
+        reasons.append(
+            "diagnostic: thin bin(s) in core bounded-edge range: "
+            + "; ".join(thin_core_diag)
+        )
+    else:
+        reasons.append(
+            "pass: no diagnostic-thin bins in core range "
+            f"(threshold={diagnostic_min_bin_rows})"
+        )
+
+    if short_core:
+        reasons.append(
+            "fail: production core-bin minimum not met: " + "; ".join(short_core)
+        )
+    else:
+        reasons.append(
+            f"pass: all core bins {core} meet min_production_core_bin_rows={min_production_core_bin_rows}"
+        )
+
+    production_ready = ok_total and not short_core
+    return production_ready, reasons, thin_in_core
+
+
 def aggregate_bins(
     work: pd.DataFrame, min_bin_rows: int = DEFAULT_MIN_BIN_ROWS
 ) -> List[Dict[str, Any]]:
@@ -483,6 +603,34 @@ def main() -> int:
         metavar="N",
         help=f"Cohorts (pooled or stratified) with fewer than N rows are marked thin (default {DEFAULT_MIN_COHORT_ROWS}).",
     )
+    parser.add_argument(
+        "--book-filter",
+        action="append",
+        default=None,
+        metavar="BOOK",
+        help="Repeatable. Restrict rows to Odds_Book matching any token (case-insensitive). Comma-separated allowed per flag.",
+    )
+    parser.add_argument(
+        "--source-filter",
+        action="append",
+        default=None,
+        metavar="SOURCE",
+        help="Repeatable. Restrict rows to Total_Line_Source matching any token (case-insensitive). Comma-separated allowed per flag.",
+    )
+    parser.add_argument(
+        "--min-production-rows",
+        type=int,
+        default=DEFAULT_MIN_PRODUCTION_TOTAL_ROWS,
+        metavar="N",
+        help=f"Minimum graded rows required for production_ready (default {DEFAULT_MIN_PRODUCTION_TOTAL_ROWS}).",
+    )
+    parser.add_argument(
+        "--min-production-core-bin-rows",
+        type=int,
+        default=DEFAULT_MIN_PRODUCTION_CORE_BIN_ROWS,
+        metavar="N",
+        help=f"Minimum rows in each bounded-edge core bin for production_ready (default {DEFAULT_MIN_PRODUCTION_CORE_BIN_ROWS}).",
+    )
     args = parser.parse_args()
 
     files = _collect_csv_paths(args.paths, args.glob)
@@ -501,12 +649,30 @@ def main() -> int:
         print(f"Calibration failed: {e}", file=sys.stderr)
         return 1
 
+    book_filters = _collect_filter_tokens(args.book_filter)
+    source_filters = _collect_filter_tokens(args.source_filter)
+    rows_before_slice = len(work)
+    work = apply_book_source_filters(work, book_filters, source_filters)
+
     rows_used = len(work)
     min_bin = max(0, int(args.min_bin_rows))
     min_cohort = max(0, int(args.min_cohort_rows))
+    min_prod_total = max(0, int(args.min_production_rows))
+    min_prod_core = max(0, int(args.min_production_core_bin_rows))
     pooled_cohort_status = "adequate" if rows_used >= min_cohort else "thin"
 
     bin_rows = aggregate_bins(work, min_bin_rows=min_bin)
+
+    production_ready, production_ready_reasons, thin_in_core_diag = (
+        evaluate_production_readiness(
+            bin_rows,
+            rows_used,
+            min_production_total_rows=min_prod_total,
+            min_production_core_bin_rows=min_prod_core,
+            diagnostic_min_bin_rows=min_bin,
+        )
+    )
+    diagnostic_only = not production_ready
 
     stratified_odds_book = build_stratified_reports(
         work,
@@ -539,7 +705,7 @@ def main() -> int:
     thin_bin_count = sum(1 for b in bin_rows if b.get("sample_status") == "thin")
 
     artifact: Dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "metadata": {
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "input_files": file_names,
@@ -547,17 +713,30 @@ def main() -> int:
             "read_errors": read_errors,
             "rows_read": rows_read,
             "rows_used": rows_used,
+            "rows_used_before_book_source_filters": rows_before_slice,
             "dirichlet_alpha_per_outcome": DIRICHLET_ALPHA,
             "prior_strength_for_sample_weight": PRIOR_STRENGTH,
             "diagnostic_mode": True,
+            "diagnostic_only": diagnostic_only,
+            "production_ready": production_ready,
+            "production_ready_reasons": production_ready_reasons,
+            "thin_bins_in_core_diagnostic": thin_in_core_diag,
+            "applied_book_filter": book_filters,
+            "applied_source_filter": source_filters,
             "diagnostic_note": (
-                "Exploratory offline calibration only. Stratified views and thin-sample "
-                "flags do not change production behavior. Interpret pooled curves with care "
-                "when cohorts disagree or samples are small."
+                "Offline calibration artifact. production_ready is False unless cohort and "
+                "core-bin thresholds are met; diagnostic_only is True when not production_ready. "
+                "Stratified views and thin-sample flags do not change production engine behavior."
             ),
             "sample_thresholds": {
                 "min_bin_rows": min_bin,
                 "min_cohort_rows": min_cohort,
+            },
+            "production_readiness_thresholds": {
+                "min_production_total_rows": min_prod_total,
+                "min_production_core_bin_rows": min_prod_core,
+                "core_bin_indices": list(_core_bin_indices()),
+                "diagnostic_min_bin_rows_reference": min_bin,
             },
             "pooled_cohort_sample_status": pooled_cohort_status,
             "pooled_cohort_adequate_sample": pooled_cohort_status == "adequate",
@@ -586,11 +765,18 @@ def main() -> int:
         f.write("\n")
 
     print(f"Wrote {out_path} ({rows_used} graded firm O/U rows from {rows_read} raw rows, {len(files)} files)")
+    if book_filters or source_filters:
+        print(
+            f"Applied filters: book={book_filters or '(none)'} source={source_filters or '(none)'} "
+            f"({rows_before_slice} → {rows_used} rows)\n"
+        )
     print(
-        "\n*** DIAGNOSTIC / OFFLINE ONLY — not production calibration ***\n"
+        "\n*** OFFLINE calibration — check metadata.production_ready before any prod use ***\n"
+        f"production_ready={production_ready} | diagnostic_only={diagnostic_only}\n"
         f"Pooled cohort: {pooled_cohort_status} (rows={rows_used}, min_cohort={min_cohort}). "
-        f"Thin bins (games < {min_bin}): {thin_bin_count} / {len(bin_rows)}.\n"
-        "Compare stratified.by_odds_book / by_total_line_source in JSON for book vs source effects.\n"
+        f"Thin bins (games < {min_bin}): {thin_bin_count} / {len(bin_rows)}. "
+        f"Thin core bins (diagnostic): {thin_in_core_diag}\n"
+        "See metadata.production_ready_reasons and stratified blocks in JSON.\n"
     )
     print_summary(
         bin_rows,
