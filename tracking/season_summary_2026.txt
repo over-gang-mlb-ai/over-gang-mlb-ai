@@ -2,22 +2,22 @@
 SEASON TRACKER SUMMARY (2026)
 ==============================
 Ledger: /home/ubuntu/over-gang-mlb-ai/tracking/season_results_2026.csv
-Total rows in file: 78
+Total rows in file: 96
 
 --- O/U ---
-  WIN:   19
-  LOSS:  20
-  PUSH:  0
-  Win rate (excl. push): 48.7%
+  WIN:   22
+  LOSS:  25
+  PUSH:  1
+  Win rate (excl. push): 46.8%
 
 --- ML ---
-  WIN:   19
-  LOSS:  20
+  WIN:   27
+  LOSS:  21
   PUSH:  0
-  Win rate (excl. push): 48.7%
+  Win rate (excl. push): 56.2%
 
 --- Combined (O/U + ML) ---
-  WIN:   38
-  LOSS:  40
-  PUSH:  0
-  Win rate (excl. push): 48.7%
+  WIN:   49
+  LOSS:  46
+  PUSH:  1
+  Win rate (excl. push): 51.6%

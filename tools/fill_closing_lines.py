@@ -92,6 +92,16 @@ def main() -> None:
         print(f"Error: Missing required columns: {missing}", file=sys.stderr)
         sys.exit(1)
 
+    rows_needing_closing = sum(
+        1 for i in range(len(df)) if not _has_existing_closing_line(df.at[i, "Closing_Line"])
+    )
+    if rows_needing_closing == 0:
+        print(
+            f"Skip: all Closing_Line values already filled in {csv_path} "
+            f"({len(df)} row(s)); no Odds API call."
+        )
+        sys.exit(0)
+
     target_date = parse_date_from_filename(csv_path)
     if not target_date:
         print("Error: Could not parse date from filename (expected predictions_YYYYMMDD_HHMM.csv)", file=sys.stderr)
