@@ -13,6 +13,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 # Project root (parent of tools/)
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -34,6 +36,29 @@ def _game_mt_date(g, slate: date) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
     return dt_utc.astimezone(ZoneInfo("America/Denver")).date() == slate
+
+
+def _closing_line_filled(val) -> bool:
+    """True when Closing_Line should not be refilled (aligned with fill_closing_lines.py)."""
+    if pd.isna(val):
+        return False
+    s = str(val).strip()
+    return bool(s) and s.lower() != "nan"
+
+
+def _parse_row_game_start_utc(val) -> datetime | None:
+    """Parse archive row Datetime (ISO Z) for gating on still-missing Closing_Line rows."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return None
 
 
 def _parse_earliest_pitch_utc(games: list) -> datetime | None:
@@ -123,23 +148,57 @@ def main() -> None:
         )
         sys.exit(0)
 
-    date_str = slate_date.strftime("%Y-%m-%d")
-    raw_games = schedule(start_date=date_str, end_date=date_str) or []
-    # Same slate membership as run_predictions (MT calendar date); include all statuses
-    # so earliest first pitch is the true first scheduled pitch, not only pregame rows.
-    slate_games = [g for g in raw_games if _game_mt_date(g, slate_date)]
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"{LOG_PREFIX} could not read {csv_path}: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    if not slate_games:
+    if "Closing_Line" not in df.columns:
+        print(f"{LOG_PREFIX} missing Closing_Line column in {csv_path}", file=sys.stderr)
+        sys.exit(1)
+
+    rows_needing_closing = sum(
+        1 for i in range(len(df)) if not _closing_line_filled(df.at[i, "Closing_Line"])
+    )
+    if rows_needing_closing == 0:
         print(
-            f"{LOG_PREFIX} no games on slate {date_str} "
-            f"(statsapi schedule empty or no games matching active slate MT date)"
+            f"{LOG_PREFIX} skip: all Closing_Line values already filled in "
+            f"{csv_path.name} ({len(df)} row(s)); no fill run."
         )
         sys.exit(0)
 
-    earliest = _parse_earliest_pitch_utc(slate_games)
-    if earliest is None:
-        print(f"{LOG_PREFIX} could not parse game_datetime for earliest first pitch")
-        sys.exit(0)
+    date_str = slate_date.strftime("%Y-%m-%d")
+    row_starts: list[datetime] = []
+    if "Datetime" in df.columns:
+        for i in range(len(df)):
+            if _closing_line_filled(df.at[i, "Closing_Line"]):
+                continue
+            dt = _parse_row_game_start_utc(df.at[i, "Datetime"])
+            if dt is not None:
+                row_starts.append(dt)
+
+    if row_starts:
+        earliest = min(row_starts)
+        gate_source = "earliest_unfilled_row_datetime"
+    else:
+        raw_games = schedule(start_date=date_str, end_date=date_str) or []
+        slate_games = [g for g in raw_games if _game_mt_date(g, slate_date)]
+        if not slate_games:
+            print(
+                f"{LOG_PREFIX} no games on slate {date_str} "
+                f"(statsapi schedule empty or no games matching active slate MT date); "
+                f"cannot infer start for {rows_needing_closing} unfilled row(s) without Datetime"
+            )
+            sys.exit(0)
+        earliest = _parse_earliest_pitch_utc(slate_games)
+        if earliest is None:
+            print(
+                f"{LOG_PREFIX} could not parse game_datetime for earliest first pitch "
+                f"(fallback for {rows_needing_closing} unfilled row(s) without parseable Datetime)"
+            )
+            sys.exit(0)
+        gate_source = "earliest_slate_first_pitch_fallback"
 
     now_utc = datetime.now(timezone.utc)
     window_start = earliest - timedelta(minutes=buffer_min)
@@ -171,7 +230,8 @@ def main() -> None:
     cmd = [sys.executable, str(fill_script), str(csv_path)]
     print(
         f"{LOG_PREFIX} running fill for {csv_path.name} "
-        f"(earliest_first_pitch_utc={earliest.isoformat()}, buffer_min={buffer_min})"
+        f"({gate_source}, earliest_utc={earliest.isoformat()}, "
+        f"unfilled_rows={rows_needing_closing}, buffer_min={buffer_min})"
     )
     try:
         subprocess.run(cmd, check=True, cwd=str(ROOT))
