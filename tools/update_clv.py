@@ -12,6 +12,21 @@ import pandas as pd
 REQUIRED_COLUMNS = ["Bet_Line", "Closing_Line", "CLV", "CLV_Result", "Side"]
 
 
+def _norm_side(val) -> str:
+    """Return 'over', 'under', or '' for missing / NaN / blank / non-side strings."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except TypeError:
+        pass
+    s = str(val).strip().lower()
+    if not s or s == "nan":
+        return ""
+    return s
+
+
 def compute_clv(bet_line: float, closing_line: float, side: str) -> float:
     """
     Compute Closing Line Value.
@@ -68,7 +83,7 @@ def main() -> None:
     for i in range(len(df)):
         bet = df.at[i, "Bet_Line"]
         close = df.at[i, "Closing_Line"]
-        side = (df.at[i, "Side"] or "").strip().lower()
+        side = _norm_side(df.at[i, "Side"])
         if pd.notna(bet) and pd.notna(close) and side in ("over", "under"):
             clv_val = compute_clv(float(bet), float(close), side)
             df.at[i, "CLV"] = clv_val if not pd.isna(clv_val) else ""
