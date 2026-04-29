@@ -986,7 +986,7 @@ def project_team_runs(
         STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * bullpen_quality
     )
     effective_era = max(2.5, min(7.0, effective_era))
-    base_era = 0.90 * effective_era + 0.10 * LEAGUE_ERA
+    base_era = 0.85 * effective_era + 0.15 * LEAGUE_ERA
     runs = LEAGUE_RUNS_PER_TEAM * (base_era / LEAGUE_ERA)
 
     runs *= park_runs_factor
