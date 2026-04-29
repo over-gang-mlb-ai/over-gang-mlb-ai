@@ -759,8 +759,8 @@ except Exception:
 # ================================
 LEAGUE_RUNS_PER_TEAM = 4.25   # league avg runs per team per 9
 LEAGUE_ERA = 4.25
-STARTER_IP_SHARE = 0.60      # ~60% of IP from starter, 40% bullpen
-BULLPEN_IP_SHARE = 0.40
+STARTER_IP_SHARE = 0.55      # ~55% of IP from starter, 45% bullpen
+BULLPEN_IP_SHARE = 0.45
 WHIP_LEAGUE = 1.30            # baseline WHIP for modifier
 EDGE_THRESHOLD = 0.25        # min |edge| to recommend OVER/UNDER (runs); tune up (e.g. 0.35) if too aggressive
 EDGE_FOR_FULL_UNIT = 0.5     # edge >= this gets 1.0 unit; scale below; tune up (e.g. 0.6) for conservative sizing
