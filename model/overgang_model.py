@@ -969,10 +969,9 @@ def project_team_runs(
         opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
 
     # Stage A: bullpen-quality input for the O/U projection blends raw ERA
-    # with xERA 50/50 when xERA is available and finite. xERA is the more
-    # predictive bullpen-quality signal (already used by the ML path and
-    # already present in data/bullpen_stats.csv); blending it into the O/U
-    # projection path reduces systematic under-bias driven by lagging ERA.
+    # with xERA (75/25) when xERA is available and finite. xERA remains in the
+    # path for signal; ERA is weighted higher to avoid over-cold bullpen xERA
+    # vs realized runs when ERA−xERA gaps are large and positive.
     # Safe fallback: if xERA is missing or non-finite, use raw ERA so the
     # projection degrades exactly to current behavior.
     _bp_era = opponent_bullpen_era
@@ -980,7 +979,7 @@ def project_team_runs(
     if _bp_xera is None or not np.isfinite(_bp_xera):
         bullpen_quality = _bp_era
     else:
-        bullpen_quality = 0.5 * _bp_era + 0.5 * _bp_xera
+        bullpen_quality = 0.75 * _bp_era + 0.25 * _bp_xera
 
     effective_era = (
         STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * bullpen_quality
@@ -1651,7 +1650,7 @@ def generate_prediction(
             return e
         if not np.isfinite(x):
             return e
-        return 0.5 * e + 0.5 * x
+        return 0.75 * e + 0.25 * x
 
     def _telemetry_starter_adj(x, low_ip):
         try:
