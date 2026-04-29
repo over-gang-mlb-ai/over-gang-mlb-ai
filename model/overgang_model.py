@@ -1021,7 +1021,7 @@ def project_team_runs(
     runs *= lineup_bullpen_interaction_mult
 
     whip_mult = opponent_starter_whip / WHIP_LEAGUE
-    whip_mult = max(0.90, min(1.15, whip_mult))
+    whip_mult = max(0.92, min(1.15, whip_mult))
     runs *= whip_mult
 
     runs *= _opponent_velocity_run_multiplier(opponent_velo_drop)
