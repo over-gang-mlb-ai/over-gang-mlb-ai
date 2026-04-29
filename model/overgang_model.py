@@ -204,6 +204,19 @@ def safe_get(obj, key, default):
         return obj[key]
     return default
 
+
+def _export_era_minus_xera(era_val, xera_val):
+    """Archive export only: ERA − xERA when both parse as finite floats; else ''."""
+    try:
+        e = float(era_val)
+        x = float(xera_val)
+        if not np.isfinite(e) or not np.isfinite(x):
+            return ""
+        return round(e - x, 4)
+    except (TypeError, ValueError):
+        return ""
+
+
 # ================================
 # ⚙️ CONFIGURATION
 # ================================
@@ -1718,6 +1731,9 @@ def generate_prediction(
             "home_bullpen_fatigue_mult": _tel_home_bp_fmult,
             "away_effective_era": _tel_away_eff_era,
             "home_effective_era": _tel_home_eff_era,
+            # Starter xERA after days-rest adjustment — same floats passed to project_team_runs.
+            "away_starter_xera": round(float(away_xera), 4),
+            "home_starter_xera": round(float(home_xera), 4),
             "ou_base_confidence": round(float(base_confidence), 4),
             "ou_reliever_mult": round(float(reliever_mult), 4),
             "ou_low_ip_mult": round(float(low_ip_penalty), 4),
@@ -3810,6 +3826,32 @@ def run_predictions():
             game_data["Away_Effective_ERA"] = _tel.get("away_effective_era", "")
             game_data["Home_Effective_ERA"] = _tel.get("home_effective_era", "")
 
+            # Export-only starter / offense snapshot (same stats objects + telemetry as the row).
+            game_data["Away_Starter_xERA"] = _tel.get("away_starter_xera", "")
+            game_data["Home_Starter_xERA"] = _tel.get("home_starter_xera", "")
+            game_data["Away_Starter_WHIP"] = safe_get(away_stats, "WHIP", "")
+            game_data["Home_Starter_WHIP"] = safe_get(home_stats, "WHIP", "")
+            game_data["Away_Starter_IP"] = safe_get(away_stats, "IP", "")
+            game_data["Home_Starter_IP"] = safe_get(home_stats, "IP", "")
+            game_data["Away_Starter_LowIP"] = bool(safe_get(away_stats, "LowIP", False))
+            game_data["Home_Starter_LowIP"] = bool(safe_get(home_stats, "LowIP", False))
+            game_data["Away_Starter_ERA_xERA_Gap"] = _export_era_minus_xera(
+                safe_get(away_stats, "ERA", None), safe_get(away_stats, "xERA", None)
+            )
+            game_data["Home_Starter_ERA_xERA_Gap"] = _export_era_minus_xera(
+                safe_get(home_stats, "ERA", None), safe_get(home_stats, "xERA", None)
+            )
+            game_data["Away_Bullpen_ERA_xERA_Gap"] = _export_era_minus_xera(
+                game_data.get("Away_Bullpen_ERA"), game_data.get("Away_Bullpen_xERA")
+            )
+            game_data["Home_Bullpen_ERA_xERA_Gap"] = _export_era_minus_xera(
+                game_data.get("Home_Bullpen_ERA"), game_data.get("Home_Bullpen_xERA")
+            )
+            game_data["Away_Starter_Fallback_Used"] = _fallback_used_from_path(away_path)
+            game_data["Home_Starter_Fallback_Used"] = _fallback_used_from_path(home_path)
+            game_data["Away_Offense_Mult"] = round(float(away_offense_mult), 4)
+            game_data["Home_Offense_Mult"] = round(float(home_offense_mult), 4)
+
             _tel_base_conf = _tel.get("ou_base_confidence", "")
             _tel_rel_mult = _tel.get("ou_reliever_mult", "")
             _tel_low_ip_mult = _tel.get("ou_low_ip_mult", "")
@@ -3904,6 +3946,14 @@ def run_predictions():
         "Away_Bullpen_Fatigue_Ratio", "Home_Bullpen_Fatigue_Ratio",
         "Away_Bullpen_Fatigue_Mult", "Home_Bullpen_Fatigue_Mult",
         "Away_Effective_ERA", "Home_Effective_ERA",
+        "Away_Starter_xERA", "Home_Starter_xERA",
+        "Away_Starter_WHIP", "Home_Starter_WHIP",
+        "Away_Starter_IP", "Home_Starter_IP",
+        "Away_Starter_LowIP", "Home_Starter_LowIP",
+        "Away_Starter_ERA_xERA_Gap", "Home_Starter_ERA_xERA_Gap",
+        "Away_Bullpen_ERA_xERA_Gap", "Home_Bullpen_ERA_xERA_Gap",
+        "Away_Starter_Fallback_Used", "Home_Starter_Fallback_Used",
+        "Away_Offense_Mult", "Home_Offense_Mult",
         "OU_Base_Confidence", "OU_Reliever_Mult",
         "OU_LowIP_Mult", "OU_LeagueAvg_Mult", "OU_Velo_Trust_Mult",
         "OU_Sharp_Modifier_Numeric", "OU_Confidence_Stack",

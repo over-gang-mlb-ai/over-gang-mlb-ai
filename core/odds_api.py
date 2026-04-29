@@ -17,6 +17,8 @@ except ImportError:
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 MLB_SPORT_KEY = "baseball_mlb"
 ODDS_BASE_URL = "https://parlay-api.com/v1"
+# Single HTTP GET timeout (seconds). One automatic retry on transient Parlay API failures.
+PARLAY_FETCH_TIMEOUT_SEC = 25
 # Prefer sharp / liquid books first; fall back to first available
 BOOK_PRIORITY = (
     "pinnacle",
@@ -471,7 +473,29 @@ def fetch_mlb_odds(target_date=None):
         print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
     try:
         import requests
-        r = requests.get(url, params=params, timeout=15)
+        from requests.exceptions import RequestException
+    except ImportError:
+        logging.warning("⚠️ requests not available; odds API disabled.")
+        return {}
+
+    r = None
+    for attempt in (1, 2):
+        try:
+            r = requests.get(url, params=params, timeout=PARLAY_FETCH_TIMEOUT_SEC)
+            break
+        except RequestException as e:
+            if attempt == 1:
+                print(
+                    f"[ODDS API] Parlay API HTTPS request failed (attempt {attempt}/2): {e}; "
+                    f"retrying once with timeout={PARLAY_FETCH_TIMEOUT_SEC}s..."
+                )
+                logging.warning(f"⚠️ Odds API request failed (will retry once): {e}")
+                continue
+            print(f"[ODDS API] Request failed after retry: {e}")
+            logging.warning(f"⚠️ Odds API request failed after retry: {e}")
+            return {}
+
+    try:
         print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
         r.raise_for_status()
         data = r.json()
