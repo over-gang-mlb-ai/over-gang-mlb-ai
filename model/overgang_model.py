@@ -3962,7 +3962,10 @@ def run_predictions():
         if r.get("Total_Is_Real", False) or r.get("ML_Fired", False)
     ]
     if eligible_export:
-        archive_date = datetime.now().strftime("%Y%m%d_%H%M")
+        # Filename YYYYMMDD = active MT slate date (04:00 rollover), not wall-clock
+        # calendar date — so late-night reruns of the prior slate do not shift the
+        # archive prefix to "tomorrow". HHMM suffix remains wall-clock for ordering.
+        archive_date = f"{today_mt.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M')}"
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
         combined_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
         combined_df = pd.DataFrame(eligible_export, columns=export_cols)

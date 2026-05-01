@@ -194,3 +194,13 @@ Date,Game,Bet_Type,Pick,Result,Confidence,Confidence_Bucket,Bet_Line,Final_Total
 2026-04-27,Chicago Cubs @ San Diego Padres,ML,CHICAGO CUBS ML,LOSS,55%,55-59,,,predictions_20260427_1501.csv
 2026-04-27,Miami Marlins @ Los Angeles Dodgers,O/U,UNDER 8.5,LOSS,74%,70-74,8.5,,predictions_20260427_1501.csv
 2026-04-27,Miami Marlins @ Los Angeles Dodgers,ML,LOS ANGELES DODGERS ML,WIN,70%,70-74,,,predictions_20260427_1501.csv
+2026-04-28,New York Yankees @ Texas Rangers,O/U,UNDER 8.5,WIN,74%,70-74,8.5,,predictions_20260428_2358.csv
+2026-04-28,New York Yankees @ Texas Rangers,ML,TEXAS RANGERS ML,LOSS,54%,50-54,,,predictions_20260428_2358.csv
+2026-04-28,Kansas City Royals @ Athletics,O/U,UNDER 9.5,WIN,74%,70-74,9.5,,predictions_20260428_2358.csv
+2026-04-28,Kansas City Royals @ Athletics,ML,KANSAS CITY ROYALS ML,WIN,50%,50-54,,,predictions_20260428_2358.csv
+2026-04-28,Chicago Cubs @ San Diego Padres,O/U,UNDER 7.5,LOSS,66%,65-69,7.5,,predictions_20260428_2358.csv
+2026-04-28,Chicago Cubs @ San Diego Padres,ML,SAN DIEGO PADRES ML,LOSS,55%,55-59,,,predictions_20260428_2358.csv
+2026-04-28,Miami Marlins @ Los Angeles Dodgers,O/U,UNDER 8.5,WIN,75%,75-79,8.5,,predictions_20260428_2358.csv
+2026-04-28,Miami Marlins @ Los Angeles Dodgers,ML,LOS ANGELES DODGERS ML,LOSS,80%,80-84,,,predictions_20260428_2358.csv
+2026-04-29,Miami Marlins @ Los Angeles Dodgers,O/U,UNDER 8.5,WIN,75%,75-79,8.5,,predictions_20260429_0155.csv
+2026-04-29,Miami Marlins @ Los Angeles Dodgers,ML,LOS ANGELES DODGERS ML,LOSS,80%,80-84,,,predictions_20260429_0155.csv
