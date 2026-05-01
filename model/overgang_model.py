@@ -3620,7 +3620,7 @@ def run_predictions():
 
             is_manual_trusted = (odds_info.get("_source") == "manual_totals_csv") and has_real_total
             fire_threshold = 0.79 if is_manual_trusted else 0.79
-            ou_fired = (
+            standard_ou_fire = (
                 (confidence >= fire_threshold)
                 and has_real_total
                 and (not projection_cap_hit)
@@ -3628,8 +3628,22 @@ def run_predictions():
                 and ("League Avg" not in (away_pitcher or ""))
                 and ("League Avg" not in (home_pitcher or ""))
             )
+            clean_strong_ou = (
+                has_real_total
+                and (not projection_cap_hit)
+                and (abs(edge) >= 1.5)
+                and (confidence >= 0.74)
+                and ("League Avg" not in (away_pitcher or ""))
+                and ("League Avg" not in (home_pitcher or ""))
+                and (not away_low)
+                and (not home_low)
+                and (not _fallback_used_from_path(away_path))
+                and (not _fallback_used_from_path(home_path))
+            )
+            ou_fired = standard_ou_fire or clean_strong_ou
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
+                "ou_clean_strong_carveout" if (clean_strong_ou and not standard_ou_fire) else None,
                 "ml_high_signal" if ml_fired else None,
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "parlay_api" if (odds_source == "parlay_api") else None,

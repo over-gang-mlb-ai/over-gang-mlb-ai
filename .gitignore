@@ -8,3 +8,9 @@ latest_predictions.csv
 archive/
 debug/
 run.log
+
+# local secrets / backups
+.env
+.env.*
+*.bak
+*.bak_*
