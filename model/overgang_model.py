@@ -273,6 +273,17 @@ def _ml_pair_devig_implied(ml_home_am, ml_away_am) -> tuple:
     return ih / s, ia / s, "ok"
 
 
+def _clamp_unit_interval(x, lo=0.0, hi=1.0):
+    """Clamp x into [lo, hi]; None if not numeric or NaN."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    return max(lo, min(hi, v))
+
+
 ARCHIVE_DIR = "archive"
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
 AUTO_UPDATE_DATA = True
@@ -3911,6 +3922,78 @@ def run_predictions():
                 f"|sharp={_fmt_conf_component(_ou_sharp_delta_num, plus_sign=True)}"
             )
 
+            # Export-only: O/U de-vig implied vs provisional true probability (Stage 1 telemetry;
+            # does not affect fire, Telegram, Kelly, confidence math, or grading).
+            _pr_flags = ["provisional_not_for_fire"]
+            for _pk in (
+                "OU_Implied_Prob_Over",
+                "OU_Implied_Prob_Under",
+                "OU_Implied_Prob_Pick",
+                "OU_True_Prob_Over",
+                "OU_True_Prob_Under",
+                "OU_True_Prob_Pick",
+                "OU_Prob_Edge",
+                "OU_Prob_Edge_Side",
+            ):
+                game_data[_pk] = ""
+            game_data["OU_Prob_Method"] = "v1_edge_conf_provisional"
+
+            _im_over, _im_under, _im_st = _ml_pair_devig_implied(
+                game_data.get("Over_Juice"), game_data.get("Under_Juice")
+            )
+            if _im_st == "ok" and _im_over is not None and _im_under is not None:
+                game_data["OU_Implied_Prob_Over"] = round(float(_im_over), 4)
+                game_data["OU_Implied_Prob_Under"] = round(float(_im_under), 4)
+            else:
+                _pr_flags.append("ou_implied_unavailable")
+
+            _sd = (game_data.get("Side") or "").strip().lower()
+            if _sd in ("over", "under"):
+                game_data["OU_Prob_Edge_Side"] = _sd
+                if _im_st == "ok":
+                    _im_pick = _im_over if _sd == "over" else _im_under
+                    game_data["OU_Implied_Prob_Pick"] = round(float(_im_pick), 4)
+                try:
+                    _ou_conf01 = float(confidence)
+                    if _ou_conf01 != _ou_conf01 or not (0.0 <= _ou_conf01 <= 1.0):
+                        raise ValueError
+                except (TypeError, ValueError):
+                    _ou_conf01 = None
+                try:
+                    _edge_abs = abs(float(edge))
+                except (TypeError, ValueError):
+                    _edge_abs = None
+                if _ou_conf01 is not None and _edge_abs is not None:
+                    _edge_term = min(_edge_abs, 3.0) * 0.012
+                    _p_pick = _clamp_unit_interval(_ou_conf01 + _edge_term, 0.48, 0.85)
+                    if _p_pick is not None:
+                        if _sd == "over":
+                            _t_o, _t_u = _p_pick, 1.0 - _p_pick
+                        else:
+                            _t_u, _t_o = _p_pick, 1.0 - _p_pick
+                        game_data["OU_True_Prob_Pick"] = round(_p_pick, 4)
+                        game_data["OU_True_Prob_Over"] = round(_t_o, 4)
+                        game_data["OU_True_Prob_Under"] = round(_t_u, 4)
+                else:
+                    _pr_flags.append("true_prob_inputs_missing")
+                if (
+                    _im_st == "ok"
+                    and game_data["OU_Implied_Prob_Pick"] != ""
+                    and game_data["OU_True_Prob_Pick"] != ""
+                ):
+                    try:
+                        game_data["OU_Prob_Edge"] = round(
+                            float(game_data["OU_True_Prob_Pick"])
+                            - float(game_data["OU_Implied_Prob_Pick"]),
+                            4,
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            else:
+                _pr_flags.append("ou_side_missing")
+
+            game_data["OU_Prob_Calibration_Flag"] = "|".join(_pr_flags)
+
             results.append(game_data)
             print(f"✅ Prediction: {prediction} | Confidence: {confidence:.0%} | OU_fired={ou_fired} | ML_fired={ml_fired}")
             if ou_fired:
@@ -3970,6 +4053,17 @@ def run_predictions():
         "OU_Base_Confidence", "OU_Reliever_Mult",
         "OU_LowIP_Mult", "OU_LeagueAvg_Mult", "OU_Velo_Trust_Mult",
         "OU_Sharp_Modifier_Numeric", "OU_Confidence_Stack",
+        # Stage 1: implied vs provisional true probability (export-only telemetry).
+        "OU_Implied_Prob_Over",
+        "OU_Implied_Prob_Under",
+        "OU_Implied_Prob_Pick",
+        "OU_True_Prob_Over",
+        "OU_True_Prob_Under",
+        "OU_True_Prob_Pick",
+        "OU_Prob_Edge",
+        "OU_Prob_Edge_Side",
+        "OU_Prob_Method",
+        "OU_Prob_Calibration_Flag",
     ]
     eligible_export = [
         r for r in results
