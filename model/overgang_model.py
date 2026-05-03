@@ -3652,6 +3652,19 @@ def run_predictions():
                 and (not _fallback_used_from_path(home_path))
             )
             ou_fired = standard_ou_fire or clean_strong_ou
+            _ou_pick = proj.get("pick", "")
+            _edge_f = float(edge)
+            ou_moderate_over_candidate = (
+                _ou_pick == "OVER"
+                and has_real_total
+                and (not projection_cap_hit)
+                and (0.5 <= _edge_f < 1.0)
+            )
+            ou_tail_over_risk = (
+                _ou_pick == "OVER"
+                and has_real_total
+                and (1.5 <= _edge_f < 2.0)
+            )
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ou_clean_strong_carveout" if (clean_strong_ou and not standard_ou_fire) else None,
@@ -3659,10 +3672,14 @@ def run_predictions():
                 "sportsdataio" if (odds_source == "SportsDataIO") else None,
                 "parlay_api" if (odds_source == "parlay_api") else None,
                 "fallback_line" if (not has_real_total) else None,
+                "ou_moderate_over_candidate" if ou_moderate_over_candidate else None,
+                "ou_tail_over_risk" if ou_tail_over_risk else None,
             ]))
             game_data["Fired_Play"] = ou_fired
             game_data["OU_Fired"] = ou_fired
             game_data["Trigger_Tags"] = trigger_tags
+            game_data["OU_Moderate_Over_Candidate"] = ou_moderate_over_candidate
+            game_data["OU_Tail_Over_Risk"] = ou_tail_over_risk
             if ou_fired:
                 no_fire_ou = ""
             else:
@@ -4020,7 +4037,9 @@ def run_predictions():
         "Prediction", "Confidence", "Units", "Line_Open", "Line_Current",
         "Total_Is_Real", "Odds_Line", "Over_Juice", "Under_Juice", "Odds_Book", "ML_Odds_Book",
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
-        "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags", "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
+        "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags",
+        "OU_Moderate_Over_Candidate", "OU_Tail_Over_Risk",
+        "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
         "Model_Notes",
         "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
         "Line_Status", "Fallback_Used", "Data_Quality_Flag",
