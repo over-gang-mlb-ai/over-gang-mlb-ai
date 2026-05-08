@@ -3373,10 +3373,12 @@ def run_predictions():
             if has_real_total:
                 try:
                     _pinn_total = odds_info.get("pinnacle_total_line")
-                    _espn_dk_total = odds_info.get("espn_draftkings_total_line")
-                    if _pinn_total is not None and _espn_dk_total is not None:
+                    _retail_total = odds_info.get("espn_draftkings_total_line")
+                    if _retail_total is None:
+                        _retail_total = odds_info.get("draftkings_total_line")
+                    if _pinn_total is not None and _retail_total is not None:
                         _pinn_total = float(_pinn_total)
-                        _espn_dk_total = float(_espn_dk_total)
+                        _espn_dk_total = float(_retail_total)
                         if (5 <= _pinn_total <= 15) and (5 <= _espn_dk_total <= 15):
                             _sharp_gap = round(_pinn_total - _espn_dk_total, 2)
                             ou_sharp_layer_gap = _sharp_gap
@@ -3751,13 +3753,21 @@ def run_predictions():
             # CSV has a stable, compact sharpness block per row.
             #
             # Semantics:
-            #   OU_Sharpness_Inputs_OK -> both Pinnacle and ESPN DK totals exist
+            #   OU_Sharpness_Inputs_OK -> both Pinnacle and retail total exist
+            #       (ESPN DK preferred, else DraftKings; parity with sharpness gap path)
             #   OU_Sharpness_OK        -> meaningful signal (|gap| >= 0.5, same
             #                              boundary the confidence modifier uses)
             try:
                 _pinn_export = odds_info.get("pinnacle_total_line")
                 _retail_export = odds_info.get("espn_draftkings_total_line")
-                _retail_book_export = "Espn_Draftkings" if _retail_export is not None else ""
+                if _retail_export is None:
+                    _retail_export = odds_info.get("draftkings_total_line")
+                if odds_info.get("espn_draftkings_total_line") is not None:
+                    _retail_book_export = "Espn_Draftkings"
+                elif _retail_export is not None:
+                    _retail_book_export = "Draftkings"
+                else:
+                    _retail_book_export = ""
                 _inputs_ok_export = bool(
                     (_pinn_export is not None) and (_retail_export is not None)
                 )
