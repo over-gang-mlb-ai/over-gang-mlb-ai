@@ -2,11 +2,12 @@
 Parlay API integration for MLB.
 Loads ODDS_API_KEY from .env; fetches totals + moneylines (American odds).
 Prefer sharp book first; return safe fallbacks when unavailable.
-Target-date filtering: only keep events whose commence_time (in Mountain Time) matches target_date (YYYY-MM-DD).
+Target-date filtering: keep events whose commence_time maps to target_date (YYYY-MM-DD) using the same
+04:00 Mountain Time slate rollover as the predictor (_event_slate_date_mt), not strict calendar date in MT.
 """
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from dotenv import load_dotenv
@@ -50,6 +51,26 @@ def _event_date_mt(commence_time_str):
         dt = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
         mt = dt.astimezone(ZoneInfo(MT_ZONE))
         return mt.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _event_slate_date_mt(commence_time_str):
+    """
+    Parse API commence_time (ISO UTC), convert to Mountain Time, then map to active slate calendar
+    date (04:00 MT rollover): local times before 04:00 belong to the previous calendar day.
+    Returns YYYY-MM-DD, or "" if parse fails.
+    """
+    if not commence_time_str:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(commence_time_str).replace("Z", "+00:00"))
+        mt = dt.astimezone(ZoneInfo(MT_ZONE))
+        d = mt.date()
+        if mt.hour < 4:
+            d = d - timedelta(days=1)
+        return d.strftime("%Y-%m-%d")
     except Exception:
         return ""
 
@@ -544,9 +565,14 @@ def fetch_mlb_odds(target_date=None):
     for event in data:
         commence_str = event.get("commence_time") or ""
         event_date_mt = _event_date_mt(commence_str)
-        if target_date and event_date_mt != target_date:
+        event_slate_date_mt = _event_slate_date_mt(commence_str)
+        if target_date and event_slate_date_mt != target_date:
             if date_skip_count < date_skip_log_cap:
-                print(f"[ODDS API] Skip (wrong date): event_date_mt={event_date_mt} target={target_date} away={repr((event.get('away_team') or '').strip())} home={repr((event.get('home_team') or '').strip())}")
+                print(
+                    f"[ODDS API] Skip (wrong slate date): event_date_mt={event_date_mt} "
+                    f"event_slate_date_mt={event_slate_date_mt} target={target_date} "
+                    f"away={repr((event.get('away_team') or '').strip())} home={repr((event.get('home_team') or '').strip())}"
+                )
                 date_skip_count += 1
             continue
 
