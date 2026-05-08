@@ -3364,6 +3364,7 @@ def run_predictions():
             recommended_units = proj["recommended_units"]
             projection_cap_hit = bool(proj.get("projection_cap_hit", False))
             ou_pick = proj["pick"]
+            ou_sharp_layer_gap = None  # Pinnacle − ESPN DK total (sharpness layer); see SHARP_OU_Delta export
 
             # Offense strength already in projection via away_offense_mult / home_offense_mult; no post-hoc bat_mult
 
@@ -3378,6 +3379,7 @@ def run_predictions():
                         _espn_dk_total = float(_espn_dk_total)
                         if (5 <= _pinn_total <= 15) and (5 <= _espn_dk_total <= 15):
                             _sharp_gap = round(_pinn_total - _espn_dk_total, 2)
+                            ou_sharp_layer_gap = _sharp_gap
                             _abs_sharp_gap = abs(_sharp_gap)
                             if _abs_sharp_gap >= 1.0:
                                 _align_boost = 0.04
@@ -3802,6 +3804,29 @@ def run_predictions():
                 game_data["OU_Sharpness_Inputs_OK"] = False
                 game_data["OU_Sharpness_OK"] = False
 
+            # Export-only stadium env vs sharp total gap (Pinnacle − DK). Telemetry only.
+            _env_retract = venue in RETRACTABLE_ROOF_VENUES
+            game_data["ENV_Is_Retractable"] = _env_retract
+            if ou_sharp_layer_gap is not None:
+                game_data["SHARP_OU_Delta"] = round(float(ou_sharp_layer_gap), 2)
+            else:
+                game_data["SHARP_OU_Delta"] = ""
+            _env_dir_pick = ou_pick in ("OVER", "UNDER")
+            _env_sg = ou_sharp_layer_gap
+            if _env_retract and _env_dir_pick and _env_sg is not None:
+                if float(_env_sg) > 0.0:
+                    game_data["ENV_Validation"] = ou_pick == "OVER"
+                    game_data["ENV_Conflict"] = ou_pick == "UNDER"
+                elif float(_env_sg) < 0.0:
+                    game_data["ENV_Validation"] = ou_pick == "UNDER"
+                    game_data["ENV_Conflict"] = ou_pick == "OVER"
+                else:
+                    game_data["ENV_Validation"] = False
+                    game_data["ENV_Conflict"] = False
+            else:
+                game_data["ENV_Validation"] = False
+                game_data["ENV_Conflict"] = False
+
             # Export-only pitcher context for the readable picks board.
             # Uses the same pitcher names and stats the model used for this row
             # (including league-average fallbacks when applicable). No recompute.
@@ -4026,7 +4051,9 @@ def run_predictions():
     # Export: one combined CSV — trusted-total O/U and/or ML_Fired rows (one row per game in `results`).
     export_cols = [
         "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
-        "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Retractable_Roof_Weather", "Projected_Total", "Away_Runs", "Home_Runs",
+        "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Retractable_Roof_Weather",
+        "ENV_Is_Retractable", "ENV_Validation", "ENV_Conflict",
+        "Projected_Total", "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
@@ -4049,7 +4076,7 @@ def run_predictions():
         "ML_Exchange_Present", "ML_Prophetx_Present", "ML_Pinnacle_Present",
         "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Exchange_Vs_Sharp_Gap",
         "OU_Sharpness_Inputs_OK", "OU_Sharpness_OK",
-        "OU_Sharp_Direction", "OU_Sharp_Gap", "OU_Sharp_Modifier",
+        "OU_Sharp_Direction", "OU_Sharp_Gap", "SHARP_OU_Delta", "OU_Sharp_Modifier",
         "OU_Pinnacle_Total", "OU_Retail_Total", "OU_Retail_Book",
         "OU_Confidence_Bucket", "ML_Confidence_Bucket",
         "Archive_Row_Reason",
