@@ -95,7 +95,8 @@ class DataManager:
         """
         Return DataFrame with columns: player_id, xERA for one season.
         Multi-stage (canonical real xERA from Savant CSV first):
-          1) CSV export — validated body, broad column aliases
+          1) CSV export — validated body, broad column aliases; URLs use min=0 so low-IP pitchers
+             with real Savant xERA are not thresholded out of the export.
           2) Derive xERA from est_wOBA when CSV has wOBA but not xERA (not official Savant xERA)
         HTML read_html path removed: brittle on current Savant JS pages; does not improve real xERA.
         """
@@ -126,9 +127,11 @@ class DataManager:
             "expectedrunavg", "expected_run_avg",
         )
 
+        # Savant applies a default qualifying threshold; min=0 widens the CSV to low-volume pitchers
+        # who still have real xERA rows (type=pitcher — not type=pitchers, which is batter-shaped).
         csv_urls = [
-            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&season={year}&csv=true",
-            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true",
+            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&season={year}&csv=true&min=0",
+            f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true&min=0",
         ]
 
         last_err = None
@@ -194,7 +197,7 @@ class DataManager:
                     break
             if source is None:
                 # as a last attempt, fetch CSV once more for est_wOBA
-                url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true"
+                url = f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true&min=0"
                 r = requests.get(url, headers=headers, timeout=25)
                 r.raise_for_status()
                 fb_text = r.text.lstrip("\ufeff")
