@@ -12,7 +12,9 @@ What it does
      core/batters.py lineup scoring: vsR_wOBA, vsL_wOBA, vsR_wRC+, vsL_wRC+, vsR_ISO, vsL_ISO
      when the API stat dict includes woba / wrcPlus / iso (or derivable ISO from slg−avg).
    - If splits are missing/empty for a player, preserves last-good splits from the previous CSV.
-4) Writes a unified CSV: data/batter_stats.csv
+4) Merges Baseball Savant expected-stat leaderboard CSV (xwOBA, wOBA, xBA, xSLG, PA) by MLBAM
+   player_id — data enrichment only; does not fill vsR_/vsL_ wOBA from season totals.
+5) Writes a unified CSV: data/batter_stats.csv
 
 Usage
 -----
@@ -28,6 +30,7 @@ Prints to stdout; cron should redirect to logs/batters*.log.
 """
 
 import argparse
+import io
 import sys
 import time
 import unicodedata
@@ -61,6 +64,8 @@ HEADERS = {
 }
 
 SPLIT_PREFIXES = ("vsR_", "vsL_")
+
+SAVANT_EXPECTED_BATTER_URL = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
 
 
 # -----------------------
@@ -156,6 +161,98 @@ def _hitting_split_advanced(stat: Optional[dict]) -> Tuple[Optional[float], Opti
         if slg is not None and avg is not None:
             iso = slg - avg
     return woba, wrc, iso
+
+
+def fetch_savant_batter_expected_stats(season: int) -> Optional[pd.DataFrame]:
+    """
+    Season-level expected stats from Baseball Savant (MLBAM player_id keyed).
+    Returns columns: player_id, Savant_PA, wOBA, xwOBA, xBA, xSLG,
+    Batter_Advanced_Source, Advanced_Hitting_Available.
+    None = HTTP/parse failure (caller should not crash).
+    Empty DataFrame = request OK but no rows.
+    """
+    params = {
+        "type": "batter",
+        "year": season,
+        "season": season,
+        "csv": "true",
+    }
+    try:
+        r = session.get(SAVANT_EXPECTED_BATTER_URL, params=params, timeout=TIMEOUT)
+        if r.status_code != 200:
+            warn(f"Savant expected_statistics HTTP {r.status_code} for season={season}")
+            return None
+        raw = pd.read_csv(io.BytesIO(r.content))
+    except Exception as e:
+        warn(f"Savant expected_statistics request/parse failed (season={season}): {e}")
+        return None
+
+    if raw is None or not len(raw):
+        return pd.DataFrame(
+            columns=[
+                "player_id",
+                "Savant_PA",
+                "wOBA",
+                "xwOBA",
+                "xBA",
+                "xSLG",
+                "Batter_Advanced_Source",
+                "Advanced_Hitting_Available",
+            ]
+        )
+
+    lc = {str(c).strip().lower(): c for c in raw.columns}
+
+    def pick(*names: str) -> Optional[str]:
+        for n in names:
+            k = n.lower()
+            if k in lc:
+                return lc[k]
+        return None
+
+    c_pid = pick("player_id")
+    if not c_pid:
+        warn("Savant CSV missing player_id column; skipping advanced merge.")
+        return None
+
+    c_pa = pick("pa")
+    c_woba = pick("woba")
+    c_xwoba = pick("est_woba")
+    c_xba = pick("est_ba")
+    c_xslg = pick("est_slg")
+
+    out = pd.DataFrame()
+    out["player_id"] = pd.to_numeric(raw[c_pid], errors="coerce")
+    _nan_col = float("nan")
+    out["Savant_PA"] = (
+        pd.to_numeric(raw[c_pa], errors="coerce") if c_pa else _nan_col
+    )
+    out["wOBA"] = (
+        pd.to_numeric(raw[c_woba], errors="coerce") if c_woba else _nan_col
+    )
+    out["xwOBA"] = (
+        pd.to_numeric(raw[c_xwoba], errors="coerce") if c_xwoba else _nan_col
+    )
+    out["xBA"] = pd.to_numeric(raw[c_xba], errors="coerce") if c_xba else _nan_col
+    out["xSLG"] = (
+        pd.to_numeric(raw[c_xslg], errors="coerce") if c_xslg else _nan_col
+    )
+
+    out = out.dropna(subset=["player_id"])
+    out["player_id"] = out["player_id"].astype(int)
+    out = out.drop_duplicates(subset=["player_id"], keep="first")
+
+    stat_present = (
+        out["wOBA"].notna()
+        | out["xwOBA"].notna()
+        | out["xBA"].notna()
+        | out["xSLG"].notna()
+    )
+    out["Batter_Advanced_Source"] = "baseball_savant"
+    out["Advanced_Hitting_Available"] = stat_present
+    out.loc[~stat_present, "Batter_Advanced_Source"] = ""
+
+    return out
 
 
 @dataclass
@@ -458,11 +555,48 @@ def main():
     step(f"Updating MLB batter stats (season={season}) without FanGraphs…")
     df = collect_hitters(season)
 
+    # Savant season-level advanced (merge only; core/batters scoring unchanged)
+    savant_df = fetch_savant_batter_expected_stats(season)
+    savant_value_cols = ["Savant_PA", "wOBA", "xwOBA", "xBA", "xSLG"]
+    if savant_df is None:
+        warn(
+            "Savant advanced stats fetch failed; advanced columns left blank, "
+            "Batter_Data_Quality_Flag=savant_fetch_failed."
+        )
+        for c in savant_value_cols:
+            df[c] = None
+        df["Batter_Advanced_Source"] = ""
+        df["Advanced_Hitting_Available"] = False
+        df["Batter_Data_Quality_Flag"] = "savant_fetch_failed"
+    else:
+        df = df.merge(savant_df, on="player_id", how="left")
+        for c in savant_value_cols:
+            if c not in df.columns:
+                df[c] = None
+        df["Batter_Advanced_Source"] = df["Batter_Advanced_Source"].fillna("")
+        df["Advanced_Hitting_Available"] = (
+            df["Advanced_Hitting_Available"].fillna(False).astype(bool)
+        )
+        df["Batter_Data_Quality_Flag"] = ""
+        df.loc[~df["Advanced_Hitting_Available"], "Batter_Data_Quality_Flag"] = (
+            "missing_savant_advanced"
+        )
+
     # Expected columns
     base_cols = [
         "player_id", "name", "team_name", "pos", "season",
         "pa", "ab", "h", "hr", "bb", "so",
         "avg", "obp", "slg", "ops",
+    ]
+    advanced_cols = [
+        "Savant_PA",
+        "wOBA",
+        "xwOBA",
+        "xBA",
+        "xSLG",
+        "Batter_Advanced_Source",
+        "Advanced_Hitting_Available",
+        "Batter_Data_Quality_Flag",
     ]
     split_cols = [
         "vsR_PA", "vsR_OBP", "vsR_SLG", "vsR_OPS",
@@ -493,7 +627,9 @@ def main():
             warn(f"Split preservation failed (continuing without backfill): {e}")
 
     # Reorder nicely
-    ordered_cols = base_cols + split_cols + [c for c in df.columns if c not in base_cols + split_cols]
+    ordered_cols = base_cols + advanced_cols + split_cols + [
+        c for c in df.columns if c not in base_cols + advanced_cols + split_cols
+    ]
     df = df[ordered_cols]
 
     # Stable sort
@@ -513,6 +649,8 @@ def main():
     n_vsR_woba = int(df["vsR_wOBA"].notna().sum()) if "vsR_wOBA" in df.columns else 0
     log(f"vsR_OPS available: {n_with_vsR} | vsL_OPS available: {n_with_vsL}")
     log(f"vsR_wRC+ available: {n_vsR_wrc} | vsR_wOBA available: {n_vsR_woba} (lineup scoring columns)")
+    n_adv = int(df["Advanced_Hitting_Available"].fillna(False).astype(bool).sum())
+    log(f"Savant advanced columns populated (Advanced_Hitting_Available): {n_adv}")
 
     return 0
 
