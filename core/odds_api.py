@@ -8,6 +8,7 @@ Target-date filtering: keep events whose commence_time maps to target_date (YYYY
 import os
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -119,6 +120,58 @@ def _canonical_commence_time(commence_time_str):
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return str(commence_time_str).strip()
+
+
+# Substrings for Japanese / non-MLB clubs occasionally mixed into Parlay MLB feeds.
+_PARLAY_NON_MLB_NAME_MARKERS = (
+    "yomiuri",
+    "chunichi",
+    "orix",
+    "nippon-ham",
+    "nippon ham",
+    "hiroshima toyo",
+    "yakult",
+    "hokkaido nippon",
+    "tokyo yakult",
+    "fukuoka softbank",
+    "saitama seibu",
+    "tohoku rakuten",
+    "chiba lotte",
+)
+
+
+def _american_odds_int(val) -> Optional[int]:
+    if val is None or val == "":
+        return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parlay_row_excludes_non_mlb_teams(away_team: str, home_team: str) -> bool:
+    blob = f"{away_team or ''} {home_team or ''}".lower()
+    for frag in _PARLAY_NON_MLB_NAME_MARKERS:
+        if frag in blob:
+            return True
+    if "nippon" in blob and "fighters" in blob:
+        return True
+    return False
+
+
+def _is_parlay_flat_event_row(ev: dict) -> bool:
+    """Parlay flat schema: team/total/commence on the row; no nested bookmakers."""
+    if not isinstance(ev, dict):
+        return False
+    if ev.get("bookmakers"):
+        return False
+    if not (ev.get("home_team") or "").strip() or not (ev.get("away_team") or "").strip():
+        return False
+    if ev.get("total") is None or ev.get("total") == "":
+        return False
+    if not (ev.get("commence_time") or "").strip():
+        return False
+    return True
 
 
 def _event_key(away_team, home_team, commence_time_str=None):
@@ -519,9 +572,29 @@ def fetch_mlb_odds(target_date=None):
     try:
         print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
         r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            print("[ODDS API] Response JSON is not a list; returning empty odds_map.")
+        raw_payload = r.json()
+        if isinstance(raw_payload, list):
+            data = raw_payload
+        elif (
+            isinstance(raw_payload, dict)
+            and isinstance(raw_payload.get("data"), list)
+        ):
+            data = raw_payload["data"]
+            print(
+                f"[ODDS API] Parlay API response wrapper detected: rows={len(data)}"
+            )
+        else:
+            if isinstance(raw_payload, dict):
+                keys_preview = list(raw_payload.keys())[:12]
+                print(
+                    "[ODDS API] Unrecognized odds JSON "
+                    f"(dict keys={keys_preview}); returning empty odds_map."
+                )
+            else:
+                print(
+                    "[ODDS API] Unrecognized odds JSON "
+                    f"(type={type(raw_payload).__name__}); returning empty odds_map."
+                )
             return {}
         if len(data) == 0:
             print("[ODDS API] Empty events list from API; returning empty odds_map (no error).")
@@ -562,6 +635,7 @@ def fetch_mlb_odds(target_date=None):
     ml_incomplete_log_count = 0
     ou_diag_log_cap = 8
     ou_diag_log_count = 0
+    parlay_flat_count = 0
     for event in data:
         commence_str = event.get("commence_time") or ""
         event_date_mt = _event_date_mt(commence_str)
@@ -578,6 +652,8 @@ def fetch_mlb_odds(target_date=None):
 
         home = (event.get("home_team") or "").strip()
         away = (event.get("away_team") or "").strip()
+        if _parlay_row_excludes_non_mlb_teams(away, home):
+            continue
         key = _event_key(away, home, commence_str)
         coarse_key = _game_key(away, home)
         if not key or key in result:
@@ -585,6 +661,57 @@ def fetch_mlb_odds(target_date=None):
                 reason = "empty key" if not key else "duplicate key (already in result)"
                 print(f"[ODDS API] Skip reason (event {repr(away)} @ {repr(home)}): {reason}")
                 skip_log_count += 1
+            continue
+
+        if _is_parlay_flat_event_row(event):
+            try:
+                selected_total_line = float(event["total"])
+            except (TypeError, ValueError):
+                if skip_log_count < skip_log_cap:
+                    print(
+                        f"[ODDS API] Skip (flat row bad total): away={repr(away)} "
+                        f"home={repr(home)} total={event.get('total')!r}"
+                    )
+                    skip_log_count += 1
+                continue
+            oj = _american_odds_int(event.get("over_juice"))
+            uj = _american_odds_int(event.get("under_juice"))
+            if oj is None:
+                oj = DEFAULT_JUICE
+            if uj is None:
+                uj = DEFAULT_JUICE
+            flat_ml_home = _american_odds_int(event.get("home_ml"))
+            flat_ml_away = _american_odds_int(event.get("away_ml"))
+            selected_book = (event.get("source") or "").strip() or "parlay_api"
+            per_book_ml_flat = _extract_per_book_ml_flags(event, home, away)
+            per_book_totals_flat = _extract_per_book_totals_flags(event)
+            ml_h, ml_a = flat_ml_home, flat_ml_away
+            if ml_h is None:
+                for _src_home in ("pinnacle_ml_home", "novig_ml_home", "prophetx_ml_home"):
+                    _v = per_book_ml_flat.get(_src_home)
+                    if _v is not None:
+                        ml_h = _v
+                        break
+            if ml_a is None:
+                for _src_away in ("pinnacle_ml_away", "novig_ml_away", "prophetx_ml_away"):
+                    _v = per_book_ml_flat.get(_src_away)
+                    if _v is not None:
+                        ml_a = _v
+                        break
+            result[key] = {
+                "total_line": selected_total_line,
+                "over_juice": oj,
+                "under_juice": uj,
+                "ml_home": ml_h,
+                "ml_away": ml_a,
+                "book": selected_book,
+                "ml_book": selected_book,
+                "_coarse_game_key": coarse_key,
+                "_commence_time": _canonical_commence_time(commence_str),
+                **per_book_ml_flat,
+                **per_book_totals_flat,
+            }
+            parlay_flat_count += 1
             continue
 
         best = None
@@ -793,6 +920,10 @@ def fetch_mlb_odds(target_date=None):
             **per_book_totals,
         }
 
+    if parlay_flat_count:
+        print(
+            f"[ODDS API] Parlay flat rows parsed into odds_map: {parlay_flat_count}"
+        )
     print(f"[ODDS API] Games parsed into odds_map: {len(result)} (from {len(data)} API events)")
     if target_date and len(result) == 0:
         print(f"[ODDS API] No odds found for target date {target_date}; returning empty odds_map.")
