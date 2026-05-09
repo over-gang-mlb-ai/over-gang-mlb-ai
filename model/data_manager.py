@@ -287,6 +287,10 @@ class DataManager:
         Returns (DataFrame with columns mlb_id, Name, ERA, WHIP, IP, used_prior_year_fallback).
         used_prior_year_fallback is True when the requested season had 0 regular-season splits and prior year was used.
 
+        Stats requests use playerPool=ALL_CURRENT so the API returns the full current-season pitching
+        universe (~all pitchers with stats), not a qualified-only or default-narrow split list that can
+        omit active pitchers with low IP (stale canonical rows would otherwise survive the merge).
+
         prior_year_fallback: if False, do not retry with year-1 when the requested year has no splits (returns empty).
         apply_safe_mode: if False, do not reject small current-year universes (< MIN_PITCHER_SAVE_COUNT) when not using
         the prior-year fallback path — used so update_pitcher_stats can blend a thin live year with full prior season.
@@ -321,7 +325,9 @@ class DataManager:
         if not pitcher_ids:
             raise ValueError("No pitcher IDs found from MLB rosters.")
 
-        # 3) fetch season pitching stats from stats endpoint (returns ERA/WHIP/IP per player)
+        # 3) fetch season pitching stats from stats endpoint (ERA/WHIP/IP per player).
+        #    playerPool=ALL_CURRENT widens the response beyond the default/qualified-only universe so
+        #    active pitchers with non-qualified IP still appear in refresh output.
         stats_base = "https://statsapi.mlb.com/api/v1/stats"
         params = {
             "stats": "season",
@@ -329,6 +335,7 @@ class DataManager:
             "season": year,
             "gameType": "R",
             "limit": 1000,
+            "playerPool": "ALL_CURRENT",
         }
         print(f"[Pitcher update] Source: MLB StatsAPI stats endpoint (year={year}, roster_pitchers={len(pitcher_ids)})")
         print(f"[Pitcher update] Request URL: {stats_base}?{urlencode(params)}")
