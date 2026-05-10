@@ -1180,6 +1180,128 @@ class BullpenManager:
             "source": "MLB Stats API",
         }
 
+
+# -----------------------------
+# Reliever-depth telemetry (data/reliever_stats.csv; export-only)
+# -----------------------------
+RELIEVER_STATS_CSV = os.path.join("data", "reliever_stats.csv")
+
+
+def load_reliever_stats(path: str | None = None) -> pd.DataFrame:
+    """Load reliever_stats.csv; empty DataFrame if missing or unreadable."""
+    p = path or RELIEVER_STATS_CSV
+    if not os.path.exists(p) or os.path.getsize(p) == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(p)
+    except Exception:
+        return pd.DataFrame()
+
+
+def normalize_team_name_for_reliever_csv(team_name: str) -> str:
+    """
+    Resolve schedule/short team labels to the same convention as bullpen_stats /
+    reliever_stats Team column where possible (fixes + strip).
+    """
+    if not isinstance(team_name, str):
+        s = str(team_name or "").strip()
+    else:
+        s = team_name.strip()
+    if not s:
+        return ""
+    return BullpenManager.TEAM_NAME_FIXES.get(s, s).strip()
+
+
+def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dict:
+    """
+    Per-team reliever-depth counts from data/reliever_stats.csv (export telemetry only).
+    """
+    out = {
+        "bad_xera_count": 0,
+        "bad_whip_count": 0,
+        "recent_bad_arm_count": 0,
+        "depth_risk": "low",
+        "reliever_metrics_source": "neutral",
+    }
+    if reliever_df is None or not isinstance(reliever_df, pd.DataFrame):
+        out["depth_risk"] = "unknown"
+        out["reliever_metrics_source"] = "missing_or_empty"
+        return out
+    if reliever_df.empty or "Team" not in reliever_df.columns:
+        out["depth_risk"] = "unknown"
+        out["reliever_metrics_source"] = "missing_or_empty"
+        return out
+
+    team_fixed = normalize_team_name_for_reliever_csv(team_name)
+    df = reliever_df.copy()
+    df["_team_norm"] = df["Team"].astype(str).str.strip().str.lower()
+    lookup = team_fixed.strip().lower()
+    sub = df[df["_team_norm"] == lookup] if lookup else df.iloc[0:0]
+    if sub.empty and isinstance(team_name, str):
+        alt = team_name.strip().lower()
+        if alt:
+            sub = df[df["_team_norm"] == alt]
+    if sub.empty:
+        canon_key = normalize_team_name(team_name).strip().lower() if team_name else ""
+        if canon_key:
+            sub = df[df["_team_norm"] == canon_key]
+    if sub.empty:
+        out["depth_risk"] = "unknown"
+        out["reliever_metrics_source"] = "team_not_found"
+        return out
+
+    out["reliever_metrics_source"] = "csv"
+
+    def _as_float(v):
+        try:
+            x = float(v)
+            if not np.isfinite(x):
+                return None
+            return x
+        except (TypeError, ValueError):
+            return None
+
+    def _as_int_nonneg(v):
+        try:
+            x = float(v)
+            if not np.isfinite(x):
+                return 0
+            return int(max(0, round(x)))
+        except (TypeError, ValueError):
+            return 0
+
+    bad_xera = bad_whip = recent_bad = 0
+    for _, row in sub.iterrows():
+        xera = _as_float(row.get("xERA"))
+        whip = _as_float(row.get("WHIP"))
+        a3 = _as_int_nonneg(row.get("Appearances_3D"))
+        if xera is not None and xera >= 4.50:
+            bad_xera += 1
+        if whip is not None and whip >= 1.50:
+            bad_whip += 1
+        if a3 > 0:
+            bad_enough = False
+            if xera is not None and xera >= 4.50:
+                bad_enough = True
+            if whip is not None and whip >= 1.50:
+                bad_enough = True
+            if bad_enough:
+                recent_bad += 1
+
+    out["bad_xera_count"] = int(bad_xera)
+    out["bad_whip_count"] = int(bad_whip)
+    out["recent_bad_arm_count"] = int(recent_bad)
+
+    if bad_xera >= 4 or bad_whip >= 4 or recent_bad >= 4:
+        out["depth_risk"] = "high"
+    elif bad_xera >= 2 or bad_whip >= 2 or recent_bad >= 2:
+        out["depth_risk"] = "medium"
+    else:
+        out["depth_risk"] = "low"
+
+    return out
+
+
 # ================================
 # 🧠 VEGAS LINE + VELO TRACKING (The Odds API + CSV fallback)
 # ================================
@@ -3031,10 +3153,14 @@ def run_predictions():
     def _fallback_used_from_path(path: str) -> bool:
         return path in {"manual_fallback", "league_average"}
 
+    reliever_df = load_reliever_stats()
+
     for game in games:
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
             away_team = safe_get(game, 'away_name', 'Away Team')
+            away_reliever_metrics = get_reliever_depth_metrics(away_team, reliever_df)
+            home_reliever_metrics = get_reliever_depth_metrics(home_team, reliever_df)
             vegas_line, odds_info = VegasLines.get_vegas_line(
                 home_team,
                 away_team,
@@ -3669,6 +3795,21 @@ def run_predictions():
                 and has_real_total
                 and (1.5 <= _edge_f < 2.0)
             )
+            try:
+                _bl = float(game_data.get("Bet_Line", 99))
+            except (TypeError, ValueError):
+                _bl = 99.0
+            ou_full_game_under_reliever_depth_risk = bool(
+                ou_fired
+                and has_real_total
+                and (_ou_pick in ("UNDER", "LEAN_UNDER"))
+                and (_bl <= 8.5)
+                and (float(edge) <= -1.5)
+                and (
+                    away_reliever_metrics.get("depth_risk") == "high"
+                    or home_reliever_metrics.get("depth_risk") == "high"
+                )
+            )
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ou_clean_strong_carveout" if (clean_strong_ou and not standard_ou_fire) else None,
@@ -3678,12 +3819,18 @@ def run_predictions():
                 "fallback_line" if (not has_real_total) else None,
                 "ou_moderate_over_candidate" if ou_moderate_over_candidate else None,
                 "ou_tail_over_risk" if ou_tail_over_risk else None,
+                "ou_full_game_under_reliever_depth_risk"
+                if ou_full_game_under_reliever_depth_risk
+                else None,
             ]))
             game_data["Fired_Play"] = ou_fired
             game_data["OU_Fired"] = ou_fired
             game_data["Trigger_Tags"] = trigger_tags
             game_data["OU_Moderate_Over_Candidate"] = ou_moderate_over_candidate
             game_data["OU_Tail_Over_Risk"] = ou_tail_over_risk
+            game_data["OU_Full_Game_Under_Reliever_Depth_Risk"] = (
+                ou_full_game_under_reliever_depth_risk
+            )
             if ou_fired:
                 no_fire_ou = ""
             else:
@@ -3895,6 +4042,30 @@ def run_predictions():
             game_data["Home_Bullpen_IP_Week"] = _tel.get("home_bullpen_ip_week", "")
             game_data["Away_Bullpen_Relievers"] = _tel.get("away_bullpen_relievers", "")
             game_data["Home_Bullpen_Relievers"] = _tel.get("home_bullpen_relievers", "")
+            game_data["Away_Reliever_Bad_xERA_Count"] = away_reliever_metrics.get(
+                "bad_xera_count", 0
+            )
+            game_data["Home_Reliever_Bad_xERA_Count"] = home_reliever_metrics.get(
+                "bad_xera_count", 0
+            )
+            game_data["Away_Reliever_Bad_WHIP_Count"] = away_reliever_metrics.get(
+                "bad_whip_count", 0
+            )
+            game_data["Home_Reliever_Bad_WHIP_Count"] = home_reliever_metrics.get(
+                "bad_whip_count", 0
+            )
+            game_data["Away_Reliever_Recent_Bad_Arm_Count"] = away_reliever_metrics.get(
+                "recent_bad_arm_count", 0
+            )
+            game_data["Home_Reliever_Recent_Bad_Arm_Count"] = home_reliever_metrics.get(
+                "recent_bad_arm_count", 0
+            )
+            game_data["Away_Reliever_Depth_Risk"] = away_reliever_metrics.get(
+                "depth_risk", "unknown"
+            )
+            game_data["Home_Reliever_Depth_Risk"] = home_reliever_metrics.get(
+                "depth_risk", "unknown"
+            )
             game_data["Away_Bullpen_Fatigue_Ratio"] = _tel.get("away_bullpen_fatigue_ratio", "")
             game_data["Home_Bullpen_Fatigue_Ratio"] = _tel.get("home_bullpen_fatigue_ratio", "")
             game_data["Away_Bullpen_Fatigue_Mult"] = _tel.get("away_bullpen_fatigue_mult", "")
@@ -4076,6 +4247,7 @@ def run_predictions():
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
         "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags",
         "OU_Moderate_Over_Candidate", "OU_Tail_Over_Risk",
+        "OU_Full_Game_Under_Reliever_Depth_Risk",
         "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
         "Model_Notes",
         "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
@@ -4095,6 +4267,10 @@ def run_predictions():
         "Away_Bullpen_xERA", "Home_Bullpen_xERA",
         "Away_Bullpen_IP_Week", "Home_Bullpen_IP_Week",
         "Away_Bullpen_Relievers", "Home_Bullpen_Relievers",
+        "Away_Reliever_Bad_xERA_Count", "Home_Reliever_Bad_xERA_Count",
+        "Away_Reliever_Bad_WHIP_Count", "Home_Reliever_Bad_WHIP_Count",
+        "Away_Reliever_Recent_Bad_Arm_Count", "Home_Reliever_Recent_Bad_Arm_Count",
+        "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
         "Away_Bullpen_Fatigue_Ratio", "Home_Bullpen_Fatigue_Ratio",
         "Away_Bullpen_Fatigue_Mult", "Home_Bullpen_Fatigue_Mult",
         "Away_Effective_ERA", "Home_Effective_ERA",
