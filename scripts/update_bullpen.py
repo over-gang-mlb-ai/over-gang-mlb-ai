@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # scripts/update_bullpen.py
 # Build team bullpen stats (relief-only) from the MLB Stats API + Baseball Savant xERA.
-# Outputs: data/bullpen_stats.csv with columns:
-# Team,ERA,IP,WHIP,xERA,Relievers,IP_Week
+# Outputs:
+#   data/bullpen_stats.csv — Team,ERA,IP,WHIP,xERA,Relievers,IP_Week (unchanged)
+#   data/reliever_stats.csv — per-reliever relief-only aggregates + xERA / usage fields
 #
 # xERA sources (in order):
 #   1) Baseball Savant CSV map by MLBAM player_id
@@ -26,6 +27,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 SEASON = datetime.now().year
 OUTFILE = "data/bullpen_stats.csv"
+RELIEVER_OUTFILE = "data/reliever_stats.csv"
+RELIEVER_COLUMNS = [
+    "Team",
+    "Name",
+    "mlb_id",
+    "ERA",
+    "WHIP",
+    "IP",
+    "ER",
+    "H",
+    "BB",
+    "xERA",
+    "xERA_Source",
+    "IP_Week",
+    "Appearances",
+    "Appearances_3D",
+    "Last_Game_Date",
+]
 PITCHER_STATS_FILE = "data/pitcher_stats.csv"  # built by your DataManager.update_pitcher_stats()
 BASE = "https://statsapi.mlb.com/api/v1"
 UA = {"User-Agent": "over-gang-mlb-ai/1.3"}
@@ -110,8 +129,8 @@ def fetch_savant_xera_map(year: int) -> dict[int, float]:
     If xERA is missing, derive from est_wOBA.
     """
     csv_urls = [
-        f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&season={year}&csv=true",
-        f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitchers&year={year}&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&season={year}&csv=true&min=0",
+        f"https://baseballsavant.mlb.com/leaderboard/expected_statistics?type=pitcher&year={year}&csv=true&min=0",
     ]
     last_err = None
     df = None
@@ -279,8 +298,8 @@ def load_name_xera_map(path=PITCHER_STATS_FILE) -> dict[str, float]:
 def agg_relief(team_name, roster, week_cutoff_date, xera_by_id: dict[int, float] | None, xera_by_name: dict[str, float]):
     """
     Aggregate TEAM bullpen stats using only relief appearances (gamesStarted == 0).
-    Returns dict with Team, ERA, IP, WHIP, xERA, Relievers, IP_Week.
-    xERA is IP-weighted avg of relief-only IP. Lookup order: xera_by_id, then xera_by_name.
+    Returns (team_row, reliever_rows) where team_row has Team, ERA, IP, WHIP, xERA, Relievers, IP_Week.
+    Team xERA is IP-weighted avg of relief-only IP. Lookup order: xera_by_id, then xera_by_name.
     """
     ER = H = BB = IP = 0.0
     relievers = set()
@@ -292,15 +311,26 @@ def agg_relief(team_name, roster, week_cutoff_date, xera_by_id: dict[int, float]
     savant_hits = 0
     name_hits = 0
 
+    today_utc = datetime.now(timezone.utc).date()
+    cutoff_3d = today_utc - timedelta(days=3)
+
+    reliever_rows: list[dict] = []
+
     for p in roster:
         pid = p["id"]
-        pname = normalize_name(p.get("name", ""))
+        display_name = (p.get("name") or "").strip()
+        pname = normalize_name(display_name)
 
         splits = gamelog(pid)
         if not splits:
             continue
 
         relief_ip_for_pitcher = 0.0
+        r_er = r_h = r_bb = 0.0
+        r_ip_week = 0.0
+        appearances = 0
+        appearances_3d = 0
+        relief_dates: list = []
 
         for s in splits:
             st = s.get("stat", {}) or {}
@@ -313,29 +343,70 @@ def agg_relief(team_name, roster, week_cutoff_date, xera_by_id: dict[int, float]
                 continue  # skip starts
 
             ip = ip_to_float(st.get("inningsPitched"))
-            ER += float(st.get("earnedRuns") or 0)
-            H  += float(st.get("hits") or 0)
-            BB += float(st.get("baseOnBalls") or 0)
+            er = float(st.get("earnedRuns") or 0)
+            h = float(st.get("hits") or 0)
+            bb = float(st.get("baseOnBalls") or 0)
+
+            ER += er
+            H += h
+            BB += bb
             IP += ip
             relief_ip_for_pitcher += ip
 
+            r_er += er
+            r_h += h
+            r_bb += bb
+
+            appearances += 1
             gdate = parse_game_date(s.get("date"))
+            if gdate:
+                relief_dates.append(gdate)
+                if gdate >= cutoff_3d:
+                    appearances_3d += 1
             if gdate and gdate >= week_cutoff_date:
                 IP_week += ip
+                r_ip_week += ip
 
         if relief_ip_for_pitcher > 0:
             relievers.add(pid)
             x = None
+            x_src = ""
             if xera_by_id and pid in xera_by_id:
                 x = float(xera_by_id[pid])
                 savant_hits += 1
+                x_src = "savant_id"
             elif pname and pname in xera_by_name:
                 x = float(xera_by_name[pname])
                 name_hits += 1
+                x_src = "pitcher_stats_name"
 
             if x is not None:
                 xera_num += x * relief_ip_for_pitcher
                 xera_den += relief_ip_for_pitcher
+
+            era_p = (r_er * 9 / relief_ip_for_pitcher) if relief_ip_for_pitcher > 0 else float("nan")
+            whip_p = ((r_bb + r_h) / relief_ip_for_pitcher) if relief_ip_for_pitcher > 0 else float("nan")
+            last_game = max(relief_dates) if relief_dates else None
+
+            reliever_rows.append(
+                {
+                    "Team": team_name,
+                    "Name": display_name,
+                    "mlb_id": int(pid),
+                    "ERA": round(era_p, 2) if not math.isnan(era_p) else "",
+                    "WHIP": round(whip_p, 2) if not math.isnan(whip_p) else "",
+                    "IP": round(relief_ip_for_pitcher, 1),
+                    "ER": int(r_er),
+                    "H": int(r_h),
+                    "BB": int(r_bb),
+                    "xERA": round(x, 2) if x is not None else "",
+                    "xERA_Source": x_src,
+                    "IP_Week": round(r_ip_week, 2),
+                    "Appearances": appearances,
+                    "Appearances_3D": appearances_3d,
+                    "Last_Game_Date": last_game.isoformat() if last_game else "",
+                }
+            )
 
     ERA = (ER * 9 / IP) if IP > 0 else float("nan")
     WHIP = ((BB + H) / IP) if IP > 0 else float("nan")
@@ -346,7 +417,7 @@ def agg_relief(team_name, roster, week_cutoff_date, xera_by_id: dict[int, float]
 
     logging.debug(f"[xERA] {team_name}: id-matches={savant_hits}, name-matches={name_hits}, relievers={len(relievers)}")
 
-    return {
+    team_row = {
         "Team": team_name,
         "ERA": round(ERA, 2) if not math.isnan(ERA) else "",
         "IP": round(IP, 1),
@@ -355,6 +426,7 @@ def agg_relief(team_name, roster, week_cutoff_date, xera_by_id: dict[int, float]
         "Relievers": len(relievers),
         "IP_Week": round(IP_week, 2),
     }
+    return team_row, reliever_rows
 
 
 # -----------------------------
@@ -377,14 +449,16 @@ def main():
     week_cutoff_date = (datetime.now(timezone.utc) - timedelta(days=7)).date()
 
     rows = []
+    all_reliever_rows: list[dict] = []
     for t in teams():
         try:
             roster = team_pitchers(t["id"])
             if not roster:
                 logging.info(f"{t['name']}: no active pitchers")
                 continue
-            agg = agg_relief(t["name"], roster, week_cutoff_date, xera_by_id, xera_by_name)
+            agg, rrows = agg_relief(t["name"], roster, week_cutoff_date, xera_by_id, xera_by_name)
             rows.append(agg)
+            all_reliever_rows.extend(rrows)
             logging.info(f"✔ {t['name']}")
         except Exception as e:
             logging.error(f"❌ {t['name']}: {e}")
@@ -422,6 +496,11 @@ def main():
     os.makedirs(os.path.dirname(OUTFILE), exist_ok=True)
     df.to_csv(OUTFILE, index=False)
     logging.info(f"✅ Saved {OUTFILE} ({len(df)} rows)")
+
+    rdf = pd.DataFrame(all_reliever_rows, columns=RELIEVER_COLUMNS)
+    os.makedirs(os.path.dirname(RELIEVER_OUTFILE), exist_ok=True)
+    rdf.to_csv(RELIEVER_OUTFILE, index=False)
+    logging.info(f"✅ Saved {RELIEVER_OUTFILE} ({len(rdf)} rows)")
 
 
 if __name__ == "__main__":
