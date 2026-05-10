@@ -1066,6 +1066,45 @@ def project_team_runs(
     return round(raw_runs, 2), round(capped_runs, 2)
 
 
+def project_team_f5_runs(
+    opponent_starter_xera: float,
+    opponent_starter_whip: float,
+    park_runs_factor: float,
+    lineup_impact: float,
+    opponent_velo_drop: float,
+    opponent_low_ip: bool = False,
+    offense_mult: float = 1.0,
+) -> float:
+    """
+    Project expected runs scored by one team in the FIRST 5 INNINGS only.
+    F5 telemetry helper. Starter-driven. Drops bullpen blend, bullpen workload
+    fatigue, lineup x bullpen interaction, and dynamic safety cap.
+    Used ONLY for archive export telemetry. Never called from any fire, edge,
+    Kelly, confidence, or Telegram path.
+    """
+    if opponent_low_ip:
+        opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
+
+    f5_effective_era = max(2.5, min(7.0, opponent_starter_xera))
+    f5_base_era = 0.85 * f5_effective_era + 0.15 * LEAGUE_ERA
+    f5_runs = LEAGUE_RUNS_PER_TEAM * (f5_base_era / LEAGUE_ERA) * (5.0 / 9.0)
+
+    f5_runs *= park_runs_factor
+
+    offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(offense_mult)))
+    f5_runs *= offense_mult
+
+    lineup_mult = 1.0 + max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, lineup_impact))
+    f5_runs *= lineup_mult
+
+    whip_mult = max(0.92, min(1.15, opponent_starter_whip / WHIP_LEAGUE))
+    f5_runs *= whip_mult
+
+    f5_runs *= _opponent_velocity_run_multiplier(opponent_velo_drop)
+
+    return round(f5_runs, 2)
+
+
 # ================================
 # ⚾ BULLPEN DATA (MLB Stats API)
 # ================================
@@ -1625,6 +1664,63 @@ def generate_prediction(
         opponent_bullpen_xera=bullpen_away_xera,
     )
 
+    # ---------- F5 telemetry projection (export-only, no market line) ----------
+    # Starter-only, 5-inning-scaled. Never feeds OU_Fired / ML_Fired / OU_Edge /
+    # Confidence / Kelly / Telegram. Parlay does not expose F5 lines yet.
+    f5_away_runs = project_team_f5_runs(
+        opponent_starter_xera=home_xera,
+        opponent_starter_whip=home_whip,
+        park_runs_factor=effective_park_runs_factor,
+        lineup_impact=away_lineup_impact,
+        opponent_velo_drop=velo_drop_home,
+        opponent_low_ip=safe_get(home_stats, "LowIP", False),
+        offense_mult=away_offense_mult,
+    )
+    f5_home_runs = project_team_f5_runs(
+        opponent_starter_xera=away_xera,
+        opponent_starter_whip=away_whip,
+        park_runs_factor=effective_park_runs_factor,
+        lineup_impact=home_lineup_impact,
+        opponent_velo_drop=velo_drop_away,
+        opponent_low_ip=safe_get(away_stats, "LowIP", False),
+        offense_mult=home_offense_mult,
+    )
+    f5_projected_total = round(f5_away_runs + f5_home_runs, 2)
+
+    _away_xera_raw = safe_get(away_stats, "xERA", None)
+    _home_xera_raw = safe_get(home_stats, "xERA", None)
+
+    def _is_real_xera(v):
+        try:
+            return v is not None and np.isfinite(float(v))
+        except (TypeError, ValueError):
+            return False
+
+    f5_eligible = bool(
+        _is_real_xera(_away_xera_raw)
+        and _is_real_xera(_home_xera_raw)
+        and not safe_get(away_stats, "LowIP", False)
+        and not safe_get(home_stats, "LowIP", False)
+    )
+
+    _xera_gap = float(home_xera) - float(away_xera)
+    if _xera_gap >= 0.40:
+        f5_starter_lean = "AWAY"
+    elif _xera_gap <= -0.40:
+        f5_starter_lean = "HOME"
+    else:
+        f5_starter_lean = "EVEN"
+
+    _f5_baseline = LEAGUE_RUNS_PER_TEAM * 2.0 * (5.0 / 9.0)
+    if f5_projected_total - _f5_baseline >= 0.30:
+        f5_model_side = "OVER"
+    elif f5_projected_total - _f5_baseline <= -0.30:
+        f5_model_side = "UNDER"
+    else:
+        f5_model_side = "EVEN"
+
+    f5_no_line_reason = "no_f5_market_source"
+
     # Analytical truth for O/U (uncapped); cap is parallel safety only.
     away_runs_raw = away_runs
     home_runs_raw = home_runs
@@ -1840,6 +1936,13 @@ def generate_prediction(
         "away_runs_safety": away_runs_safety,
         "home_runs_safety": home_runs_safety,
         "projection_cap_hit": projection_cap_hit,
+        "f5_projected_total": f5_projected_total,
+        "f5_away_runs": f5_away_runs,
+        "f5_home_runs": f5_home_runs,
+        "f5_model_side": f5_model_side,
+        "f5_starter_lean": f5_starter_lean,
+        "f5_eligible": f5_eligible,
+        "f5_no_line_reason": f5_no_line_reason,
         "vegas_line": vegas_line,
         "edge": edge,
         "pick": pick,
@@ -3548,6 +3651,14 @@ def run_predictions():
             except Exception:
                 sized_units = recommended_units
 
+            f5_projected_total = proj.get("f5_projected_total", "")
+            f5_away_runs = proj.get("f5_away_runs", "")
+            f5_home_runs = proj.get("f5_home_runs", "")
+            f5_model_side = proj.get("f5_model_side", "")
+            f5_starter_lean = proj.get("f5_starter_lean", "")
+            f5_eligible = proj.get("f5_eligible", "")
+            f5_no_line_reason = proj.get("f5_no_line_reason", "")
+
             game_data.update({
                 "Projected_Total": projected_total,
                 "Away_Runs": away_runs,
@@ -3559,6 +3670,13 @@ def run_predictions():
                 "Away_Cap_Diff": round(float(away_runs) - float(away_runs_safety), 2),
                 "Home_Cap_Diff": round(float(home_runs) - float(home_runs_safety), 2),
                 "Projection_Cap_Flag": projection_cap_hit,
+                "F5_Projected_Total": f5_projected_total,
+                "F5_Away_Runs": f5_away_runs,
+                "F5_Home_Runs": f5_home_runs,
+                "F5_Model_Side": f5_model_side,
+                "F5_Starter_Lean": f5_starter_lean,
+                "F5_Eligible": f5_eligible,
+                "F5_No_Line_Reason": f5_no_line_reason,
                 "Lineup_Impact_Away": round(float(away_impact), 4),
                 "Lineup_Impact_Home": round(float(home_impact), 4),
                 "Lineup_Delta_Raw": round(float(lineup_delta), 4),
@@ -4237,6 +4355,8 @@ def run_predictions():
         "Projected_Total", "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
+        "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
+        "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible", "F5_No_Line_Reason",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
