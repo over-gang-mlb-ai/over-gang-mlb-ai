@@ -1564,6 +1564,7 @@ def generate_prediction(
     home_pitcher_name="",
     game_datetime=None,
     schedule_game_date=None,
+    odds_info=None,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -1580,6 +1581,8 @@ def generate_prediction(
     """
     if public_data is None:
         public_data = {}
+    if odds_info is None:
+        odds_info = {}
     try:
         if isinstance(vegas_data, dict):
             vegas_line = float(vegas_data.get("total_current", 8.5))
@@ -1719,7 +1722,23 @@ def generate_prediction(
     else:
         f5_model_side = "EVEN"
 
-    f5_no_line_reason = "no_f5_market_source"
+    f5_market_line = None
+    for bm in odds_info.get("bookmakers", []):
+        try:
+            if (bm.get("key") or "").lower() != "pinnacle":
+                continue
+            for market in bm.get("markets", []):
+                if market.get("key") != "totals_h1":
+                    continue
+                outcomes = market.get("outcomes", [])
+                if outcomes:
+                    f5_market_line = outcomes[0].get("point")
+                    break
+            if f5_market_line is not None:
+                break
+        except (AttributeError, TypeError, IndexError):
+            continue
+    f5_no_line_reason = None if f5_market_line is not None else "no_f5_market_source"
 
     # Analytical truth for O/U (uncapped); cap is parallel safety only.
     away_runs_raw = away_runs
@@ -1942,6 +1961,7 @@ def generate_prediction(
         "f5_model_side": f5_model_side,
         "f5_starter_lean": f5_starter_lean,
         "f5_eligible": f5_eligible,
+        "f5_market_line": f5_market_line,
         "f5_no_line_reason": f5_no_line_reason,
         "vegas_line": vegas_line,
         "edge": edge,
@@ -3572,6 +3592,7 @@ def run_predictions():
                 home_pitcher_name=home_pitcher,
                 game_datetime=safe_get(game, "game_datetime", ""),
                 schedule_game_date=safe_get(game, "game_date", ""),
+                odds_info=odds_info,
             )
 
             if proj.get("skip"):
@@ -3657,6 +3678,7 @@ def run_predictions():
             f5_model_side = proj.get("f5_model_side", "")
             f5_starter_lean = proj.get("f5_starter_lean", "")
             f5_eligible = proj.get("f5_eligible", "")
+            f5_market_line = proj.get("f5_market_line", "")
             f5_no_line_reason = proj.get("f5_no_line_reason", "")
 
             game_data.update({
@@ -3676,6 +3698,7 @@ def run_predictions():
                 "F5_Model_Side": f5_model_side,
                 "F5_Starter_Lean": f5_starter_lean,
                 "F5_Eligible": f5_eligible,
+                "F5_Market_Line": f5_market_line,
                 "F5_No_Line_Reason": f5_no_line_reason,
                 "Lineup_Impact_Away": round(float(away_impact), 4),
                 "Lineup_Impact_Home": round(float(home_impact), 4),
@@ -3724,6 +3747,39 @@ def run_predictions():
             quality_away = 0.5 + (compressed_away - 0.5) * ml_quality_penalty
             adjusted_home_win_prob = min(max_ml_cap, quality_home)
             adjusted_away_win_prob = min(max_ml_cap, quality_away)
+
+            # RECOVERY PATCH: populate per-book ML sharpness fields from a
+            # list-format Parlay payload when odds_api did not flatten them.
+            pinn_home = pinn_away = novig_home = novig_away = None
+            _home_norm_ml = normalize_team_name(home_team)
+            _away_norm_ml = normalize_team_name(away_team)
+            for bm in odds_info.get("bookmakers", []):
+                try:
+                    bm_key = (bm.get("key") or "").lower()
+                    if bm_key not in ("pinnacle", "novig"):
+                        continue
+                    for market in bm.get("markets", []):
+                        if market.get("key") != "h2h":
+                            continue
+                        for outcome in market.get("outcomes", []):
+                            outcome_norm = normalize_team_name(outcome.get("name", ""))
+                            price = outcome.get("price")
+                            if bm_key == "pinnacle" and outcome_norm == _home_norm_ml:
+                                pinn_home = price
+                            elif bm_key == "pinnacle" and outcome_norm == _away_norm_ml:
+                                pinn_away = price
+                            elif bm_key == "novig" and outcome_norm == _home_norm_ml:
+                                novig_home = price
+                            elif bm_key == "novig" and outcome_norm == _away_norm_ml:
+                                novig_away = price
+                except (AttributeError, TypeError):
+                    continue
+            odds_info.update({
+                "pinnacle_ml_home": odds_info.get("pinnacle_ml_home", pinn_home) if pinn_home is None else pinn_home,
+                "pinnacle_ml_away": odds_info.get("pinnacle_ml_away", pinn_away) if pinn_away is None else pinn_away,
+                "novig_ml_home": odds_info.get("novig_ml_home", novig_home) if novig_home is None else novig_home,
+                "novig_ml_away": odds_info.get("novig_ml_away", novig_away) if novig_away is None else novig_away,
+            })
 
             # Book ML lines from odds_map (both sides required for de-vig; no synthetic defaults).
             implied_home, implied_away, ml_market_status = _ml_pair_devig_implied(
@@ -4362,7 +4418,7 @@ def run_predictions():
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
-        "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible", "F5_No_Line_Reason",
+        "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible", "F5_Market_Line", "F5_No_Line_Reason",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
