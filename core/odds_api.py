@@ -16,7 +16,7 @@ try:
 except ImportError:
     pass
 
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
+ODDS_API_KEY = str(os.getenv("ODDS_API_KEY", "")).strip()
 MLB_SPORT_KEY = "baseball_mlb"
 ODDS_BASE_URL = "https://parlay-api.com/v1"
 # Single HTTP GET timeout (seconds). One automatic retry on transient Parlay API failures.
@@ -541,7 +541,7 @@ def fetch_mlb_odds(target_date=None):
         "markets": "h2h,totals",
         "oddsFormat": "american",
     }
-    headers = {"X-API-Key": ODDS_API_KEY}
+    headers = {"X-API-Key": ODDS_API_KEY, "Accept": "application/json"}
     # Python-side target_date filtering only (no commenceTimeFrom/To on request) for backfill testing.
     if target_date:
         print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
