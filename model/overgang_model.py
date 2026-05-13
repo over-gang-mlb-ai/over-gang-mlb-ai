@@ -4023,19 +4023,25 @@ def run_predictions():
             #   OU_Sharpness_OK        -> meaningful signal (|gap| >= 0.5, same
             #                              boundary the confidence modifier uses)
             try:
+                # RECOVERY PATCH: Ensure we extract from the new list-based odds_info structure.
                 _pinn_export = odds_info.get("pinnacle_total_line")
-                _retail_export = odds_info.get("espn_draftkings_total_line")
-                if _retail_export is None:
-                    _retail_export = odds_info.get("draftkings_total_line")
-                if odds_info.get("espn_draftkings_total_line") is not None:
-                    _retail_book_export = "Espn_Draftkings"
-                elif _retail_export is not None:
-                    _retail_book_export = "Draftkings"
-                else:
-                    _retail_book_export = ""
-                _inputs_ok_export = bool(
-                    (_pinn_export is not None) and (_retail_export is not None)
-                )
+                _retail_export = odds_info.get("espn_draftkings_total_line") or odds_info.get("draftkings_total_line")
+
+                # Fallback: if odds_info is missing these keys, recover directly
+                # from a raw list-format bookmaker payload when present.
+                if _pinn_export is None or _retail_export is None:
+                    for bm in odds_info.get("bookmakers", []):
+                        try:
+                            val = bm["markets"][0]["outcomes"][0]["point"]
+                            if bm["key"] == "pinnacle":
+                                _pinn_export = val
+                            if bm["key"] in ["draftkings", "bovada"]:
+                                _retail_export = val
+                        except (IndexError, KeyError, TypeError):
+                            continue
+
+                _retail_book_export = "Draftkings" if _retail_export else ""
+                _inputs_ok_export = bool(_pinn_export and _retail_export)
                 if _inputs_ok_export:
                     _gap_export = round(float(_pinn_export) - float(_retail_export), 2)
                     if _gap_export > 0:
