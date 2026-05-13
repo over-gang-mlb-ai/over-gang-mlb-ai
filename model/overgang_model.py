@@ -3886,14 +3886,16 @@ def run_predictions():
                 ml_sharpness_ok = abs(ml_exchange_vs_sharp_gap) <= float(
                     MAX_EXCHANGE_VS_SHARP_GAP
                 )
+                ml_sharpness_gate_open = ml_sharpness_ok
             else:
-                ml_sharpness_ok = True  # fail-open: gate cannot block without both inputs
+                ml_sharpness_ok = False
+                ml_sharpness_gate_open = True  # fail-open: gate cannot block without both inputs
 
             ml_fired = bool(
                 ml_fire_eligible
                 and (ml_win_max >= MIN_ML_WIN_PROB_FOR_FIRE)
                 and ml_edge_meets_min
-                and ml_sharpness_ok
+                and ml_sharpness_gate_open
             )
             ml_quality_flag = "league_avg_pitcher_fallback" if _league_avg_pitcher else ""
 
@@ -3909,7 +3911,7 @@ def run_predictions():
                 no_fire_ml = "ml_win_prob_below_threshold"
             elif not ml_edge_meets_min:
                 no_fire_ml = "ml_edge_below_threshold"
-            elif not ml_sharpness_ok:
+            elif not ml_sharpness_gate_open:
                 no_fire_ml = "ml_sharpness_gap_exceeded"
             else:
                 no_fire_ml = "ml_win_prob_below_threshold"
@@ -3930,6 +3932,7 @@ def run_predictions():
                 "ML_Pinnacle_Present": pinnacle_present_flag,
                 "ML_Sharpness_Inputs_OK": ml_sharpness_inputs_ok,
                 "ML_Sharpness_OK": ml_sharpness_ok,
+                "ML_Sharpness_Gate_Open": ml_sharpness_gate_open,
                 "ML_Exchange_Vs_Sharp_Gap": (
                     round(ml_exchange_vs_sharp_gap, 4)
                     if ml_exchange_vs_sharp_gap is not None
@@ -4458,7 +4461,7 @@ def run_predictions():
         "OU_Result", "ML_Result",
         "ML_Pick", "ML_Confidence", "ML_Value", "ML_Kelly_Units", "ML_Quality_Flag", "ML_Quality_Factor",
         "ML_Exchange_Present", "ML_Prophetx_Present", "ML_Pinnacle_Present",
-        "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Exchange_Vs_Sharp_Gap",
+        "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Sharpness_Gate_Open", "ML_Exchange_Vs_Sharp_Gap",
         "OU_Sharpness_Inputs_OK", "OU_Sharpness_OK",
         "OU_Sharp_Direction", "OU_Sharp_Gap", "SHARP_OU_Delta", "OU_Sharp_Modifier",
         "OU_Pinnacle_Total", "OU_Retail_Total", "OU_Retail_Book",
@@ -4541,7 +4544,7 @@ def run_predictions():
         ]
         picks_board_ml_quality_cols = [
             "ML_Market_OK", "ML_Market_Status",
-            "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK",
+            "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Sharpness_Gate_Open",
             "ML_Exchange_Vs_Sharp_Gap",
         ]
         picks_board_tail_cols = ["Model_Notes", "Data_Quality_Flag"]
