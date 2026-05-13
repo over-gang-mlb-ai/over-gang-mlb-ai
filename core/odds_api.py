@@ -540,8 +540,8 @@ def fetch_mlb_odds(target_date=None):
         "regions": "us",
         "markets": "h2h,totals",
         "oddsFormat": "american",
-        "apiKey": ODDS_API_KEY,
     }
+    headers = {"X-API-Key": ODDS_API_KEY}
     # Python-side target_date filtering only (no commenceTimeFrom/To on request) for backfill testing.
     if target_date:
         print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
@@ -555,7 +555,7 @@ def fetch_mlb_odds(target_date=None):
     r = None
     for attempt in (1, 2):
         try:
-            r = requests.get(url, params=params, timeout=PARLAY_FETCH_TIMEOUT_SEC)
+            r = requests.get(url, params=params, headers=headers, timeout=PARLAY_FETCH_TIMEOUT_SEC)
             break
         except RequestException as e:
             if attempt == 1:
