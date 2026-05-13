@@ -3764,6 +3764,8 @@ def run_predictions():
                         for outcome in market.get("outcomes", []):
                             outcome_norm = normalize_team_name(outcome.get("name", ""))
                             price = outcome.get("price")
+                            if price is None:
+                                continue
                             if bm_key == "pinnacle" and outcome_norm == _home_norm_ml:
                                 pinn_home = price
                             elif bm_key == "pinnacle" and outcome_norm == _away_norm_ml:
@@ -3785,6 +3787,10 @@ def run_predictions():
             implied_home, implied_away, ml_market_status = _ml_pair_devig_implied(
                 odds_info.get("ml_home"), odds_info.get("ml_away")
             )
+            if ml_market_status == "missing_market" and (
+                odds_info.get("ml_home") is not None or odds_info.get("ml_away") is not None
+            ):
+                ml_market_status = "partial"
             ml_market_ok = ml_market_status == "ok"
 
             # Parallel ML sharpness / market-truth gate (observational + blocking).
@@ -3854,6 +3860,20 @@ def run_predictions():
             _picked_pinn_implied = (
                 _pinn_ih if ml_side == "home" else _pinn_ia
             )
+            if _picked_novig_implied is None:
+                _picked_novig_price = (
+                    odds_info.get("novig_ml_home")
+                    if ml_side == "home"
+                    else odds_info.get("novig_ml_away")
+                )
+                _picked_novig_implied = _american_odds_to_implied(_picked_novig_price)
+            if _picked_pinn_implied is None:
+                _picked_pinn_price = (
+                    odds_info.get("pinnacle_ml_home")
+                    if ml_side == "home"
+                    else odds_info.get("pinnacle_ml_away")
+                )
+                _picked_pinn_implied = _american_odds_to_implied(_picked_pinn_price)
             if (_picked_novig_implied is not None) and (_picked_pinn_implied is not None):
                 ml_exchange_vs_sharp_gap = float(
                     _picked_novig_implied
