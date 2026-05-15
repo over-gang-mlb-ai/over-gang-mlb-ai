@@ -4516,6 +4516,15 @@ def run_predictions():
         combined_df = pd.DataFrame(eligible_export, columns=export_cols)
         combined_df.to_csv(combined_path, index=False)
         print(f"\n💾 Saved {len(eligible_export)} combined row(s) → {combined_path}")
+        diagnostics_path = f"{ARCHIVE_DIR}/diagnostics_{archive_date}.csv"
+        diagnostics_cols = list(export_cols)
+        for _row in eligible_export:
+            for _col in _row.keys():
+                if _col not in diagnostics_cols:
+                    diagnostics_cols.append(_col)
+        diagnostics_df = pd.DataFrame(eligible_export, columns=diagnostics_cols)
+        diagnostics_df.to_csv(diagnostics_path, index=False)
+        print(f"💾 Saved {len(eligible_export)} diagnostics row(s) → {diagnostics_path}")
         send_telegram_file(
             combined_path,
             caption=f"📊 Over Gang predictions — {datetime.now().strftime('%b %d')}",
