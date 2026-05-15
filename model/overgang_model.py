@@ -4526,6 +4526,10 @@ def run_predictions():
         diagnostics_df.to_csv(diagnostics_path, index=False)
         print(f"💾 Saved {len(eligible_export)} diagnostics row(s) → {diagnostics_path}")
         send_telegram_file(
+            diagnostics_path,
+            caption=f"🧪 Over Gang diagnostics — {datetime.now().strftime('%b %d')}",
+        )
+        send_telegram_file(
             combined_path,
             caption=f"📊 Over Gang predictions — {datetime.now().strftime('%b %d')}",
         )
