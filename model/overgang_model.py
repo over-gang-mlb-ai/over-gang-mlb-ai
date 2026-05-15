@@ -3969,7 +3969,7 @@ def run_predictions():
             clean_strong_ou = (
                 has_real_total
                 and (not projection_cap_hit)
-                and (abs(edge) >= 1.5)
+                and (abs(edge) >= 1.0)
                 and (confidence >= 0.74)
                 and ("League Avg" not in (away_pitcher or ""))
                 and ("League Avg" not in (home_pitcher or ""))
