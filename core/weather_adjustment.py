@@ -81,8 +81,11 @@ def _parse_game_datetime_utc(game_datetime: Optional[str]) -> Optional[datetime]
 
 def _fetch_hourly_temp_wind_ms(
     lat: float, lon: float, dt_utc: datetime
-) -> Optional[Tuple[float, float]]:
-    """Return (temp_c, wind_m/s) for the hourly slot closest to dt_utc, or None."""
+) -> Optional[Tuple[float, float, float]]:
+    """Return (temp_c, wind_m/s, gust_m/s) for the hourly slot closest to dt_utc, or None.
+
+    gust_m/s falls back to wind_m/s when the gust array is missing or unparsable for the slot.
+    """
     now = datetime.now(timezone.utc)
     date_str = dt_utc.strftime("%Y-%m-%d")
     base = (
@@ -93,7 +96,7 @@ def _fetch_hourly_temp_wind_ms(
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m,wind_speed_10m",
+        "hourly": "temperature_2m,wind_speed_10m,wind_gusts_10m",
         "timezone": "UTC",
         "start_date": date_str,
         "end_date": date_str,
@@ -111,6 +114,7 @@ def _fetch_hourly_temp_wind_ms(
     times = hourly.get("time") or []
     temps = hourly.get("temperature_2m") or []
     winds = hourly.get("wind_speed_10m") or []
+    gusts = hourly.get("wind_gusts_10m") or []
     if not times or len(temps) != len(times) or len(winds) != len(times):
         return None
 
@@ -136,14 +140,27 @@ def _fetch_hourly_temp_wind_ms(
         wind_ms = float(winds[best_i])
     except (TypeError, ValueError, IndexError):
         return None
-    return temp_c, wind_ms
+
+    try:
+        gust_ms = float(gusts[best_i])
+        if not (gust_ms == gust_ms):  # NaN guard
+            gust_ms = wind_ms
+    except (TypeError, ValueError, IndexError):
+        gust_ms = wind_ms
+
+    return temp_c, wind_ms, gust_ms
 
 
-def _mult_from_temp_wind(temp_c: float, wind_ms: float) -> float:
-    """Combine small temp + wind deltas; clamp total multiplier to WEATHER_* bounds."""
+def _mult_from_temp_wind(temp_c: float, wind_ms: float, gust_ms: float) -> float:
+    """Combine small temp + wind deltas; clamp total multiplier to WEATHER_* bounds.
+
+    Wind contribution uses effective_wind_ms = max(wind_ms, gust_ms) so peak hourly gusts can
+    lift the carry signal without changing the existing coefficient or component cap.
+    """
     t_comp = _TEMP_COEFF * (temp_c - _NEUTRAL_TEMP_C)
     t_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, t_comp))
-    w_comp = _WIND_COEFF * (wind_ms - _NEUTRAL_WIND_MS)
+    effective_wind_ms = max(wind_ms, gust_ms)
+    w_comp = _WIND_COEFF * (effective_wind_ms - _NEUTRAL_WIND_MS)
     w_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, w_comp))
     m = 1.0 + t_comp + w_comp
     return max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, m))
@@ -180,5 +197,5 @@ def compute_weather_runs_mult(venue_name: Optional[str], game_datetime: Optional
     tw = _fetch_hourly_temp_wind_ms(lat, lon, dt_utc)
     if tw is None:
         return 1.0
-    temp_c, wind_ms = tw
-    return _mult_from_temp_wind(temp_c, wind_ms)
+    temp_c, wind_ms, gust_ms = tw
+    return _mult_from_temp_wind(temp_c, wind_ms, gust_ms)
