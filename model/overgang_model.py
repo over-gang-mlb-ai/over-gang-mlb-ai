@@ -4692,30 +4692,51 @@ def run_predictions():
                     games_started = _k_float(krow.get("Games_Started"))
                     games_pitched = _k_float(krow.get("Games_Pitched"))
 
-                if not no_fire_k_reason and prop is None:
+                k_line = _k_float(prop.get("line")) if prop else None
+                over_price = _k_float(prop.get("over_price")) if prop else None
+                under_price = _k_float(prop.get("under_price")) if prop else None
+
+                if (
+                    not no_fire_k_reason
+                    and (
+                        prop is None
+                        or k_line is None
+                        or over_price is None
+                        or under_price is None
+                    )
+                ):
                     no_fire_k_reason = "no_market_line"
 
-                if not no_fire_k_reason and (games_started is None or games_started <= 0):
+                if not no_fire_k_reason and (games_started is None or games_started < 3):
                     no_fire_k_reason = "not_starter_sample"
+                if not no_fire_k_reason and k_line < 2.5:
+                    no_fire_k_reason = "low_k_line"
+                if not no_fire_k_reason and (
+                    games_pitched is None
+                    or games_pitched <= 0
+                    or (games_started / games_pitched) < 0.50
+                ):
+                    no_fire_k_reason = "mixed_role_sample"
+
+                raw_projected_ip = None
+                if not no_fire_k_reason:
+                    raw_projected_ip = ip / games_started if ip is not None else None
+                    if raw_projected_ip is None:
+                        no_fire_k_reason = "low_ip_k_sample"
+                    elif raw_projected_ip > 7.5:
+                        no_fire_k_reason = "inflated_ip_per_start"
+
                 if not no_fire_k_reason and (ip is None or ip < 20):
                     no_fire_k_reason = "low_ip_k_sample"
 
-                k_line = _k_float(prop.get("line")) if prop else None
-                over_price = prop.get("over_price") if prop else None
-                under_price = prop.get("under_price") if prop else None
-                if (
-                    not no_fire_k_reason
-                    and ip is not None
-                    and games_started is not None
-                    and games_started > 0
-                    and k9 is not None
-                    and k_line is not None
-                ):
-                    projected_ip = max(4.0, min(6.5, ip / games_started))
+                if not no_fire_k_reason and k9 is not None and raw_projected_ip is not None:
+                    projected_ip = max(4.0, min(6.5, raw_projected_ip))
                     projected_ks = (k9 / 9.0) * projected_ip
                     k_edge = projected_ks - k_line
                     if abs(k_edge) < 0.75:
                         no_fire_k_reason = "edge_too_small"
+                elif not no_fire_k_reason:
+                    no_fire_k_reason = "missing_k_stats"
 
                 k_pick = ""
                 if k_edge is not None:
@@ -4729,9 +4750,16 @@ def run_predictions():
                     and prop is not None
                     and krow is not None
                     and games_started is not None
-                    and games_started > 0
+                    and games_started >= 3
+                    and games_pitched is not None
+                    and games_pitched > 0
+                    and (games_started / games_pitched) >= 0.50
                     and ip is not None
                     and ip >= 20
+                    and raw_projected_ip is not None
+                    and raw_projected_ip <= 7.5
+                    and k_line is not None
+                    and k_line >= 2.5
                     and over_price is not None
                     and under_price is not None
                     and k_edge is not None
