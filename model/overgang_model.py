@@ -4986,28 +4986,62 @@ def run_predictions():
             "Game_Date", "Game_Time_MT", "Venue", "Doubleheader", "Game",
             "Away_Pitcher", "Away_xERA", "Away_WHIP",
             "Home_Pitcher", "Home_xERA", "Home_WHIP",
+        ]
+        picks_board_starter_cols = [
+            "Away_Starter_xERA", "Home_Starter_xERA",
+            "Away_Starter_WHIP", "Home_Starter_WHIP",
+            "Away_Starter_ERA_xERA_Gap", "Home_Starter_ERA_xERA_Gap",
+        ]
+        picks_board_ou_cols = [
             "OU_Pick", "OU_Confidence", "OU_Fired", "OU_Edge",
+        ]
+        picks_board_ou_prob_cols = [
+            "OU_Implied_Prob_Pick", "OU_True_Prob_Pick",
+            "OU_Prob_Edge", "OU_Prob_Edge_Side", "OU_Prob_Method",
+            "OU_Prob_Juice_Source", "OU_Prob_Book",
+            "OU_Prob_Over_Juice", "OU_Prob_Under_Juice",
+            "OU_Prob_Calibration_Flag",
+            "No_Fire_OU_Reason", "Projection_Cap_Flag", "Total_Is_Real",
+        ]
+        picks_board_ml_cols = [
             "ML_Pick", "ML_Confidence", "ML_Fired", "ML_Edge",
+            "ML_Kelly_Units", "No_Fire_ML_Reason",
+        ]
+        picks_board_market_cols = [
             "Fired_Play", "Play_Status", "Bettable",
             "Vegas_Line", "Odds_Line", "Bet_Line", "Projected_Total",
             "Odds_Book", "ML_Odds_Book", "Total_Line_Source", "Market_Source",
+            "Trigger_Tags",
         ]
         picks_board_ou_sharp_cols = [
             "OU_Sharpness_Inputs_OK", "OU_Sharpness_OK",
             "OU_Sharp_Direction", "OU_Sharp_Gap",
             "OU_Sharp_Modifier", "OU_Pinnacle_Total", "OU_Retail_Total",
-            "OU_Retail_Book",
+            "OU_Retail_Book", "SHARP_OU_Delta",
         ]
         picks_board_ml_quality_cols = [
             "ML_Market_OK", "ML_Market_Status",
             "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK", "ML_Sharpness_Gate_Open",
             "ML_Exchange_Vs_Sharp_Gap",
         ]
+        picks_board_reliever_cols = [
+            "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
+            "Away_Reliever_Bad_xERA_Count", "Home_Reliever_Bad_xERA_Count",
+            "Away_Reliever_Bad_WHIP_Count", "Home_Reliever_Bad_WHIP_Count",
+            "Away_Reliever_Recent_Bad_Arm_Count", "Home_Reliever_Recent_Bad_Arm_Count",
+            "OU_Full_Game_Under_Reliever_Depth_Risk",
+        ]
         picks_board_tail_cols = ["Model_Notes", "Data_Quality_Flag"]
         picks_board_cols = (
             picks_board_front_cols
+            + picks_board_starter_cols
+            + picks_board_ou_cols
+            + picks_board_ou_prob_cols
+            + picks_board_ml_cols
+            + picks_board_market_cols
             + picks_board_ou_sharp_cols
             + picks_board_ml_quality_cols
+            + picks_board_reliever_cols
             + picks_board_tail_cols
         )
         picks_board_rows = []
