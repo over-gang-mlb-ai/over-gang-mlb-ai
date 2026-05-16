@@ -4742,6 +4742,10 @@ def run_predictions():
         pitcher_k_board_df = pd.DataFrame(k_board_rows, columns=pitcher_k_board_cols)
         pitcher_k_board_df.to_csv(pitcher_k_board_path, index=False)
         print(f"💾 Saved {len(k_board_rows)} pitcher-K row(s) → {pitcher_k_board_path}")
+        send_telegram_file(
+            pitcher_k_board_path,
+            caption=f"🎯 Over Gang pitcher K board — {datetime.now().strftime('%b %d')}",
+        )
 
         # NEW: readable pregame picks board CSV. Sibling output to
         # predictions_*.csv and client_predictions_*.csv; does not replace or
