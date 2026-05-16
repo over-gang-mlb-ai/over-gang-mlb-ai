@@ -46,6 +46,7 @@ from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, get_game_odds
+from core.the_odds_api import fetch_f5_totals_by_game
 from core.batters import Batters, LineupImpact, BATTER_DF
 from core.weather_adjustment import (
     WEATHER_RUNS_MULT_MAX,
@@ -3278,6 +3279,13 @@ def run_predictions():
 
     reliever_df = load_reliever_stats()
 
+    try:
+        f5_totals_by_game = fetch_f5_totals_by_game()
+    except Exception as _e_f5:
+        print(f"⚠️ the_odds_api F5 totals fetch failed: {_e_f5}")
+        f5_totals_by_game = {}
+    print(f"📈 the_odds_api F5 totals loaded for {len(f5_totals_by_game)} game(s)")
+
     for game in games:
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
@@ -3681,6 +3689,24 @@ def run_predictions():
             f5_market_line = proj.get("f5_market_line", "")
             f5_no_line_reason = proj.get("f5_no_line_reason", "")
 
+            _f5_lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
+            _f5_market = f5_totals_by_game.get(_f5_lookup_key) if isinstance(f5_totals_by_game, dict) else None
+            if _f5_market is not None:
+                f5_market_line = _f5_market.get("f5_total_line", "")
+                f5_over_juice = _f5_market.get("f5_over_juice", "")
+                f5_under_juice = _f5_market.get("f5_under_juice", "")
+                f5_source = _f5_market.get("f5_source", "")
+                f5_book = _f5_market.get("f5_book", "")
+                f5_market_ok = bool(_f5_market.get("f5_market_ok", False))
+                f5_no_line_reason = ""
+            else:
+                f5_over_juice = ""
+                f5_under_juice = ""
+                f5_source = ""
+                f5_book = ""
+                f5_market_ok = False
+                f5_no_line_reason = "no_f5_market_source"
+
             game_data.update({
                 "Projected_Total": projected_total,
                 "Away_Runs": away_runs,
@@ -3699,6 +3725,11 @@ def run_predictions():
                 "F5_Starter_Lean": f5_starter_lean,
                 "F5_Eligible": f5_eligible,
                 "F5_Market_Line": f5_market_line,
+                "F5_Over_Juice": f5_over_juice,
+                "F5_Under_Juice": f5_under_juice,
+                "F5_Source": f5_source,
+                "F5_Book": f5_book,
+                "F5_Market_OK": f5_market_ok,
                 "F5_No_Line_Reason": f5_no_line_reason,
                 "Lineup_Impact_Away": round(float(away_impact), 4),
                 "Lineup_Impact_Home": round(float(home_impact), 4),
@@ -4441,7 +4472,9 @@ def run_predictions():
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
-        "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible", "F5_Market_Line", "F5_No_Line_Reason",
+        "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible", "F5_Market_Line",
+        "F5_Over_Juice", "F5_Under_Juice", "F5_Source", "F5_Book", "F5_Market_OK",
+        "F5_No_Line_Reason",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
         "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
