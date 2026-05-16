@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
 F5_TOTALS_MARKET = "totals_1st_5_innings"
+OU_TOTALS_MARKET = "totals"
 DEFAULT_REGIONS = "us"
 DEFAULT_ODDS_FORMAT = "american"
 
@@ -213,6 +214,104 @@ def _event_game_key(event: Dict[str, Any]) -> Optional[str]:
     if not away_norm or not home_norm:
         return None
     return f"{away_norm} @ {home_norm}"
+
+
+def fetch_ou_totals_by_game() -> Dict[str, List[Dict[str, Any]]]:
+    """Build mapping `'<away_norm> @ <home_norm>' -> list[full-game totals quote]`.
+
+    Uses The Odds API bulk full-game totals endpoint:
+        GET /v4/sports/baseball_mlb/odds?markets=totals&regions=us&oddsFormat=american
+
+    Fail-soft: returns {} on missing key, request failure, malformed JSON, or unusable body.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning("THE_ODDS_API_KEY not set; fetch_ou_totals_by_game returning {}.")
+        return {}
+
+    url = f"{THE_ODDS_API_BASE}/odds"
+    params = {
+        "apiKey": api_key,
+        "markets": OU_TOTALS_MARKET,
+        "regions": DEFAULT_REGIONS,
+        "oddsFormat": DEFAULT_ODDS_FORMAT,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT_S)
+        r.raise_for_status()
+        body = r.json()
+    except Exception as e:
+        logger.warning("the_odds_api fetch_ou_totals_by_game failed: %s", e)
+        return {}
+    if not isinstance(body, list):
+        logger.warning(
+            "the_odds_api fetch_ou_totals_by_game unexpected payload type: %s",
+            type(body).__name__,
+        )
+        return {}
+
+    mapping: Dict[str, List[Dict[str, Any]]] = {}
+    for event in body:
+        if not isinstance(event, dict):
+            continue
+        game_key = _event_game_key(event)
+        if not game_key:
+            continue
+        bookmakers = event.get("bookmakers") or []
+        if not isinstance(bookmakers, list):
+            continue
+
+        for bm in bookmakers:
+            if not isinstance(bm, dict):
+                continue
+            book = (bm.get("key") or "").strip().lower()
+            if not book:
+                continue
+            markets = bm.get("markets") or []
+            if not isinstance(markets, list):
+                continue
+
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                if (market.get("key") or "").strip().lower() != OU_TOTALS_MARKET:
+                    continue
+                outcomes = market.get("outcomes") or []
+                if not isinstance(outcomes, list):
+                    continue
+
+                over_outcome = None
+                under_outcome = None
+                for oc in outcomes:
+                    if not isinstance(oc, dict):
+                        continue
+                    name = (oc.get("name") or "").strip().lower()
+                    if name == "over":
+                        over_outcome = oc
+                    elif name == "under":
+                        under_outcome = oc
+                if over_outcome is None or under_outcome is None:
+                    continue
+
+                over_point = _parse_point(over_outcome.get("point"))
+                under_point = _parse_point(under_outcome.get("point"))
+                if over_point is None or under_point is None or over_point != under_point:
+                    continue
+                over_price = _parse_price(over_outcome.get("price"))
+                under_price = _parse_price(under_outcome.get("price"))
+                if over_price is None or under_price is None:
+                    continue
+
+                mapping.setdefault(game_key, []).append({
+                    "book": book,
+                    "total_line": over_point,
+                    "over_juice": over_price,
+                    "under_juice": under_price,
+                    "last_update": market.get("last_update") or bm.get("last_update") or "",
+                    "source": SOURCE_LABEL,
+                })
+
+    return mapping
 
 
 def fetch_f5_totals_by_game() -> Dict[str, Dict[str, Any]]:

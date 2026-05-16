@@ -46,7 +46,7 @@ from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, get_game_odds
-from core.the_odds_api import fetch_f5_totals_by_game
+from core.the_odds_api import fetch_f5_totals_by_game, fetch_ou_totals_by_game
 from core.batters import Batters, LineupImpact, BATTER_DF
 from core.weather_adjustment import (
     WEATHER_RUNS_MULT_MAX,
@@ -3286,6 +3286,13 @@ def run_predictions():
         f5_totals_by_game = {}
     print(f"📈 the_odds_api F5 totals loaded for {len(f5_totals_by_game)} game(s)")
 
+    try:
+        toa_ou_totals_by_game = fetch_ou_totals_by_game()
+    except Exception as _e_toa_ou:
+        print(f"⚠️ the_odds_api OU totals fetch failed: {_e_toa_ou}")
+        toa_ou_totals_by_game = {}
+    print(f"📈 the_odds_api OU totals loaded for {len(toa_ou_totals_by_game)} game(s)")
+
     for game in games:
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
@@ -4394,10 +4401,76 @@ def run_predictions():
             ):
                 game_data[_pk] = ""
             game_data["OU_Prob_Method"] = "v1_edge_conf_provisional"
+            game_data["OU_Prob_Juice_Source"] = ""
+            game_data["OU_Prob_Book"] = ""
+            game_data["OU_Prob_Over_Juice"] = ""
+            game_data["OU_Prob_Under_Juice"] = ""
 
-            _im_over, _im_under, _im_st = _ml_pair_devig_implied(
-                game_data.get("Over_Juice"), game_data.get("Under_Juice")
+            def _ou_prob_float(v):
+                try:
+                    f = float(v)
+                    if f != f:
+                        return None
+                    return f
+                except (TypeError, ValueError):
+                    return None
+
+            _toa_ou_quote = None
+            _toa_ou_lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
+            _toa_ou_quotes = (
+                toa_ou_totals_by_game.get(_toa_ou_lookup_key, [])
+                if isinstance(toa_ou_totals_by_game, dict)
+                else []
             )
+            _bet_line_float = _ou_prob_float(game_data.get("Bet_Line"))
+            if _bet_line_float is not None and isinstance(_toa_ou_quotes, list):
+                _toa_ou_book_order = [
+                    "pinnacle", "fanduel", "draftkings", "betmgm", "caesars", "bet365",
+                    "betrivers", "lowvig", "betonlineag", "bovada", "betus", "mybookieag",
+                ]
+                _toa_ou_book_rank = {
+                    _book: _idx for _idx, _book in enumerate(_toa_ou_book_order)
+                }
+                _same_line_quotes = []
+                for _q in _toa_ou_quotes:
+                    if not isinstance(_q, dict):
+                        continue
+                    _q_line = _ou_prob_float(_q.get("total_line"))
+                    _q_over = _ou_prob_float(_q.get("over_juice"))
+                    _q_under = _ou_prob_float(_q.get("under_juice"))
+                    if (
+                        _q_line is not None
+                        and _q_line == _bet_line_float
+                        and _q_over is not None
+                        and _q_under is not None
+                    ):
+                        _same_line_quotes.append(_q)
+                if _same_line_quotes:
+                    _toa_ou_quote = sorted(
+                        _same_line_quotes,
+                        key=lambda _q: (
+                            _toa_ou_book_rank.get(
+                                str(_q.get("book") or "").strip().lower(),
+                                len(_toa_ou_book_order),
+                            ),
+                            str(_q.get("book") or "").strip().lower(),
+                        ),
+                    )[0]
+
+            if _toa_ou_quote is not None:
+                game_data["OU_Prob_Juice_Source"] = "the_odds_api"
+                game_data["OU_Prob_Book"] = str(_toa_ou_quote.get("book") or "")
+                game_data["OU_Prob_Over_Juice"] = _toa_ou_quote.get("over_juice")
+                game_data["OU_Prob_Under_Juice"] = _toa_ou_quote.get("under_juice")
+                game_data["OU_Prob_Method"] = "v1_edge_conf_the_odds_api_same_line"
+                _pr_flags.append("toa_same_line_not_for_fire")
+                _im_over, _im_under, _im_st = _ml_pair_devig_implied(
+                    _toa_ou_quote.get("over_juice"), _toa_ou_quote.get("under_juice")
+                )
+            else:
+                _im_over, _im_under, _im_st = _ml_pair_devig_implied(
+                    game_data.get("Over_Juice"), game_data.get("Under_Juice")
+                )
             if _im_st == "ok" and _im_over is not None and _im_under is not None:
                 game_data["OU_Implied_Prob_Over"] = round(float(_im_over), 4)
                 game_data["OU_Implied_Prob_Under"] = round(float(_im_under), 4)
@@ -4533,6 +4606,10 @@ def run_predictions():
         "OU_Prob_Edge",
         "OU_Prob_Edge_Side",
         "OU_Prob_Method",
+        "OU_Prob_Juice_Source",
+        "OU_Prob_Book",
+        "OU_Prob_Over_Juice",
+        "OU_Prob_Under_Juice",
         "OU_Prob_Calibration_Flag",
     ]
     eligible_export = [
