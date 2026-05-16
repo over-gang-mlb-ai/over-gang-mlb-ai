@@ -45,7 +45,7 @@ from core.public_betting_loader import split_game_key
 from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
-from core.odds_api import fetch_mlb_odds, get_game_odds
+from core.odds_api import fetch_mlb_odds, fetch_ou_sharp_totals, get_game_odds
 from core.the_odds_api import fetch_f5_totals_by_game, fetch_ou_totals_by_game
 from core.batters import Batters, LineupImpact, BATTER_DF
 from core.weather_adjustment import (
@@ -3293,6 +3293,13 @@ def run_predictions():
         toa_ou_totals_by_game = {}
     print(f"📈 the_odds_api OU totals loaded for {len(toa_ou_totals_by_game)} game(s)")
 
+    try:
+        ou_sharp_totals_by_game = fetch_ou_sharp_totals()
+    except Exception as _e_ou_sharp:
+        print(f"⚠️ targeted Parlay OU sharp totals fetch failed: {_e_ou_sharp}")
+        ou_sharp_totals_by_game = {}
+    print(f"📈 targeted Parlay OU sharp totals loaded for {len(ou_sharp_totals_by_game)} game(s)")
+
     for game in games:
         try:
             home_team = safe_get(game, 'home_name', 'Home Team')
@@ -4140,9 +4147,16 @@ def run_predictions():
             #   OU_Sharpness_OK        -> meaningful signal (|gap| >= 0.5, same
             #                              boundary the confidence modifier uses)
             try:
+                _ou_sharp_lookup_key = f"{normalize_team_name(away_team)} @ {normalize_team_name(home_team)}"
+                _targeted_ou_sharp = (
+                    ou_sharp_totals_by_game.get(_ou_sharp_lookup_key)
+                    if isinstance(ou_sharp_totals_by_game, dict)
+                    else None
+                )
                 # RECOVERY PATCH: Ensure we extract from the new list-based odds_info structure.
                 _pinn_export = odds_info.get("pinnacle_total_line")
                 _retail_export = odds_info.get("espn_draftkings_total_line") or odds_info.get("draftkings_total_line")
+                _retail_book_export = "Draftkings" if _retail_export is not None else ""
 
                 # Fallback: if odds_info is missing these keys, recover directly
                 # from a raw list-format bookmaker payload when present.
@@ -4157,10 +4171,15 @@ def run_predictions():
                         except (IndexError, KeyError, TypeError):
                             continue
 
-                _retail_book_export = "Draftkings" if _retail_export else ""
-                _inputs_ok_export = bool(_pinn_export and _retail_export)
+                if isinstance(_targeted_ou_sharp, dict):
+                    _pinn_export = _targeted_ou_sharp.get("pinnacle_total_line")
+                    _retail_export = _targeted_ou_sharp.get("retail_total_line")
+                    _retail_book_export = _targeted_ou_sharp.get("retail_book") or ""
+
+                _inputs_ok_export = _pinn_export is not None and _retail_export is not None
                 if _inputs_ok_export:
                     _gap_export = round(float(_pinn_export) - float(_retail_export), 2)
+                    ou_sharp_layer_gap = _gap_export
                     if _gap_export > 0:
                         _dir_export = "OVER"
                     elif _gap_export < 0:

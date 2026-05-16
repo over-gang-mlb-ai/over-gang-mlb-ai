@@ -518,6 +518,142 @@ def _extract_per_book_totals_flags(event):
     return result
 
 
+def _parse_valid_totals_market(book):
+    """Return (line, over_juice, under_juice) for a same-point totals market, else None."""
+    if not isinstance(book, dict):
+        return None
+    for market in book.get("markets") or []:
+        if not isinstance(market, dict) or market.get("key") != "totals":
+            continue
+        over_line = under_line = None
+        over_juice = under_juice = None
+        for outcome in market.get("outcomes") or []:
+            if not isinstance(outcome, dict):
+                continue
+            name = (outcome.get("name") or "").strip().lower()
+            if name not in ("over", "under"):
+                continue
+            try:
+                point = float(outcome.get("point"))
+            except (TypeError, ValueError):
+                continue
+            juice = _american_odds_int(outcome.get("price"))
+            if juice is None:
+                continue
+            if name == "over":
+                over_line = point
+                over_juice = juice
+            else:
+                under_line = point
+                under_juice = juice
+        if (
+            over_line is not None
+            and under_line is not None
+            and over_line == under_line
+            and over_juice is not None
+            and under_juice is not None
+        ):
+            return over_line, over_juice, under_juice
+    return None
+
+
+def fetch_ou_sharp_totals():
+    """
+    Targeted Parlay totals fetch for O/U sharpness telemetry only.
+
+    Returns normalized '<away> @ <home>' -> {
+      pinnacle_total_line, pinnacle_over_juice, pinnacle_under_juice,
+      retail_total_line, retail_over_juice, retail_under_juice, retail_book,
+      source
+    }
+
+    Fail-soft: returns {} on missing key, request failure, malformed response, or no usable data.
+    """
+    if not ODDS_API_KEY:
+        logging.warning("⚠️ ODDS_API_KEY not set; targeted OU sharp totals disabled.")
+        return {}
+    try:
+        import requests
+    except ImportError:
+        logging.warning("⚠️ requests not available; targeted OU sharp totals disabled.")
+        return {}
+
+    url = f"{ODDS_BASE_URL}/sports/{MLB_SPORT_KEY}/odds"
+    params = {
+        "regions": "us",
+        "markets": "totals",
+        "bookmakers": "pinnacle,draftkings,fanduel",
+        "oddsFormat": "american",
+    }
+    headers = {"X-API-Key": ODDS_API_KEY, "Accept": "application/json"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=PARLAY_FETCH_TIMEOUT_SEC)
+        r.raise_for_status()
+        raw_payload = r.json()
+    except Exception as e:
+        logging.warning("⚠️ Targeted OU sharp totals fetch failed: %s", e)
+        return {}
+
+    if isinstance(raw_payload, list):
+        data = raw_payload
+    elif isinstance(raw_payload, dict) and isinstance(raw_payload.get("data"), list):
+        data = raw_payload["data"]
+    else:
+        logging.warning(
+            "⚠️ Targeted OU sharp totals response unusable: %s",
+            type(raw_payload).__name__,
+        )
+        return {}
+
+    result = {}
+    for event in data:
+        if not isinstance(event, dict):
+            continue
+        away = (event.get("away_team") or "").strip()
+        home = (event.get("home_team") or "").strip()
+        if not away or not home or _parlay_row_excludes_non_mlb_teams(away, home):
+            continue
+        key = _game_key(away, home)
+        if not key:
+            continue
+
+        parsed_by_book = {}
+        for book in event.get("bookmakers") or []:
+            book_key = (book.get("key") or "").strip().lower()
+            if book_key not in ("pinnacle", "draftkings", "fanduel"):
+                continue
+            parsed = _parse_valid_totals_market(book)
+            if parsed is not None and book_key not in parsed_by_book:
+                parsed_by_book[book_key] = parsed
+
+        pinnacle = parsed_by_book.get("pinnacle")
+        retail_book = "draftkings" if "draftkings" in parsed_by_book else "fanduel" if "fanduel" in parsed_by_book else ""
+        retail = parsed_by_book.get(retail_book) if retail_book else None
+
+        if pinnacle is None and retail is None:
+            continue
+
+        row = {
+            "pinnacle_total_line": None,
+            "pinnacle_over_juice": None,
+            "pinnacle_under_juice": None,
+            "retail_total_line": None,
+            "retail_over_juice": None,
+            "retail_under_juice": None,
+            "retail_book": retail_book,
+            "source": "parlay_api_targeted_totals",
+        }
+        if pinnacle is not None:
+            row["pinnacle_total_line"], row["pinnacle_over_juice"], row["pinnacle_under_juice"] = pinnacle
+        if retail is not None:
+            row["retail_total_line"], row["retail_over_juice"], row["retail_under_juice"] = retail
+        result[key] = row
+
+    if not result:
+        logging.warning("⚠️ Targeted OU sharp totals fetch returned no usable totals.")
+    return result
+
+
 def fetch_mlb_odds(target_date=None):
     """
     Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
