@@ -169,10 +169,58 @@ def _mult_from_temp_wind(temp_c: float, wind_ms: float, gust_ms: float) -> float
 _ALWAYS_ENCLOSED_VENUES: set[str] = {"Tropicana Field"}
 
 
-def compute_weather_runs_mult(venue_name: Optional[str], game_datetime: Optional[str]) -> float:
+def _fetch_mlb_weather_condition(game_pk) -> Optional[str]:
+    """Return MLB StatsAPI gameData.weather.condition (lowercased) for a gamePk, or None.
+
+    Fail-soft on any error; callers must treat None as 'no roof-state truth available'.
+    """
+    if game_pk is None:
+        return None
+    try:
+        pk_int = int(game_pk)
+    except (TypeError, ValueError):
+        return None
+    if pk_int <= 0:
+        return None
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{pk_int}/feed/live"
+    try:
+        r = requests.get(url, timeout=12, headers={"User-Agent": "over-gang-mlb-ai/weather"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.debug("MLB live-feed roof fetch failed for gamePk=%s: %s", pk_int, e)
+        return None
+    cond = (((data.get("gameData") or {}).get("weather") or {}).get("condition") or "")
+    cond = str(cond).strip().lower()
+    return cond or None
+
+
+def _roof_state_blocks_outdoor_weather(condition_text: Optional[str]) -> bool:
+    """True when MLB weather.condition indicates a dome/closed-roof game (no outdoor weather)."""
+    if not condition_text:
+        return False
+    t = str(condition_text).strip().lower()
+    if not t:
+        return False
+    if "closed" in t:
+        return True
+    if "dome" in t and "open" not in t:
+        return True
+    return False
+
+
+def compute_weather_runs_mult(
+    venue_name: Optional[str],
+    game_datetime: Optional[str],
+    game_pk=None,
+) -> float:
     """
     Return a bounded multiplier in [WEATHER_RUNS_MULT_MIN, WEATHER_RUNS_MULT_MAX], or 1.0 when
     venue/time is unknown or weather cannot be fetched.
+
+    When game_pk is provided, MLB StatsAPI weather.condition is consulted; if the condition
+    indicates roof closed or a dome game, outdoor weather is suppressed (returns 1.0). When the
+    feed is unavailable or the condition does not indicate closed/dome, behavior is unchanged.
 
     This is an environment overlay on top of static park factors, not a replacement for them.
     """
@@ -192,6 +240,11 @@ def compute_weather_runs_mult(venue_name: Optional[str], game_datetime: Optional
         return 1.0
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+    if game_pk is not None:
+        roof_condition = _fetch_mlb_weather_condition(game_pk)
+        if _roof_state_blocks_outdoor_weather(roof_condition):
+            return 1.0
 
     lat, lon = coords
     tw = _fetch_hourly_temp_wind_ms(lat, lon, dt_utc)

@@ -3333,7 +3333,7 @@ def run_predictions():
 
             venue = game.get("venue_name", "Unknown")
             park_factors = PARK_FACTORS.get(venue, PARK_FACTORS['Unknown'])
-            weather_runs_mult = compute_weather_runs_mult(venue, safe_get(game, "game_datetime", ""))
+            weather_runs_mult = compute_weather_runs_mult(venue, safe_get(game, "game_datetime", ""), game_pk=game.get("game_id") or game.get("gamePk"))
             if abs(weather_runs_mult - 1.0) > 0.0005:
                 print(f"🌤️ Weather overlay: runs_mult={weather_runs_mult:.4f} ({venue})")
 
