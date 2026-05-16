@@ -4534,6 +4534,215 @@ def run_predictions():
             caption=f"📊 Over Gang predictions — {datetime.now().strftime('%b %d')}",
         )
 
+        # Pitcher K prop board: separate market module export only.
+        # Uses today's probable starters from eligible_export and real K9 from data/pitcher_k_stats.csv.
+        k_board_rows = []
+        k_stats_path = os.path.join(DATA_DIR, "pitcher_k_stats.csv")
+        try:
+            k_stats_df = pd.read_csv(k_stats_path)
+        except Exception as _e_k_stats:
+            print(f"⚠️ pitcher_k_stats.csv unavailable for K board: {_e_k_stats}")
+            k_stats_df = pd.DataFrame()
+        if not k_stats_df.empty and "Name" in k_stats_df.columns:
+            k_stats_df["_norm_name"] = k_stats_df["Name"].astype(str).apply(DataManager.normalize_name)
+            k_stats_by_name = {
+                row["_norm_name"]: row
+                for _, row in k_stats_df.iterrows()
+                if row.get("_norm_name")
+            }
+        else:
+            k_stats_by_name = {}
+
+        k_prop_rows = []
+        try:
+            props_url = "https://api.parlay-api.com/v1/sports/baseball_mlb/props"
+            props_params = {
+                "regions": "us",
+                "markets": "player_strikeouts",
+                "oddsFormat": "american",
+                "limit": 1000,
+            }
+            odds_api_key = os.getenv("ODDS_API_KEY", "")
+            if not odds_api_key:
+                print("⚠️ ODDS_API_KEY missing; skipping pitcher K props fetch.")
+            else:
+                props_headers = {"X-API-Key": odds_api_key, "Accept": "application/json"}
+                props_resp = requests.get(props_url, params=props_params, headers=props_headers, timeout=25)
+                props_resp.raise_for_status()
+                props_payload = props_resp.json()
+                if isinstance(props_payload, dict) and isinstance(props_payload.get("data"), list):
+                    k_prop_rows = props_payload.get("data") or []
+                elif isinstance(props_payload, list):
+                    k_prop_rows = props_payload
+        except Exception as _e_k_props:
+            print(f"⚠️ Parlay pitcher K props unavailable: {_e_k_props}")
+
+        starter_norms = set()
+        for _r in eligible_export:
+            for _pk in ("Away_Pitcher", "Home_Pitcher"):
+                _p = str(_r.get(_pk) or "").strip()
+                _pn = DataManager.normalize_name(_p)
+                if _pn:
+                    starter_norms.add(_pn)
+
+        valid_k_props_by_pitcher = {}
+        book_order = [
+            "pinnacle", "draftkings", "fanduel", "bet365", "betmgm",
+            "betrivers", "fanatics", "caesars", "parx", "hardrock",
+        ]
+        book_rank = {book: i for i, book in enumerate(book_order)}
+        for prop in k_prop_rows:
+            if not isinstance(prop, dict):
+                continue
+            player = str(prop.get("player") or "").strip()
+            if (
+                prop.get("market_key") != "player_strikeouts"
+                or prop.get("line") is None
+                or prop.get("over_price") is None
+                or prop.get("under_price") is None
+                or not player
+                or "{" in player
+                or "}" in player
+            ):
+                continue
+            pnorm = DataManager.normalize_name(player)
+            if pnorm not in starter_norms:
+                continue
+            valid_k_props_by_pitcher.setdefault(pnorm, []).append(prop)
+
+        selected_k_props = {}
+        for pnorm, rows_for_pitcher in valid_k_props_by_pitcher.items():
+            selected_k_props[pnorm] = sorted(
+                rows_for_pitcher,
+                key=lambda x: (
+                    book_rank.get(str(x.get("bookmaker") or "").lower(), len(book_order)),
+                    str(x.get("bookmaker") or "").lower(),
+                ),
+            )[0]
+
+        def _k_float(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _k_int(v):
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                return None
+
+        for _r in eligible_export:
+            game_name_k = str(_r.get("Game") or "")
+            if " @ " in game_name_k:
+                away_team_k, home_team_k = game_name_k.split(" @ ", 1)
+            else:
+                away_team_k, home_team_k = "", ""
+            for side, pitcher_key, team_k, opp_k in (
+                ("away", "Away_Pitcher", away_team_k, home_team_k),
+                ("home", "Home_Pitcher", home_team_k, away_team_k),
+            ):
+                pitcher = str(_r.get(pitcher_key) or "").strip()
+                pnorm = DataManager.normalize_name(pitcher)
+                krow = k_stats_by_name.get(pnorm)
+                prop = selected_k_props.get(pnorm)
+                no_fire_k_reason = ""
+
+                ip = so = k9 = games_started = games_pitched = None
+                projected_ip = projected_ks = k_edge = None
+                if krow is None:
+                    no_fire_k_reason = "missing_k_stats"
+                else:
+                    ip = _k_float(krow.get("IP"))
+                    so = _k_int(krow.get("SO"))
+                    k9 = _k_float(krow.get("K9"))
+                    games_started = _k_float(krow.get("Games_Started"))
+                    games_pitched = _k_float(krow.get("Games_Pitched"))
+
+                if not no_fire_k_reason and prop is None:
+                    no_fire_k_reason = "no_market_line"
+
+                if not no_fire_k_reason and (games_started is None or games_started <= 0):
+                    no_fire_k_reason = "not_starter_sample"
+                if not no_fire_k_reason and (ip is None or ip < 20):
+                    no_fire_k_reason = "low_ip_k_sample"
+
+                k_line = _k_float(prop.get("line")) if prop else None
+                over_price = prop.get("over_price") if prop else None
+                under_price = prop.get("under_price") if prop else None
+                if (
+                    not no_fire_k_reason
+                    and ip is not None
+                    and games_started is not None
+                    and games_started > 0
+                    and k9 is not None
+                    and k_line is not None
+                ):
+                    projected_ip = max(4.0, min(6.5, ip / games_started))
+                    projected_ks = (k9 / 9.0) * projected_ip
+                    k_edge = projected_ks - k_line
+                    if abs(k_edge) < 0.75:
+                        no_fire_k_reason = "edge_too_small"
+
+                k_pick = ""
+                if k_edge is not None:
+                    if k_edge >= 0.75:
+                        k_pick = "OVER"
+                    elif k_edge <= -0.75:
+                        k_pick = "UNDER"
+
+                k_fired = bool(
+                    not no_fire_k_reason
+                    and prop is not None
+                    and krow is not None
+                    and games_started is not None
+                    and games_started > 0
+                    and ip is not None
+                    and ip >= 20
+                    and over_price is not None
+                    and under_price is not None
+                    and k_edge is not None
+                    and abs(k_edge) >= 0.75
+                )
+                if k_fired:
+                    no_fire_k_reason = "fired"
+
+                k_board_rows.append({
+                    "Game": game_name_k,
+                    "Pitcher": pitcher,
+                    "Team": team_k,
+                    "Opponent": opp_k,
+                    "Bookmaker": prop.get("bookmaker") if prop else "",
+                    "K_Line": k_line if k_line is not None else "",
+                    "Over_Price": over_price if over_price is not None else "",
+                    "Under_Price": under_price if under_price is not None else "",
+                    "K9": round(k9, 2) if k9 is not None else "",
+                    "IP": round(ip, 3) if ip is not None else "",
+                    "SO": so if so is not None else "",
+                    "Games_Started": games_started if games_started is not None else "",
+                    "Games_Pitched": games_pitched if games_pitched is not None else "",
+                    "Projected_IP": round(projected_ip, 2) if projected_ip is not None else "",
+                    "Projected_Ks": round(projected_ks, 2) if projected_ks is not None else "",
+                    "K_Edge": round(k_edge, 2) if k_edge is not None else "",
+                    "K_Pick": k_pick,
+                    "K_Fired": k_fired,
+                    "No_Fire_K_Reason": no_fire_k_reason,
+                    "Prop_Last_Update": prop.get("last_update") if prop else "",
+                    "Canonical_Event_ID": prop.get("canonical_event_id") if prop else "",
+                })
+
+        pitcher_k_board_cols = [
+            "Game", "Pitcher", "Team", "Opponent", "Bookmaker", "K_Line",
+            "Over_Price", "Under_Price", "K9", "IP", "SO", "Games_Started",
+            "Games_Pitched", "Projected_IP", "Projected_Ks", "K_Edge",
+            "K_Pick", "K_Fired", "No_Fire_K_Reason", "Prop_Last_Update",
+            "Canonical_Event_ID",
+        ]
+        pitcher_k_board_path = f"{ARCHIVE_DIR}/pitcher_k_board_{archive_date}.csv"
+        pitcher_k_board_df = pd.DataFrame(k_board_rows, columns=pitcher_k_board_cols)
+        pitcher_k_board_df.to_csv(pitcher_k_board_path, index=False)
+        print(f"💾 Saved {len(k_board_rows)} pitcher-K row(s) → {pitcher_k_board_path}")
+
         # NEW: readable pregame picks board CSV. Sibling output to
         # predictions_*.csv and client_predictions_*.csv; does not replace or
         # alter either. Uses the same eligible_export rows and the same
