@@ -44,6 +44,17 @@ PREFERRED_BOOKS: List[str] = [
 SOURCE_LABEL = "the_odds_api"
 _REQUEST_TIMEOUT_S = 15
 
+FULL_GAME_BOOK_PRIORITY: List[str] = [
+    "fanduel",
+    "draftkings",
+    "betmgm",
+    "betrivers",
+    "lowvig",
+    "betonlineag",
+    "mybookieag",
+    "bovada",
+]
+
 
 def _get_api_key() -> Optional[str]:
     """Return THE_ODDS_API_KEY from env, whitespace-stripped, or None when unset/empty.
@@ -127,6 +138,95 @@ def _parse_point(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_american_price(value: Any) -> Optional[int]:
+    price = _parse_price(value)
+    if price is None:
+        return None
+    return int(price)
+
+
+def _canonical_commence_time(commence_time: Any) -> str:
+    if not commence_time:
+        return ""
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return str(commence_time).strip()
+
+
+def _parse_totals_market(book: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(book, dict):
+        return None
+    for market in book.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        if (market.get("key") or "").strip().lower() != OU_TOTALS_MARKET:
+            continue
+        over_outcome = None
+        under_outcome = None
+        for outcome in market.get("outcomes") or []:
+            if not isinstance(outcome, dict):
+                continue
+            name = (outcome.get("name") or "").strip().lower()
+            if name == "over":
+                over_outcome = outcome
+            elif name == "under":
+                under_outcome = outcome
+        if over_outcome is None or under_outcome is None:
+            continue
+        over_point = _parse_point(over_outcome.get("point"))
+        under_point = _parse_point(under_outcome.get("point"))
+        over_price = _parse_american_price(over_outcome.get("price"))
+        under_price = _parse_american_price(under_outcome.get("price"))
+        if (
+            over_point is None
+            or under_point is None
+            or over_point != under_point
+            or over_price is None
+            or under_price is None
+        ):
+            continue
+        return {
+            "total_line": over_point,
+            "over_juice": over_price,
+            "under_juice": under_price,
+        }
+    return None
+
+
+def _parse_h2h_market(book: Dict[str, Any], home_team: str, away_team: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(book, dict):
+        return None
+    home_norm = normalize_team_name(home_team or "")
+    away_norm = normalize_team_name(away_team or "")
+    ml_home = None
+    ml_away = None
+    for market in book.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        if (market.get("key") or "").strip().lower() != "h2h":
+            continue
+        for outcome in market.get("outcomes") or []:
+            if not isinstance(outcome, dict):
+                continue
+            outcome_norm = normalize_team_name(str(outcome.get("name") or ""))
+            price = _parse_american_price(outcome.get("price"))
+            if price is None:
+                continue
+            if outcome_norm == home_norm:
+                ml_home = price
+            elif outcome_norm == away_norm:
+                ml_away = price
+    if ml_home is None or ml_away is None:
+        return None
+    return {"ml_home": ml_home, "ml_away": ml_away}
 
 
 def _select_preferred_f5_book(event_odds: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -312,6 +412,107 @@ def fetch_ou_totals_by_game() -> Dict[str, List[Dict[str, Any]]]:
                 })
 
     return mapping
+
+
+def fetch_full_game_odds_map() -> Dict[str, Dict[str, Any]]:
+    """Fetch The Odds API full-game h2h + totals in core.odds_api-compatible shape.
+
+    Intended as a fail-soft fallback when the Parlay main odds feed has zero usable
+    scheduled-game real totals. Does not invent default totals/prices.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning("THE_ODDS_API_KEY not set; fetch_full_game_odds_map returning {}.")
+        return {}
+
+    url = f"{THE_ODDS_API_BASE}/odds"
+    params = {
+        "apiKey": api_key,
+        "markets": "h2h,totals",
+        "regions": DEFAULT_REGIONS,
+        "oddsFormat": DEFAULT_ODDS_FORMAT,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT_S)
+        r.raise_for_status()
+        body = r.json()
+    except Exception as e:
+        logger.warning("the_odds_api fetch_full_game_odds_map failed: %s", e)
+        return {}
+    if not isinstance(body, list):
+        logger.warning(
+            "the_odds_api fetch_full_game_odds_map unexpected payload type: %s",
+            type(body).__name__,
+        )
+        return {}
+
+    odds_map: Dict[str, Dict[str, Any]] = {}
+    book_rank = {book: i for i, book in enumerate(FULL_GAME_BOOK_PRIORITY)}
+    for event in body:
+        if not isinstance(event, dict):
+            continue
+        away_team = str(event.get("away_team") or "").strip()
+        home_team = str(event.get("home_team") or "").strip()
+        if not away_team or not home_team:
+            continue
+        coarse_key = _event_game_key(event)
+        if not coarse_key:
+            continue
+        commence_time = _canonical_commence_time(event.get("commence_time"))
+        event_key = f"{coarse_key} @@ {commence_time}" if commence_time else coarse_key
+        bookmakers = event.get("bookmakers") or []
+        if not isinstance(bookmakers, list):
+            continue
+
+        totals_choice = None
+        totals_book = ""
+        ml_choice = None
+        ml_book = ""
+        for book in sorted(
+            [b for b in bookmakers if isinstance(b, dict)],
+            key=lambda b: (
+                book_rank.get((b.get("key") or "").strip().lower(), len(FULL_GAME_BOOK_PRIORITY)),
+                (b.get("key") or "").strip().lower(),
+            ),
+        ):
+            book_key = (book.get("key") or "").strip().lower()
+            if book_key not in book_rank:
+                continue
+            if totals_choice is None:
+                parsed_totals = _parse_totals_market(book)
+                if parsed_totals is not None:
+                    totals_choice = parsed_totals
+                    totals_book = book_key
+            if ml_choice is None:
+                parsed_ml = _parse_h2h_market(book, home_team, away_team)
+                if parsed_ml is not None:
+                    ml_choice = parsed_ml
+                    ml_book = book_key
+            if totals_choice is not None and ml_choice is not None:
+                break
+
+        if totals_choice is None and ml_choice is None:
+            continue
+
+        row = {
+            "total_line": None,
+            "over_juice": None,
+            "under_juice": None,
+            "ml_home": None,
+            "ml_away": None,
+            "book": totals_book,
+            "ml_book": ml_book,
+            "_coarse_game_key": coarse_key,
+            "_commence_time": commence_time,
+            "_source": SOURCE_LABEL,
+        }
+        if totals_choice is not None:
+            row.update(totals_choice)
+        if ml_choice is not None:
+            row.update(ml_choice)
+        odds_map[event_key] = row
+
+    return odds_map
 
 
 def fetch_f5_totals_by_game() -> Dict[str, Dict[str, Any]]:

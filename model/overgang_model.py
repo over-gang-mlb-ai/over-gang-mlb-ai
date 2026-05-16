@@ -46,7 +46,11 @@ from core.ml_predictor import get_team_ml_data, calculate_team_win_probability
 from core.public_betting_loader import normalize_team_name
 from core.kelly_utils import calculate_kelly_units
 from core.odds_api import fetch_mlb_odds, fetch_ou_sharp_totals, get_game_odds
-from core.the_odds_api import fetch_f5_totals_by_game, fetch_ou_totals_by_game
+from core.the_odds_api import (
+    fetch_f5_totals_by_game,
+    fetch_full_game_odds_map,
+    fetch_ou_totals_by_game,
+)
 from core.batters import Batters, LineupImpact, BATTER_DF
 from core.weather_adjustment import (
     WEATHER_RUNS_MULT_MAX,
@@ -1453,7 +1457,11 @@ class VegasLines:
             )
             is_fallback_line = not has_real_total
             if match_found:
-                source = "fallback (scrambled book)" if book_scrambled else ("8.5 fallback" if is_fallback_line else "parlay_api")
+                source = (
+                    "fallback (scrambled book)"
+                    if book_scrambled
+                    else ("8.5 fallback" if is_fallback_line else (row.get("_source") or "parlay_api"))
+                )
             else:
                 source = "8.5 fallback (no match in odds_map)"
             info["_source"] = source
@@ -2633,6 +2641,32 @@ def run_predictions():
         print(f"✅ Found {len(games)} games for {today_mt} MT")
         for g in games:
             print("•", f"{g['away_name']} @ {g['home_name']}")
+
+        parlay_usable_non_manual_totals = _preflight_count_games_with_non_manual_real_totals(games, odds_map)
+        print(f"[ODDS] Parlay usable non-manual scheduled totals: {parlay_usable_non_manual_totals}/{len(games)}")
+        if games and parlay_usable_non_manual_totals == 0:
+            toa_fallback_map = fetch_full_game_odds_map() or {}
+            print(f"[ODDS] The Odds API fallback rows: {len(toa_fallback_map)}")
+            toa_trusted_total_source_map = {}
+            for k, v in toa_fallback_map.items():
+                if _is_trusted_total_row(v):
+                    toa_trusted_total_source_map[k] = dict(v)
+                    toa_trusted_total_source_map[k]["_trusted_source"] = "the_odds_api"
+            toa_trusted_non_manual_totals = _preflight_count_games_with_non_manual_real_totals(
+                games, toa_trusted_total_source_map
+            )
+            print(
+                "[ODDS] The Odds API fallback trusted scheduled totals: "
+                f"{toa_trusted_non_manual_totals}/{len(games)} "
+                f"(trusted keys={len(toa_trusted_total_source_map)})"
+            )
+            if toa_fallback_map and toa_trusted_non_manual_totals > 0:
+                odds_map = dict(toa_fallback_map)
+                trusted_total_source_map = toa_trusted_total_source_map
+                odds_source = "the_odds_api_fallback"
+                print("[ODDS] Using The Odds API full-game odds fallback for live odds_map")
+            else:
+                print("[ODDS] The Odds API fallback had no trusted scheduled totals; preserving Parlay/projection-only path")
 
         # Trusted total lane visibility (per slate game)
         for g in games:
