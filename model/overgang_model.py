@@ -4904,6 +4904,79 @@ def run_predictions():
             caption=f"🎯 Over Gang pitcher K board — {datetime.now().strftime('%b %d')}",
         )
 
+        def _f5_board_float(v):
+            try:
+                if v is None or str(v).strip() == "":
+                    return None
+                f = float(v)
+                if f != f:
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
+        f5_board_cols = [
+            "Game_Date", "Game_Time_MT", "Game", "Venue",
+            "Away_Pitcher", "Home_Pitcher",
+            "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
+            "F5_Market_Line", "F5_Edge", "F5_Pick",
+            "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible",
+            "F5_Over_Juice", "F5_Under_Juice", "F5_Source", "F5_Book",
+            "F5_Market_OK", "F5_No_Line_Reason",
+            "OU_Full_Game_Under_Reliever_Depth_Risk",
+            "Data_Quality_Flag", "Model_Notes",
+        ]
+        f5_board_rows = []
+        for _r in eligible_export:
+            _f5_projected = _f5_board_float(_r.get("F5_Projected_Total"))
+            _f5_line = _f5_board_float(_r.get("F5_Market_Line"))
+            _f5_edge = ""
+            _f5_pick = ""
+            if _f5_projected is not None and _f5_line is not None:
+                _f5_edge_val = round(_f5_projected - _f5_line, 2)
+                _f5_edge = _f5_edge_val
+                if _f5_edge_val > 0:
+                    _f5_pick = "OVER"
+                elif _f5_edge_val < 0:
+                    _f5_pick = "UNDER"
+
+            f5_board_rows.append({
+                "Game_Date": _r.get("Game_Date", ""),
+                "Game_Time_MT": _r.get("Game_Time_MT", ""),
+                "Game": _r.get("Game", ""),
+                "Venue": _r.get("Venue", ""),
+                "Away_Pitcher": _r.get("Away_Pitcher", ""),
+                "Home_Pitcher": _r.get("Home_Pitcher", ""),
+                "F5_Projected_Total": _r.get("F5_Projected_Total", ""),
+                "F5_Away_Runs": _r.get("F5_Away_Runs", ""),
+                "F5_Home_Runs": _r.get("F5_Home_Runs", ""),
+                "F5_Market_Line": _r.get("F5_Market_Line", ""),
+                "F5_Edge": _f5_edge,
+                "F5_Pick": _f5_pick,
+                "F5_Model_Side": _r.get("F5_Model_Side", ""),
+                "F5_Starter_Lean": _r.get("F5_Starter_Lean", ""),
+                "F5_Eligible": _r.get("F5_Eligible", ""),
+                "F5_Over_Juice": _r.get("F5_Over_Juice", ""),
+                "F5_Under_Juice": _r.get("F5_Under_Juice", ""),
+                "F5_Source": _r.get("F5_Source", ""),
+                "F5_Book": _r.get("F5_Book", ""),
+                "F5_Market_OK": _r.get("F5_Market_OK", ""),
+                "F5_No_Line_Reason": _r.get("F5_No_Line_Reason", ""),
+                "OU_Full_Game_Under_Reliever_Depth_Risk": _r.get(
+                    "OU_Full_Game_Under_Reliever_Depth_Risk", ""
+                ),
+                "Data_Quality_Flag": _r.get("Data_Quality_Flag", ""),
+                "Model_Notes": _r.get("Model_Notes", ""),
+            })
+        f5_board_path = f"{ARCHIVE_DIR}/f5_board_{archive_date}.csv"
+        f5_board_df = pd.DataFrame(f5_board_rows, columns=f5_board_cols)
+        f5_board_df.to_csv(f5_board_path, index=False)
+        print(f"💾 Saved {len(f5_board_rows)} F5 row(s) → {f5_board_path}")
+        send_telegram_file(
+            f5_board_path,
+            caption=f"⚾ Over Gang F5 board — {datetime.now().strftime('%b %d')}",
+        )
+
         # NEW: readable pregame picks board CSV. Sibling output to
         # predictions_*.csv and client_predictions_*.csv; does not replace or
         # alter either. Uses the same eligible_export rows and the same
