@@ -2,49 +2,119 @@
 """
 Build pitcher strikeout-rate stats for K props.
 
-Reads the existing real source file that contains K/9 and writes a standalone
-data/pitcher_k_stats.csv without changing the production pitcher_stats.csv.
+Reads real MLB StatsAPI season pitching strikeout fields and writes a
+standalone data/pitcher_k_stats.csv without changing production pitcher_stats.csv.
 """
 
 import os
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import pandas as pd
+import requests
 
 
-SOURCE_FILE = "data/pitcher_stats_with_xera_with_collumns.csv"
+STATS_URL = "https://statsapi.mlb.com/api/v1/stats"
 OUTFILE = "data/pitcher_k_stats.csv"
-SOURCE_LABEL = os.path.basename(SOURCE_FILE)
+SOURCE_LABEL = "mlb_statsapi_pitching"
+DEFAULT_SEASON = datetime.now().year
 
 
-def build_pitcher_k_stats(source_file: str = SOURCE_FILE, outfile: str = OUTFILE) -> pd.DataFrame:
-    if not os.path.exists(source_file):
-        raise FileNotFoundError(f"Required source file not found: {source_file}")
+def ip_to_float(ip_raw) -> float | None:
+    """Parse MLB innings strings like 4.2 as 4 + 2/3, not 4.2 decimal."""
+    if ip_raw in (None, ""):
+        return None
+    try:
+        s = str(ip_raw).strip()
+        if not s:
+            return None
+        if "." in s:
+            whole, frac = s.split(".", 1)
+        else:
+            whole, frac = s, "0"
+        frac_map = {"0": 0.0, "1": 1.0 / 3.0, "2": 2.0 / 3.0}
+        if frac not in frac_map:
+            return None
+        return float(int(whole or 0)) + frac_map[frac]
+    except (TypeError, ValueError):
+        return None
 
-    df = pd.read_csv(source_file)
-    df.columns = [str(c).strip() for c in df.columns]
 
-    required = {"Name", "K/9"}
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError(f"{source_file} missing required column(s): {missing}")
+def _float_or_none(val) -> float | None:
+    if val in (None, ""):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
-    out = pd.DataFrame()
-    out["Name"] = df["Name"].astype(str).str.strip()
-    if "Team" in df.columns:
-        out["Team"] = df["Team"]
 
-    out["IP"] = pd.to_numeric(df["IP"], errors="coerce") if "IP" in df.columns else pd.NA
-    out["K9"] = pd.to_numeric(df["K/9"], errors="coerce")
+def fetch_pitching_splits(season: int = DEFAULT_SEASON) -> list:
+    params = {
+        "stats": "season",
+        "group": "pitching",
+        "season": season,
+        "gameType": "R",
+        "limit": 1000,
+        "playerPool": "ALL_CURRENT",
+    }
+    headers = {"User-Agent": "over-gang-mlb-ai/1.0"}
+    print(f"Fetching MLB StatsAPI pitching K stats: {STATS_URL}?{urlencode(params)}")
+    resp = requests.get(STATS_URL, params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
+    body = resp.json()
+    stats_list = body.get("stats") if isinstance(body, dict) else None
+    if not isinstance(stats_list, list) or not stats_list:
+        raise ValueError("MLB StatsAPI returned no stats array.")
+    splits = stats_list[0].get("splits") if isinstance(stats_list[0], dict) else []
+    if not isinstance(splits, list):
+        raise ValueError("MLB StatsAPI returned no pitching splits.")
+    return splits
 
-    if "WHIP" in df.columns:
-        out["WHIP"] = pd.to_numeric(df["WHIP"], errors="coerce")
-    if "xERA" in df.columns:
-        out["xERA"] = pd.to_numeric(df["xERA"], errors="coerce")
 
-    out = out[(out["Name"] != "") & out["K9"].notna()].copy()
-    out["Source"] = SOURCE_LABEL
-    out["Updated_At"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def build_pitcher_k_stats(outfile: str = OUTFILE, season: int = DEFAULT_SEASON) -> pd.DataFrame:
+    rows = []
+    updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    for split in fetch_pitching_splits(season):
+        if not isinstance(split, dict):
+            continue
+        player = split.get("player") or {}
+        stat = split.get("stat") or {}
+        name = (player.get("fullName") or "").strip()
+        if not name:
+            continue
+        try:
+            mlb_id = int(player.get("id"))
+        except (TypeError, ValueError):
+            continue
+
+        ip = ip_to_float(stat.get("inningsPitched"))
+        so = _float_or_none(stat.get("strikeOuts"))
+        k9 = _float_or_none(stat.get("strikeoutsPer9Inn"))
+        if k9 is None and so is not None and ip is not None and ip > 0:
+            k9 = so / ip * 9.0
+        if k9 is None:
+            continue
+
+        rows.append({
+            "mlb_id": mlb_id,
+            "Name": name,
+            "IP": round(ip, 3) if ip is not None else pd.NA,
+            "SO": int(so) if so is not None else pd.NA,
+            "K9": round(float(k9), 2),
+            "Batters_Faced": _float_or_none(stat.get("battersFaced")),
+            "Games_Started": _float_or_none(stat.get("gamesStarted")),
+            "Games_Pitched": _float_or_none(stat.get("gamesPitched")),
+            "ERA": _float_or_none(stat.get("era")),
+            "WHIP": _float_or_none(stat.get("whip")),
+            "Source": SOURCE_LABEL,
+            "Updated_At": updated_at,
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        raise ValueError("No pitcher K rows produced from MLB StatsAPI.")
+    out = out[out["Name"].astype(str).str.strip().ne("") & out["K9"].notna()].copy()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     tmp_path = f"{outfile}.tmp"
