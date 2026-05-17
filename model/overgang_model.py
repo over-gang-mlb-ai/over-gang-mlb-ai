@@ -5036,6 +5036,143 @@ def run_predictions():
             caption=f"⚾ Over Gang F5 board — {datetime.now().strftime('%b %d')}",
         )
 
+        def _ou_prob_board_float(v):
+            try:
+                if v is None or str(v).strip() == "":
+                    return None
+                f = float(v)
+                if f != f:
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
+        def _ou_prob_board_bool(v) -> bool:
+            return str(v).strip().lower() in ("true", "1", "yes")
+
+        def _ou_prob_board_clean_data(v) -> bool:
+            if v is None:
+                return True
+            s = str(v).strip()
+            return s == "" or s.lower() == "nan"
+
+        def _ou_prob_support_bucket(prob_edge):
+            if prob_edge is None:
+                return ""
+            if prob_edge <= 0:
+                return "prob_edge_negative_or_zero"
+            if prob_edge < 0.05:
+                return "prob_edge_0_00_to_0_05"
+            if prob_edge <= 0.10:
+                return "prob_edge_0_05_to_0_10"
+            if prob_edge <= 0.15:
+                return "prob_edge_0_10_to_0_15"
+            if prob_edge <= 0.20:
+                return "prob_edge_0_15_to_0_20"
+            return "prob_edge_0_20_plus"
+
+        ou_prob_edge_board_cols = [
+            "Game_Date", "Datetime", "Game", "Venue", "Prediction",
+            "Projected_Total", "Bet_Line", "OU_Edge", "OU_Confidence",
+            "OU_Fired", "Fired_Play",
+            "OU_Implied_Prob_Pick", "OU_True_Prob_Pick", "OU_Prob_Edge",
+            "OU_Prob_Edge_Side", "OU_Prob_Method", "OU_Prob_Juice_Source",
+            "OU_Prob_Book", "OU_Prob_Over_Juice", "OU_Prob_Under_Juice",
+            "OU_Prob_Calibration_Flag", "OU_Sharpness_OK", "OU_Sharp_Direction",
+            "OU_Sharp_Gap", "SHARP_OU_Delta", "Projection_Cap_Flag",
+            "Total_Is_Real", "Data_Quality_Flag", "No_Fire_OU_Reason",
+            "OU_Full_Game_Under_Reliever_Depth_Risk",
+            "OU_Under_Reliever_Depth_Block",
+            "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
+            "Model_Notes", "OU_Prob_Support_Candidate",
+            "OU_Prob_Edge_Sweet_Spot", "OU_Prob_Support_Bucket",
+            "OU_Prob_Support_Reason",
+        ]
+        ou_prob_edge_board_rows = []
+        for _r in eligible_export:
+            _prob_edge = _ou_prob_board_float(_r.get("OU_Prob_Edge"))
+            _ou_edge = _ou_prob_board_float(_r.get("OU_Edge"))
+            _total_is_real = _ou_prob_board_bool(_r.get("Total_Is_Real"))
+            _projection_cap = _ou_prob_board_bool(_r.get("Projection_Cap_Flag"))
+            _clean_data = _ou_prob_board_clean_data(_r.get("Data_Quality_Flag"))
+            _support_candidate = bool(
+                _total_is_real
+                and not _projection_cap
+                and _clean_data
+                and _prob_edge is not None
+                and _prob_edge >= 0.05
+                and _ou_edge is not None
+                and abs(_ou_edge) < 1.0
+            )
+            _sweet_spot = bool(
+                _prob_edge is not None
+                and 0.05 <= _prob_edge <= 0.10
+            )
+            _support_reason = ""
+            if _support_candidate:
+                _support_reason = "clean_prob_edge_thin_raw_edge"
+                if _sweet_spot:
+                    _support_reason += "|sweet_spot"
+
+            ou_prob_edge_board_rows.append({
+                "Game_Date": _r.get("Game_Date", ""),
+                "Datetime": _r.get("Datetime", ""),
+                "Game": _r.get("Game", ""),
+                "Venue": _r.get("Venue", ""),
+                "Prediction": _r.get("Prediction", ""),
+                "Projected_Total": _r.get("Projected_Total", ""),
+                "Bet_Line": _r.get("Bet_Line", ""),
+                "OU_Edge": _r.get("OU_Edge", ""),
+                "OU_Confidence": _r.get("OU_Confidence", ""),
+                "OU_Fired": _r.get("OU_Fired", ""),
+                "Fired_Play": _r.get("Fired_Play", ""),
+                "OU_Implied_Prob_Pick": _r.get("OU_Implied_Prob_Pick", ""),
+                "OU_True_Prob_Pick": _r.get("OU_True_Prob_Pick", ""),
+                "OU_Prob_Edge": _r.get("OU_Prob_Edge", ""),
+                "OU_Prob_Edge_Side": _r.get("OU_Prob_Edge_Side", ""),
+                "OU_Prob_Method": _r.get("OU_Prob_Method", ""),
+                "OU_Prob_Juice_Source": _r.get("OU_Prob_Juice_Source", ""),
+                "OU_Prob_Book": _r.get("OU_Prob_Book", ""),
+                "OU_Prob_Over_Juice": _r.get("OU_Prob_Over_Juice", ""),
+                "OU_Prob_Under_Juice": _r.get("OU_Prob_Under_Juice", ""),
+                "OU_Prob_Calibration_Flag": _r.get("OU_Prob_Calibration_Flag", ""),
+                "OU_Sharpness_OK": _r.get("OU_Sharpness_OK", ""),
+                "OU_Sharp_Direction": _r.get("OU_Sharp_Direction", ""),
+                "OU_Sharp_Gap": _r.get("OU_Sharp_Gap", ""),
+                "SHARP_OU_Delta": _r.get("SHARP_OU_Delta", ""),
+                "Projection_Cap_Flag": _r.get("Projection_Cap_Flag", ""),
+                "Total_Is_Real": _r.get("Total_Is_Real", ""),
+                "Data_Quality_Flag": _r.get("Data_Quality_Flag", ""),
+                "No_Fire_OU_Reason": _r.get("No_Fire_OU_Reason", ""),
+                "OU_Full_Game_Under_Reliever_Depth_Risk": _r.get(
+                    "OU_Full_Game_Under_Reliever_Depth_Risk", ""
+                ),
+                "OU_Under_Reliever_Depth_Block": _r.get(
+                    "OU_Under_Reliever_Depth_Block", False
+                ),
+                "Away_Reliever_Depth_Risk": _r.get("Away_Reliever_Depth_Risk", ""),
+                "Home_Reliever_Depth_Risk": _r.get("Home_Reliever_Depth_Risk", ""),
+                "Model_Notes": _r.get("Model_Notes", ""),
+                "OU_Prob_Support_Candidate": _support_candidate,
+                "OU_Prob_Edge_Sweet_Spot": _sweet_spot,
+                "OU_Prob_Support_Bucket": _ou_prob_support_bucket(_prob_edge),
+                "OU_Prob_Support_Reason": _support_reason,
+            })
+        ou_prob_edge_board_path = f"{ARCHIVE_DIR}/ou_prob_edge_board_{archive_date}.csv"
+        ou_prob_edge_board_df = pd.DataFrame(
+            ou_prob_edge_board_rows,
+            columns=ou_prob_edge_board_cols,
+        )
+        ou_prob_edge_board_df.to_csv(ou_prob_edge_board_path, index=False)
+        print(
+            f"💾 Saved {len(ou_prob_edge_board_rows)} OU prob-edge row(s) "
+            f"→ {ou_prob_edge_board_path}"
+        )
+        send_telegram_file(
+            ou_prob_edge_board_path,
+            caption=f"📈 Over Gang OU prob-edge board — {datetime.now().strftime('%b %d')}",
+        )
+
         # NEW: readable pregame picks board CSV. Sibling output to
         # predictions_*.csv and client_predictions_*.csv; does not replace or
         # alter either. Uses the same eligible_export rows and the same
