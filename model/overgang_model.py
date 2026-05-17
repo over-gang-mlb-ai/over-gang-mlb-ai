@@ -4057,7 +4057,7 @@ def run_predictions():
                 and (not _fallback_used_from_path(away_path))
                 and (not _fallback_used_from_path(home_path))
             )
-            ou_fired = standard_ou_fire or clean_strong_ou
+            ou_fire_candidate = standard_ou_fire or clean_strong_ou
             _ou_pick = proj.get("pick", "")
             _edge_f = float(edge)
             ou_moderate_over_candidate = (
@@ -4075,17 +4075,36 @@ def run_predictions():
                 _bl = float(game_data.get("Bet_Line", 99))
             except (TypeError, ValueError):
                 _bl = 99.0
+            away_reliever_depth_risk = str(
+                away_reliever_metrics.get("depth_risk", "")
+            ).strip().lower()
+            home_reliever_depth_risk = str(
+                home_reliever_metrics.get("depth_risk", "")
+            ).strip().lower()
             ou_full_game_under_reliever_depth_risk = bool(
-                ou_fired
+                ou_fire_candidate
                 and has_real_total
                 and (_ou_pick in ("UNDER", "LEAN_UNDER"))
                 and (_bl <= 8.5)
                 and (float(edge) <= -1.5)
                 and (
-                    away_reliever_metrics.get("depth_risk") == "high"
-                    or home_reliever_metrics.get("depth_risk") == "high"
+                    away_reliever_depth_risk == "high"
+                    or home_reliever_depth_risk == "high"
                 )
             )
+            under_reliever_depth_block = bool(
+                ou_fire_candidate
+                and _ou_pick == "UNDER"
+                and has_real_total
+                and (
+                    bool(ou_full_game_under_reliever_depth_risk)
+                    or (
+                        away_reliever_depth_risk == "high"
+                        and home_reliever_depth_risk == "high"
+                    )
+                )
+            )
+            ou_fired = bool(ou_fire_candidate and not under_reliever_depth_block)
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ou_clean_strong_carveout" if (clean_strong_ou and not standard_ou_fire) else None,
@@ -4098,6 +4117,9 @@ def run_predictions():
                 "ou_full_game_under_reliever_depth_risk"
                 if ou_full_game_under_reliever_depth_risk
                 else None,
+                "ou_under_reliever_depth_block"
+                if under_reliever_depth_block
+                else None,
             ]))
             game_data["Fired_Play"] = ou_fired
             game_data["OU_Fired"] = ou_fired
@@ -4107,6 +4129,7 @@ def run_predictions():
             game_data["OU_Full_Game_Under_Reliever_Depth_Risk"] = (
                 ou_full_game_under_reliever_depth_risk
             )
+            game_data["OU_Under_Reliever_Depth_Block"] = under_reliever_depth_block
             if ou_fired:
                 no_fire_ou = ""
             else:
@@ -4118,6 +4141,8 @@ def run_predictions():
                     no_fire_ou = "projection_cap"
                 elif not has_real_total:
                     no_fire_ou = "fallback_line_used"
+                elif under_reliever_depth_block:
+                    no_fire_ou = "under_reliever_depth_risk"
                 elif abs(edge) < 1.0:
                     no_fire_ou = "edge_too_small"
                 elif confidence < fire_threshold:
@@ -4611,7 +4636,7 @@ def run_predictions():
         "Total_Line_Source", "Market_Source", "Captured_Book", "Captured_Total", "Captured_ML_Home", "Captured_ML_Away",
         "Fired_Play", "OU_Fired", "ML_Fired", "Trigger_Tags",
         "OU_Moderate_Over_Candidate", "OU_Tail_Over_Risk",
-        "OU_Full_Game_Under_Reliever_Depth_Risk",
+        "OU_Full_Game_Under_Reliever_Depth_Risk", "OU_Under_Reliever_Depth_Block",
         "No_Fire_Reason", "No_Fire_OU_Reason", "No_Fire_ML_Reason",
         "Model_Notes",
         "Confidence_Tier", "Edge_Tier", "Bet_Type", "Side", "Play_Status", "Bettable",
@@ -5064,6 +5089,7 @@ def run_predictions():
             "Away_Reliever_Bad_WHIP_Count", "Home_Reliever_Bad_WHIP_Count",
             "Away_Reliever_Recent_Bad_Arm_Count", "Home_Reliever_Recent_Bad_Arm_Count",
             "OU_Full_Game_Under_Reliever_Depth_Risk",
+            "OU_Under_Reliever_Depth_Block",
         ]
         picks_board_tail_cols = ["Model_Notes", "Data_Quality_Flag"]
         picks_board_cols = (
