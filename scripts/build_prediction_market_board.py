@@ -34,6 +34,8 @@ ARCHIVE_DIR = ROOT / "archive"
 PARLAY_BASE = "https://api.parlay-api.com/v1"
 PARLAY_ODDS_URL = f"{PARLAY_BASE}/sports/baseball_mlb/odds"
 PARLAY_EVENT_MARKETS_URL = f"{PARLAY_BASE}/event-markets/search"
+THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+THE_ODDS_API_MLB_ODDS_URL = f"{THE_ODDS_API_BASE}/sports/baseball_mlb/odds"
 REQUEST_TIMEOUT_S = 20
 SEARCH_SLEEP_S = 0.5
 RATE_LIMIT_SLEEP_S = 3.0
@@ -102,6 +104,14 @@ def _load_env() -> None:
 
 def _get_parlay_api_key() -> Optional[str]:
     raw = os.getenv("ODDS_API_KEY")
+    if raw is None:
+        return None
+    key = str(raw).strip()
+    return key or None
+
+
+def _get_the_odds_api_key() -> Optional[str]:
+    raw = os.getenv("THE_ODDS_API_KEY")
     if raw is None:
         return None
     key = str(raw).strip()
@@ -308,6 +318,87 @@ def fetch_pinnacle_odds_map(api_key: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def fetch_the_odds_api_pinnacle_totals(api_key: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """Return mapping of normalized 'away @ home' -> Pinnacle totals from The Odds API."""
+    if not api_key:
+        print(
+            "THE_ODDS_API_KEY missing; skipping The Odds API Pinnacle fallback fetch.",
+            file=sys.stderr,
+        )
+        return {}
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": "totals",
+        "oddsFormat": "american",
+        "bookmakers": "pinnacle",
+    }
+    try:
+        r = requests.get(
+            THE_ODDS_API_MLB_ODDS_URL,
+            params=params,
+            timeout=REQUEST_TIMEOUT_S,
+            headers={"Accept": "application/json"},
+        )
+        r.raise_for_status()
+        body = r.json()
+    except Exception as e:
+        print(f"The Odds API Pinnacle totals fetch failed: {e}", file=sys.stderr)
+        return {}
+
+    if not isinstance(body, list):
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for event in body:
+        if not isinstance(event, dict):
+            continue
+        away = (event.get("away_team") or "").strip()
+        home = (event.get("home_team") or "").strip()
+        if not away or not home:
+            continue
+        game_key = f"{_normalize_team(away)} @ {_normalize_team(home)}"
+        if not game_key.strip(" @ "):
+            continue
+
+        pinnacle_book = None
+        for bm in event.get("bookmakers") or []:
+            if isinstance(bm, dict) and str(bm.get("key") or "").strip().lower() == "pinnacle":
+                pinnacle_book = bm
+                break
+        if pinnacle_book is None:
+            continue
+
+        pinn_total = pinn_over = pinn_under = None
+        for market in pinnacle_book.get("markets") or []:
+            if not isinstance(market, dict) or market.get("key") != "totals":
+                continue
+            for outcome in market.get("outcomes") or []:
+                if not isinstance(outcome, dict):
+                    continue
+                name = (outcome.get("name") or "").strip().lower()
+                if name not in ("over", "under"):
+                    continue
+                point = _parse_float(outcome.get("point"))
+                price = _parse_int(outcome.get("price"))
+                if point is None or price is None:
+                    continue
+                pinn_total = point
+                if name == "over":
+                    pinn_over = price
+                else:
+                    pinn_under = price
+        if pinn_total is not None and pinn_over is not None and pinn_under is not None:
+            out[game_key] = {
+                "pinnacle_total": pinn_total,
+                "pinnacle_over_juice": pinn_over,
+                "pinnacle_under_juice": pinn_under,
+                "source": "the_odds_api_pinnacle",
+                "last_update": pinnacle_book.get("last_update"),
+            }
+    return out
+
+
 def _build_pm_query(away_team: str, home_team: str) -> str:
     return f"{away_team} {home_team} O/U".strip()
 
@@ -498,6 +589,7 @@ def build_row(
     csv_row: Dict[str, Any],
     pinnacle_odds_by_game: Dict[str, Dict[str, Any]],
     api_key: str,
+    toa_pinnacle_odds_by_game: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {col: "" for col in OUTPUT_COLUMNS}
     for col in CARRY_FORWARD_COLUMNS:
@@ -596,6 +688,14 @@ def build_row(
         pinnacle_under = pinn_entry.get("pinnacle_under_juice")
         if pinnacle_over is not None and pinnacle_under is not None:
             sharp_source = "pinnacle"
+    if sharp_source == "missing" and toa_pinnacle_odds_by_game:
+        toa_entry = toa_pinnacle_odds_by_game.get(game_key)
+        if toa_entry is not None:
+            pinnacle_total = toa_entry.get("pinnacle_total")
+            pinnacle_over = toa_entry.get("pinnacle_over_juice")
+            pinnacle_under = toa_entry.get("pinnacle_under_juice")
+            if pinnacle_over is not None and pinnacle_under is not None:
+                sharp_source = "the_odds_api_pinnacle"
     if sharp_source == "missing":
         csv_over = _parse_int(csv_row.get("Over_Juice"))
         csv_under = _parse_int(csv_row.get("Under_Juice"))
@@ -650,6 +750,8 @@ def build_row(
         signal_parts.append("nearest_total_match")
     if sharp_source == "pinnacle":
         signal_parts.append("sharp_source_pinnacle")
+    elif sharp_source == "the_odds_api_pinnacle":
+        signal_parts.append("sharp_source_the_odds_api_pinnacle")
     elif sharp_source == "captured_book_fallback":
         signal_parts.append("sharp_source_fallback")
     if over_gap is not None:
@@ -684,6 +786,7 @@ def _print_summary(
     matched_nearest = sum(1 for r in rows if r.get("PM_Line_Match_Type") == "nearest_within_0_5" and r.get("PM_Match_Status") == "matched")
     no_pm_match = sum(1 for r in rows if r.get("PM_Match_Status") in {"no_pm_match", "no_matching_total"})
     sharp_pinn = sum(1 for r in rows if r.get("Sharp_Source") == "pinnacle")
+    sharp_toa_pinn = sum(1 for r in rows if r.get("Sharp_Source") == "the_odds_api_pinnacle")
     sharp_fb = sum(1 for r in rows if r.get("Sharp_Source") == "captured_book_fallback")
     sharp_missing = sum(1 for r in rows if r.get("Sharp_Source") == "missing")
     sig_over = sum(1 for r in rows if r.get("PM_Signal_Direction") == "OVER")
@@ -696,6 +799,7 @@ def _print_summary(
     print(f"PM matched nearest: {matched_nearest}")
     print(f"No PM match: {no_pm_match}")
     print(f"Sharp source pinnacle: {sharp_pinn}")
+    print(f"Sharp source the_odds_api_pinnacle: {sharp_toa_pinn}")
     print(f"Sharp source fallback: {sharp_fb}")
     print(f"Sharp missing: {sharp_missing}")
     print(f"Signals OVER: {sig_over}")
@@ -708,6 +812,7 @@ def main() -> int:
     api_key = _get_parlay_api_key()
     if not api_key:
         print("ODDS_API_KEY missing; Pinnacle and Polymarket fetches will be skipped.", file=sys.stderr)
+    the_odds_api_key = _get_the_odds_api_key()
 
     predictions_path = _resolve_predictions_file(args.predictions_file, args.date)
     if predictions_path is None or not predictions_path.exists():
@@ -716,12 +821,18 @@ def main() -> int:
 
     predictions_df = pd.read_csv(predictions_path)
     pinnacle_odds_by_game = fetch_pinnacle_odds_map(api_key) if api_key else {}
+    toa_pinnacle_odds_by_game = fetch_the_odds_api_pinnacle_totals(the_odds_api_key)
 
     rows: List[Dict[str, Any]] = []
     for _, csv_row in predictions_df.iterrows():
         record = csv_row.to_dict()
         try:
-            board_row = build_row(record, pinnacle_odds_by_game, api_key or "")
+            board_row = build_row(
+                record,
+                pinnacle_odds_by_game,
+                api_key or "",
+                toa_pinnacle_odds_by_game=toa_pinnacle_odds_by_game,
+            )
         except Exception as exc:
             traceback.print_exc()
             board_row = {col: "" for col in OUTPUT_COLUMNS}
