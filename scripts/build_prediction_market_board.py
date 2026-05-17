@@ -44,6 +44,7 @@ MAX_PM_SPREAD = 0.10
 MIN_PM_LIQUIDITY = 1000.0
 EXACT_LINE_TOLERANCE = 0.0
 NEAREST_LINE_TOLERANCE = 0.5
+SHARP_TOTAL_ALIGN_TOLERANCE = 0.5
 
 OUTPUT_COLUMNS = [
     "Game_Date", "Datetime", "Game", "Prediction", "OU_Side", "Bet_Line",
@@ -194,6 +195,26 @@ def _parse_int(value: Any) -> Optional[int]:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    return _parse_float(value)
+
+
+def _sharp_total_aligned(
+    candidate_total: Any,
+    bet_line: Any,
+    tolerance: float = SHARP_TOTAL_ALIGN_TOLERANCE,
+) -> bool:
+    """Return True only when both totals parse as floats and are within tolerance.
+
+    Fails closed: any unparseable input -> False so mismatched/missing data is rejected.
+    """
+    cand = _float_or_none(candidate_total)
+    bet = _float_or_none(bet_line)
+    if cand is None or bet is None:
+        return False
+    return abs(cand - bet) <= tolerance
 
 
 def american_to_implied(odds: Any) -> Optional[float]:
@@ -678,24 +699,40 @@ def build_row(
         out["PM_Crowd_Side"] = crowd_side
         out["PM_Crowd_Lean_Strength"] = crowd_strength
 
-    # Sharp source resolution
+    # Sharp source resolution (with sharp-vs-Bet_Line alignment guard for tiers 1 and 2)
     sharp_source = "missing"
     pinnacle_total = pinnacle_over = pinnacle_under = None
+    sharp_total_mismatch_rejected = False
+
     pinn_entry = pinnacle_odds_by_game.get(game_key)
     if pinn_entry is not None:
-        pinnacle_total = pinn_entry.get("pinnacle_total")
-        pinnacle_over = pinn_entry.get("pinnacle_over_juice")
-        pinnacle_under = pinn_entry.get("pinnacle_under_juice")
-        if pinnacle_over is not None and pinnacle_under is not None:
-            sharp_source = "pinnacle"
+        cand_total = pinn_entry.get("pinnacle_total")
+        cand_over = pinn_entry.get("pinnacle_over_juice")
+        cand_under = pinn_entry.get("pinnacle_under_juice")
+        if cand_over is not None and cand_under is not None:
+            if _sharp_total_aligned(cand_total, bet_line):
+                pinnacle_total = cand_total
+                pinnacle_over = cand_over
+                pinnacle_under = cand_under
+                sharp_source = "pinnacle"
+            else:
+                sharp_total_mismatch_rejected = True
+
     if sharp_source == "missing" and toa_pinnacle_odds_by_game:
         toa_entry = toa_pinnacle_odds_by_game.get(game_key)
         if toa_entry is not None:
-            pinnacle_total = toa_entry.get("pinnacle_total")
-            pinnacle_over = toa_entry.get("pinnacle_over_juice")
-            pinnacle_under = toa_entry.get("pinnacle_under_juice")
-            if pinnacle_over is not None and pinnacle_under is not None:
-                sharp_source = "the_odds_api_pinnacle"
+            cand_total = toa_entry.get("pinnacle_total")
+            cand_over = toa_entry.get("pinnacle_over_juice")
+            cand_under = toa_entry.get("pinnacle_under_juice")
+            if cand_over is not None and cand_under is not None:
+                if _sharp_total_aligned(cand_total, bet_line):
+                    pinnacle_total = cand_total
+                    pinnacle_over = cand_over
+                    pinnacle_under = cand_under
+                    sharp_source = "the_odds_api_pinnacle"
+                else:
+                    sharp_total_mismatch_rejected = True
+
     if sharp_source == "missing":
         csv_over = _parse_int(csv_row.get("Over_Juice"))
         csv_under = _parse_int(csv_row.get("Under_Juice"))
@@ -772,6 +809,8 @@ def build_row(
         signal_parts.append("no_pm_match")
     if sharp_source == "missing":
         signal_parts.append("no_sharp_price")
+    if sharp_total_mismatch_rejected:
+        signal_parts.append("sharp_total_mismatch")
 
     out["PM_Signal_Reason"] = _build_signal_reason(signal_parts)
     return out
@@ -791,6 +830,11 @@ def _print_summary(
     sharp_missing = sum(1 for r in rows if r.get("Sharp_Source") == "missing")
     sig_over = sum(1 for r in rows if r.get("PM_Signal_Direction") == "OVER")
     sig_under = sum(1 for r in rows if r.get("PM_Signal_Direction") == "UNDER")
+    sharp_mismatch_rejected = sum(
+        1
+        for r in rows
+        if "sharp_total_mismatch" in str(r.get("PM_Signal_Reason") or "")
+    )
 
     print(f"Input predictions file: {predictions_path}")
     print(f"Output board: {output_path}")
@@ -802,6 +846,7 @@ def _print_summary(
     print(f"Sharp source the_odds_api_pinnacle: {sharp_toa_pinn}")
     print(f"Sharp source fallback: {sharp_fb}")
     print(f"Sharp missing: {sharp_missing}")
+    print(f"Sharp total mismatches rejected: {sharp_mismatch_rejected}")
     print(f"Signals OVER: {sig_over}")
     print(f"Signals UNDER: {sig_under}")
 
