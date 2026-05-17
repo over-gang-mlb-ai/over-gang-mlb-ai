@@ -273,24 +273,39 @@ def _output_path(predictions_path: Path, date_arg: Optional[str]) -> Path:
     return ARCHIVE_DIR / f"prediction_market_board_{date}_{stamp}.csv"
 
 
+def _read_model_telegram_constants() -> Tuple[str, str]:
+    # IMPORTANT: Do not import model.overgang_model here. That module has production
+    # startup side effects. Credentials are parsed from source text only to avoid
+    # executing model code.
+    try:
+        model_path = ROOT / "model" / "overgang_model.py"
+        text = model_path.read_text(encoding="utf-8", errors="replace")
+        token_match = re.search(
+            r"^\s*TELEGRAM_BOT_TOKEN\s*=\s*['\"]([^'\"]+)['\"]",
+            text,
+            re.M,
+        )
+        chat_match = re.search(
+            r"^\s*TELEGRAM_CHAT_ID\s*=\s*['\"]([^'\"]+)['\"]",
+            text,
+            re.M,
+        )
+        token = token_match.group(1).strip() if token_match else ""
+        chat_id = chat_match.group(1).strip() if chat_match else ""
+        if token and chat_id:
+            return token, chat_id
+    except Exception:
+        pass
+    return "", ""
+
+
 def _get_telegram_credentials() -> Tuple[str, str]:
-    """Resolve Telegram credentials without importing the model sender."""
+    """Resolve Telegram credentials without executing model code."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if token and chat_id:
         return token, chat_id
-
-    try:
-        _ensure_root_path()
-        from model.overgang_model import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  # type: ignore
-    except Exception:
-        return "", ""
-
-    token = str(TELEGRAM_BOT_TOKEN or "").strip()
-    chat_id = str(TELEGRAM_CHAT_ID or "").strip()
-    if token and chat_id:
-        return token, chat_id
-    return "", ""
+    return _read_model_telegram_constants()
 
 
 def send_telegram_file(file_path: str, caption: str) -> bool:
