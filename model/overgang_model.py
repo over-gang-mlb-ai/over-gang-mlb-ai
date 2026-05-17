@@ -5173,6 +5173,298 @@ def run_predictions():
             caption=f"📈 Over Gang OU prob-edge board — {datetime.now().strftime('%b %d')}",
         )
 
+        def _ou_over_profile_float(v):
+            try:
+                if v is None or str(v).strip() == "":
+                    return None
+                f = float(v)
+                if f != f:
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
+        def _ou_over_profile_bool(v) -> bool:
+            return str(v).strip().lower() in ("true", "1", "yes")
+
+        def _ou_over_profile_clean_data(v) -> bool:
+            if v is None:
+                return True
+            s = str(v).strip()
+            return s == "" or s.lower() == "nan"
+
+        ou_over_profile_board_cols = [
+            "Game_Date", "Datetime", "Game", "Venue",
+            "Prediction", "OU_Side", "Projected_Total", "Bet_Line",
+            "OU_Edge", "OU_Confidence", "OU_Fired", "Fired_Play",
+            "No_Fire_OU_Reason", "Total_Is_Real", "Projection_Cap_Flag",
+            "Data_Quality_Flag", "Trigger_Tags", "Model_Notes",
+            "OU_Implied_Prob_Pick", "OU_True_Prob_Pick", "OU_Prob_Edge",
+            "OU_Prob_Edge_Side", "OU_Prob_Method", "OU_Prob_Juice_Source",
+            "OU_Prob_Book", "OU_Prob_Over_Juice", "OU_Prob_Under_Juice",
+            "OU_Prob_Calibration_Flag",
+            "OU_Sharpness_OK", "OU_Sharp_Direction", "OU_Sharp_Gap",
+            "SHARP_OU_Delta", "OU_Pinnacle_Total", "OU_Retail_Total",
+            "OU_Retail_Book",
+            "Away_Pitcher", "Home_Pitcher",
+            "Away_Starter_xERA", "Home_Starter_xERA",
+            "Away_Starter_WHIP", "Home_Starter_WHIP",
+            "Away_Starter_IP", "Home_Starter_IP",
+            "Away_Starter_LowIP", "Home_Starter_LowIP",
+            "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
+            "Away_Reliever_Bad_xERA_Count", "Home_Reliever_Bad_xERA_Count",
+            "Away_Reliever_Bad_WHIP_Count", "Home_Reliever_Bad_WHIP_Count",
+            "Away_Reliever_Recent_Bad_Arm_Count", "Home_Reliever_Recent_Bad_Arm_Count",
+            "Weather_Runs_Mult", "ENV_Is_Retractable", "ENV_Validation", "ENV_Conflict",
+            "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
+            "F5_Market_Line", "F5_Edge", "F5_Model_Side", "F5_Starter_Lean",
+            "F5_Eligible", "F5_Market_OK", "F5_Source", "F5_Book",
+            "F5_Over_Juice", "F5_Under_Juice", "F5_No_Line_Reason",
+            "OU_Over_Low_Total_Profile", "OU_Over_Prob_Sweet_Spot",
+            "OU_Over_Thin_Edge_Profile", "OU_Over_Large_Edge_Risk",
+            "OU_Over_High_Total_Risk", "OU_Over_Profile_Bucket",
+            "OU_Over_Profile_Grade",
+            "F5_Over_Profile_Signal", "F5_Over_Preference",
+            "F5_Over_Profile_Reason", "F5_Over_Profile_Grade",
+        ]
+        ou_over_profile_board_rows = []
+        for _r in eligible_export:
+            _ou_side = str(_r.get("OU_Side", _r.get("Side", "")) or "").strip()
+            _prediction = str(_r.get("Prediction", "") or "")
+            _is_over_row = (
+                _ou_side.lower() == "over"
+                or "OVER" in _prediction.upper()
+            )
+            if not _is_over_row:
+                continue
+
+            _bet_line = _ou_over_profile_float(_r.get("Bet_Line"))
+            _ou_edge = _ou_over_profile_float(_r.get("OU_Edge"))
+            _prob_edge = _ou_over_profile_float(_r.get("OU_Prob_Edge"))
+            _f5_projected = _ou_over_profile_float(_r.get("F5_Projected_Total"))
+            _f5_line = _ou_over_profile_float(_r.get("F5_Market_Line"))
+            _f5_edge = ""
+            _f5_edge_num = None
+            if _f5_projected is not None and _f5_line is not None:
+                _f5_edge_num = round(_f5_projected - _f5_line, 2)
+                _f5_edge = _f5_edge_num
+
+            _total_is_real = _ou_over_profile_bool(_r.get("Total_Is_Real"))
+            _clean_data = _ou_over_profile_clean_data(_r.get("Data_Quality_Flag"))
+            _away_reliever_risk = str(_r.get("Away_Reliever_Depth_Risk", "") or "").strip().lower()
+            _home_reliever_risk = str(_r.get("Home_Reliever_Depth_Risk", "") or "").strip().lower()
+            _f5_market_ok = _ou_over_profile_bool(_r.get("F5_Market_OK"))
+            _f5_eligible = _ou_over_profile_bool(_r.get("F5_Eligible"))
+            _f5_model_side = str(_r.get("F5_Model_Side", "") or "").strip().upper()
+            _f5_starter_lean = str(_r.get("F5_Starter_Lean", "") or "").strip().upper()
+
+            _low_total_profile = bool(
+                _is_over_row
+                and _total_is_real
+                and _bet_line is not None
+                and _bet_line <= 7.5
+            )
+            _prob_sweet_spot = bool(
+                _is_over_row
+                and _prob_edge is not None
+                and 0.05 <= _prob_edge <= 0.10
+            )
+            _thin_edge_profile = bool(
+                _is_over_row
+                and _ou_edge is not None
+                and 0.0 < _ou_edge < 1.0
+            )
+            _large_edge_risk = bool(
+                _is_over_row
+                and _ou_edge is not None
+                and 1.0 <= _ou_edge < 2.0
+            )
+            _high_total_risk = bool(
+                _is_over_row
+                and _bet_line is not None
+                and _bet_line >= 9.0
+            )
+
+            _bucket_tags = []
+            if _low_total_profile:
+                _bucket_tags.append("low_total_over")
+            if _prob_sweet_spot:
+                _bucket_tags.append("prob_sweet_spot_over")
+            if _thin_edge_profile:
+                _bucket_tags.append("thin_edge_over")
+            if _large_edge_risk:
+                _bucket_tags.append("large_edge_risk_over")
+            if _high_total_risk:
+                _bucket_tags.append("high_total_risk_over")
+            _profile_bucket = "|".join(_bucket_tags) if _bucket_tags else "standard_over"
+
+            if _clean_data and _low_total_profile and _prob_sweet_spot:
+                _profile_grade = "A"
+            elif _clean_data and (_low_total_profile or _prob_sweet_spot):
+                _profile_grade = "B"
+            elif (
+                _clean_data
+                and _thin_edge_profile
+                and _prob_edge is not None
+                and _prob_edge >= 0.05
+            ):
+                _profile_grade = "C"
+            elif _large_edge_risk or _high_total_risk:
+                _profile_grade = "Risk"
+            else:
+                _profile_grade = "Pass"
+
+            _f5_signal = bool(
+                _is_over_row
+                and _f5_market_ok
+                and _f5_eligible
+                and _f5_edge_num is not None
+                and _f5_edge_num > 0
+            )
+            _bullpen_variance = _away_reliever_risk == "high" or _home_reliever_risk == "high"
+            _f5_preference = bool(
+                _f5_signal
+                and (
+                    _high_total_risk
+                    or _large_edge_risk
+                    or _bullpen_variance
+                )
+            )
+            _f5_reason_tags = []
+            if _f5_edge_num is not None and _f5_edge_num > 0:
+                _f5_reason_tags.append("f5_positive_edge")
+            if _f5_model_side == "OVER":
+                _f5_reason_tags.append("f5_model_side_over")
+            if "OVER" in _f5_starter_lean:
+                _f5_reason_tags.append("starter_lean_over")
+            if _large_edge_risk:
+                _f5_reason_tags.append("full_game_large_edge_risk")
+            if _high_total_risk:
+                _f5_reason_tags.append("full_game_high_total_risk")
+            if _bullpen_variance:
+                _f5_reason_tags.append("bullpen_variance")
+            if _clean_data and _low_total_profile:
+                _f5_reason_tags.append("clean_low_total_over")
+
+            if not _f5_market_ok or _f5_line is None:
+                _f5_profile_grade = "Pass"
+            elif (
+                _f5_edge_num is not None
+                and _f5_edge_num >= 0.50
+                and _f5_model_side == "OVER"
+                and "OVER" in _f5_starter_lean
+            ):
+                _f5_profile_grade = "A"
+            elif (
+                _f5_edge_num is not None
+                and _f5_edge_num > 0
+                and _f5_model_side == "OVER"
+            ):
+                _f5_profile_grade = "B"
+            elif _f5_edge_num is not None and _f5_edge_num > 0:
+                _f5_profile_grade = "C"
+            else:
+                _f5_profile_grade = "Watch"
+
+            ou_over_profile_board_rows.append({
+                "Game_Date": _r.get("Game_Date", ""),
+                "Datetime": _r.get("Datetime", ""),
+                "Game": _r.get("Game", ""),
+                "Venue": _r.get("Venue", ""),
+                "Prediction": _r.get("Prediction", ""),
+                "OU_Side": _ou_side,
+                "Projected_Total": _r.get("Projected_Total", ""),
+                "Bet_Line": _r.get("Bet_Line", ""),
+                "OU_Edge": _r.get("OU_Edge", ""),
+                "OU_Confidence": _r.get("OU_Confidence", ""),
+                "OU_Fired": _r.get("OU_Fired", ""),
+                "Fired_Play": _r.get("Fired_Play", ""),
+                "No_Fire_OU_Reason": _r.get("No_Fire_OU_Reason", ""),
+                "Total_Is_Real": _r.get("Total_Is_Real", ""),
+                "Projection_Cap_Flag": _r.get("Projection_Cap_Flag", ""),
+                "Data_Quality_Flag": _r.get("Data_Quality_Flag", ""),
+                "Trigger_Tags": _r.get("Trigger_Tags", ""),
+                "Model_Notes": _r.get("Model_Notes", ""),
+                "OU_Implied_Prob_Pick": _r.get("OU_Implied_Prob_Pick", ""),
+                "OU_True_Prob_Pick": _r.get("OU_True_Prob_Pick", ""),
+                "OU_Prob_Edge": _r.get("OU_Prob_Edge", ""),
+                "OU_Prob_Edge_Side": _r.get("OU_Prob_Edge_Side", ""),
+                "OU_Prob_Method": _r.get("OU_Prob_Method", ""),
+                "OU_Prob_Juice_Source": _r.get("OU_Prob_Juice_Source", ""),
+                "OU_Prob_Book": _r.get("OU_Prob_Book", ""),
+                "OU_Prob_Over_Juice": _r.get("OU_Prob_Over_Juice", ""),
+                "OU_Prob_Under_Juice": _r.get("OU_Prob_Under_Juice", ""),
+                "OU_Prob_Calibration_Flag": _r.get("OU_Prob_Calibration_Flag", ""),
+                "OU_Sharpness_OK": _r.get("OU_Sharpness_OK", ""),
+                "OU_Sharp_Direction": _r.get("OU_Sharp_Direction", ""),
+                "OU_Sharp_Gap": _r.get("OU_Sharp_Gap", ""),
+                "SHARP_OU_Delta": _r.get("SHARP_OU_Delta", ""),
+                "OU_Pinnacle_Total": _r.get("OU_Pinnacle_Total", ""),
+                "OU_Retail_Total": _r.get("OU_Retail_Total", ""),
+                "OU_Retail_Book": _r.get("OU_Retail_Book", ""),
+                "Away_Pitcher": _r.get("Away_Pitcher", ""),
+                "Home_Pitcher": _r.get("Home_Pitcher", ""),
+                "Away_Starter_xERA": _r.get("Away_Starter_xERA", ""),
+                "Home_Starter_xERA": _r.get("Home_Starter_xERA", ""),
+                "Away_Starter_WHIP": _r.get("Away_Starter_WHIP", ""),
+                "Home_Starter_WHIP": _r.get("Home_Starter_WHIP", ""),
+                "Away_Starter_IP": _r.get("Away_Starter_IP", ""),
+                "Home_Starter_IP": _r.get("Home_Starter_IP", ""),
+                "Away_Starter_LowIP": _r.get("Away_Starter_LowIP", ""),
+                "Home_Starter_LowIP": _r.get("Home_Starter_LowIP", ""),
+                "Away_Reliever_Depth_Risk": _r.get("Away_Reliever_Depth_Risk", ""),
+                "Home_Reliever_Depth_Risk": _r.get("Home_Reliever_Depth_Risk", ""),
+                "Away_Reliever_Bad_xERA_Count": _r.get("Away_Reliever_Bad_xERA_Count", ""),
+                "Home_Reliever_Bad_xERA_Count": _r.get("Home_Reliever_Bad_xERA_Count", ""),
+                "Away_Reliever_Bad_WHIP_Count": _r.get("Away_Reliever_Bad_WHIP_Count", ""),
+                "Home_Reliever_Bad_WHIP_Count": _r.get("Home_Reliever_Bad_WHIP_Count", ""),
+                "Away_Reliever_Recent_Bad_Arm_Count": _r.get("Away_Reliever_Recent_Bad_Arm_Count", ""),
+                "Home_Reliever_Recent_Bad_Arm_Count": _r.get("Home_Reliever_Recent_Bad_Arm_Count", ""),
+                "Weather_Runs_Mult": _r.get("Weather_Runs_Mult", ""),
+                "ENV_Is_Retractable": _r.get("ENV_Is_Retractable", ""),
+                "ENV_Validation": _r.get("ENV_Validation", ""),
+                "ENV_Conflict": _r.get("ENV_Conflict", ""),
+                "F5_Projected_Total": _r.get("F5_Projected_Total", ""),
+                "F5_Away_Runs": _r.get("F5_Away_Runs", ""),
+                "F5_Home_Runs": _r.get("F5_Home_Runs", ""),
+                "F5_Market_Line": _r.get("F5_Market_Line", ""),
+                "F5_Edge": _f5_edge,
+                "F5_Model_Side": _r.get("F5_Model_Side", ""),
+                "F5_Starter_Lean": _r.get("F5_Starter_Lean", ""),
+                "F5_Eligible": _r.get("F5_Eligible", ""),
+                "F5_Market_OK": _r.get("F5_Market_OK", ""),
+                "F5_Source": _r.get("F5_Source", ""),
+                "F5_Book": _r.get("F5_Book", ""),
+                "F5_Over_Juice": _r.get("F5_Over_Juice", ""),
+                "F5_Under_Juice": _r.get("F5_Under_Juice", ""),
+                "F5_No_Line_Reason": _r.get("F5_No_Line_Reason", ""),
+                "OU_Over_Low_Total_Profile": _low_total_profile,
+                "OU_Over_Prob_Sweet_Spot": _prob_sweet_spot,
+                "OU_Over_Thin_Edge_Profile": _thin_edge_profile,
+                "OU_Over_Large_Edge_Risk": _large_edge_risk,
+                "OU_Over_High_Total_Risk": _high_total_risk,
+                "OU_Over_Profile_Bucket": _profile_bucket,
+                "OU_Over_Profile_Grade": _profile_grade,
+                "F5_Over_Profile_Signal": _f5_signal,
+                "F5_Over_Preference": _f5_preference,
+                "F5_Over_Profile_Reason": "|".join(_f5_reason_tags),
+                "F5_Over_Profile_Grade": _f5_profile_grade,
+            })
+        ou_over_profile_board_path = f"{ARCHIVE_DIR}/ou_over_profile_board_{archive_date}.csv"
+        ou_over_profile_board_df = pd.DataFrame(
+            ou_over_profile_board_rows,
+            columns=ou_over_profile_board_cols,
+        )
+        ou_over_profile_board_df.to_csv(ou_over_profile_board_path, index=False)
+        print(
+            f"💾 Saved {len(ou_over_profile_board_rows)} OVER profile row(s) "
+            f"→ {ou_over_profile_board_path}"
+        )
+        send_telegram_file(
+            ou_over_profile_board_path,
+            caption=f"📊 Over Gang OVER profile board — {datetime.now().strftime('%b %d')}",
+        )
+
         # NEW: readable pregame picks board CSV. Sibling output to
         # predictions_*.csv and client_predictions_*.csv; does not replace or
         # alter either. Uses the same eligible_export rows and the same
