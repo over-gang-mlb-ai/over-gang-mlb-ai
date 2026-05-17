@@ -273,10 +273,29 @@ def _output_path(predictions_path: Path, date_arg: Optional[str]) -> Path:
     return ARCHIVE_DIR / f"prediction_market_board_{date}_{stamp}.csv"
 
 
-def send_telegram_file(file_path: str, caption: str) -> bool:
-    """Send a generated board CSV to Telegram without affecting script success."""
+def _get_telegram_credentials() -> Tuple[str, str]:
+    """Resolve Telegram credentials without importing the model sender."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if token and chat_id:
+        return token, chat_id
+
+    try:
+        _ensure_root_path()
+        from model.overgang_model import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  # type: ignore
+    except Exception:
+        return "", ""
+
+    token = str(TELEGRAM_BOT_TOKEN or "").strip()
+    chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+    if token and chat_id:
+        return token, chat_id
+    return "", ""
+
+
+def send_telegram_file(file_path: str, caption: str) -> bool:
+    """Send a generated board CSV to Telegram without affecting script success."""
+    token, chat_id = _get_telegram_credentials()
     if not token or not chat_id:
         print("⚠️ Telegram credentials missing; skipping prediction market board send")
         return False
