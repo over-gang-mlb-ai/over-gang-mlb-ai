@@ -241,6 +241,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build prediction market sentiment board.")
     p.add_argument("--predictions-file", help="Path to a predictions_*.csv")
     p.add_argument("--date", help="Slate date as YYYYMMDD")
+    p.add_argument("--no-telegram", action="store_true", help="Skip Telegram file delivery")
     return p.parse_args()
 
 
@@ -270,6 +271,40 @@ def _output_path(predictions_path: Path, date_arg: Optional[str]) -> Path:
     date = _date_from_predictions_path(predictions_path) or (date_arg or datetime.now().strftime("%Y%m%d"))
     stamp = datetime.now().strftime("%H%M")
     return ARCHIVE_DIR / f"prediction_market_board_{date}_{stamp}.csv"
+
+
+def send_telegram_file(file_path: str, caption: str) -> bool:
+    """Send a generated board CSV to Telegram without affecting script success."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("⚠️ Telegram credentials missing; skipping prediction market board send")
+        return False
+
+    path = Path(file_path)
+    if not path.is_file():
+        print(f"⚠️ Telegram file missing; skipping prediction market board send: {path}")
+        return False
+
+    try:
+        with path.open("rb") as doc:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": doc},
+                timeout=30,
+            )
+        if response.status_code != 200:
+            print(
+                "⚠️ Telegram prediction market board send failed "
+                f"({response.status_code}): {response.text[:500]}"
+            )
+            return False
+        print("📤 Sent prediction market board to Telegram")
+        return True
+    except Exception as e:
+        print(f"⚠️ Telegram prediction market board send failed: {e}")
+        return False
 
 
 def fetch_pinnacle_odds_map(api_key: str) -> Dict[str, Dict[str, Any]]:
@@ -896,6 +931,13 @@ def main() -> int:
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     out_df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
     out_df.to_csv(output_path, index=False)
+    if args.no_telegram:
+        print("Telegram send skipped by --no-telegram")
+    else:
+        send_telegram_file(
+            str(output_path),
+            caption=f"📊 Over Gang prediction market board — {datetime.now().strftime('%b %d')}",
+        )
     _print_summary(predictions_path, output_path, rows)
     return 0
 
