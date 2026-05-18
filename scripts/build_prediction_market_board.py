@@ -16,7 +16,7 @@ import re
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -242,6 +242,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--predictions-file", help="Path to a predictions_*.csv")
     p.add_argument("--date", help="Slate date as YYYYMMDD")
     p.add_argument("--no-telegram", action="store_true", help="Skip Telegram file delivery")
+    p.add_argument(
+        "--pregame-only",
+        action="store_true",
+        help="Only refresh PM markets for games that have not started yet",
+    )
+    p.add_argument(
+        "--min-minutes-before-start",
+        type=int,
+        default=10,
+        help="Minimum minutes before scheduled start required for PM refresh when --pregame-only is set",
+    )
+    p.add_argument(
+        "--telegram-only-if-coverage-improved",
+        action="store_true",
+        help="Only send Telegram when matched PM coverage improves versus previous board for same date",
+    )
     return p.parse_args()
 
 
@@ -267,10 +283,88 @@ def _date_from_predictions_path(path: Path) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _date_from_pm_board_path(path: Path) -> Optional[str]:
+    m = re.match(r"prediction_market_board_(\d{8})_\d{4}\.csv$", path.name, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
 def _output_path(predictions_path: Path, date_arg: Optional[str]) -> Path:
     date = _date_from_predictions_path(predictions_path) or (date_arg or datetime.now().strftime("%Y%m%d"))
     stamp = datetime.now().strftime("%H%M")
     return ARCHIVE_DIR / f"prediction_market_board_{date}_{stamp}.csv"
+
+
+def _parse_utc_datetime(value: Any) -> Optional[datetime]:
+    try:
+        s = str(value or "").strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = f"{s[:-1]}+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _is_pregame_refresh_allowed(
+    row: Dict[str, Any],
+    now_utc: datetime,
+    min_minutes_before_start: int,
+) -> bool:
+    game_datetime = _parse_utc_datetime(row.get("Datetime"))
+    if game_datetime is None:
+        return False
+    cutoff = now_utc + timedelta(minutes=min_minutes_before_start)
+    return game_datetime > cutoff
+
+
+def _coverage_counts(df: pd.DataFrame) -> Dict[str, int]:
+    status = df.get("PM_Match_Status")
+    line_match = df.get("PM_Line_Match_Type")
+    if status is None:
+        status = pd.Series([], dtype=str)
+    if line_match is None:
+        line_match = pd.Series([], dtype=str)
+    status_str = status.astype(str)
+    line_match_str = line_match.astype(str)
+    return {
+        "matched": int((status_str == "matched").sum()),
+        "exact": int((line_match_str == "exact").sum()),
+        "nearest": int((line_match_str == "nearest_within_0_5").sum()),
+        "skipped_started": int((status_str == "skipped_started").sum()),
+    }
+
+
+def _previous_best_pm_coverage(date: str, current_output_path: Path) -> Dict[str, int]:
+    result = {
+        "previous_best_matched": -1,
+        "exact": 0,
+        "nearest": 0,
+        "skipped_started": 0,
+    }
+    current_resolved = current_output_path.resolve()
+    for raw_path in glob.glob(str(ARCHIVE_DIR / f"prediction_market_board_{date}_*.csv")):
+        path = Path(raw_path)
+        try:
+            if path.resolve() == current_resolved:
+                continue
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        if "PM_Match_Status" not in df.columns:
+            continue
+        counts = _coverage_counts(df)
+        if counts["matched"] > result["previous_best_matched"]:
+            result = {
+                "previous_best_matched": counts["matched"],
+                "exact": counts["exact"],
+                "nearest": counts["nearest"],
+                "skipped_started": counts["skipped_started"],
+            }
+    return result
 
 
 def _read_model_telegram_constants() -> Tuple[str, str]:
@@ -680,6 +774,7 @@ def build_row(
     pinnacle_odds_by_game: Dict[str, Dict[str, Any]],
     api_key: str,
     toa_pinnacle_odds_by_game: Optional[Dict[str, Dict[str, Any]]] = None,
+    skip_started: bool = False,
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {col: "" for col in OUTPUT_COLUMNS}
     for col in CARRY_FORWARD_COLUMNS:
@@ -695,6 +790,16 @@ def build_row(
     out["PM_Line_Match_Type"] = "no_match"
 
     bet_line = _parse_float(csv_row.get("Bet_Line"))
+
+    if skip_started:
+        out["PM_Match_Status"] = "skipped_started"
+        out["PM_Line_Match_Type"] = "skipped_started"
+        out["PM_Candidate_Count"] = 0
+        out["PM_Eligible_Candidate_Count"] = 0
+        out["PM_Error"] = ""
+        out["Sharp_Source"] = "skipped_started"
+        out["PM_Signal_Reason"] = "game_started_skip"
+        return out
 
     markets: List[Dict[str, Any]] = []
     pm_error = ""
@@ -889,6 +994,9 @@ def _print_summary(
     predictions_path: Path,
     output_path: Path,
     rows: List[Dict[str, Any]],
+    current_coverage: Optional[Dict[str, int]] = None,
+    previous_best_coverage: Optional[Dict[str, int]] = None,
+    telegram_coverage_gate: Optional[str] = None,
 ) -> None:
     matched_exact = sum(1 for r in rows if r.get("PM_Line_Match_Type") == "exact" and r.get("PM_Match_Status") == "matched")
     matched_nearest = sum(1 for r in rows if r.get("PM_Line_Match_Type") == "nearest_within_0_5" and r.get("PM_Match_Status") == "matched")
@@ -904,6 +1012,8 @@ def _print_summary(
         for r in rows
         if "sharp_total_mismatch" in str(r.get("PM_Signal_Reason") or "")
     )
+    if current_coverage is None:
+        current_coverage = _coverage_counts(pd.DataFrame(rows))
 
     print(f"Input predictions file: {predictions_path}")
     print(f"Output board: {output_path}")
@@ -918,6 +1028,17 @@ def _print_summary(
     print(f"Sharp total mismatches rejected: {sharp_mismatch_rejected}")
     print(f"Signals OVER: {sig_over}")
     print(f"Signals UNDER: {sig_under}")
+    print(f"PM coverage current matched: {current_coverage['matched']}")
+    print(f"PM coverage current exact: {current_coverage['exact']}")
+    print(f"PM coverage current nearest: {current_coverage['nearest']}")
+    print(f"PM coverage skipped started: {current_coverage['skipped_started']}")
+    if previous_best_coverage is not None:
+        print(
+            "PM coverage previous best matched: "
+            f"{previous_best_coverage['previous_best_matched']}"
+        )
+    if telegram_coverage_gate:
+        print(f"Telegram coverage gate: {telegram_coverage_gate}")
 
 
 def main() -> int:
@@ -936,16 +1057,26 @@ def main() -> int:
     predictions_df = pd.read_csv(predictions_path)
     pinnacle_odds_by_game = fetch_pinnacle_odds_map(api_key) if api_key else {}
     toa_pinnacle_odds_by_game = fetch_the_odds_api_pinnacle_totals(the_odds_api_key)
+    now_utc = datetime.now(timezone.utc)
 
     rows: List[Dict[str, Any]] = []
     for _, csv_row in predictions_df.iterrows():
         record = csv_row.to_dict()
+        skip_started = bool(
+            args.pregame_only
+            and not _is_pregame_refresh_allowed(
+                record,
+                now_utc,
+                args.min_minutes_before_start,
+            )
+        )
         try:
             board_row = build_row(
                 record,
                 pinnacle_odds_by_game,
                 api_key or "",
                 toa_pinnacle_odds_by_game=toa_pinnacle_odds_by_game,
+                skip_started=skip_started,
             )
         except Exception as exc:
             traceback.print_exc()
@@ -965,14 +1096,45 @@ def main() -> int:
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     out_df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
     out_df.to_csv(output_path, index=False)
+    current_coverage = _coverage_counts(out_df)
+    previous_best_coverage: Optional[Dict[str, int]] = None
+    telegram_coverage_gate: Optional[str] = None
     if args.no_telegram:
         print("Telegram send skipped by --no-telegram")
+    elif args.telegram_only_if_coverage_improved:
+        board_date = _date_from_pm_board_path(output_path) or _date_from_predictions_path(predictions_path)
+        board_date = board_date or (args.date or datetime.now().strftime("%Y%m%d"))
+        previous_best_coverage = _previous_best_pm_coverage(board_date, output_path)
+        previous_best_matched = previous_best_coverage["previous_best_matched"]
+        current_matched = current_coverage["matched"]
+        if current_matched > previous_best_matched:
+            telegram_coverage_gate = "send"
+            send_telegram_file(
+                str(output_path),
+                caption=(
+                    "📊 Over Gang prediction market board refresh — "
+                    f"{datetime.now().strftime('%b %d')}"
+                ),
+            )
+        else:
+            telegram_coverage_gate = "skipped"
+            print(
+                "Telegram skipped; PM matched coverage did not improve "
+                f"({current_matched} <= {previous_best_matched})"
+            )
     else:
         send_telegram_file(
             str(output_path),
             caption=f"📊 Over Gang prediction market board — {datetime.now().strftime('%b %d')}",
         )
-    _print_summary(predictions_path, output_path, rows)
+    _print_summary(
+        predictions_path,
+        output_path,
+        rows,
+        current_coverage=current_coverage,
+        previous_best_coverage=previous_best_coverage,
+        telegram_coverage_gate=telegram_coverage_gate,
+    )
     return 0
 
 
