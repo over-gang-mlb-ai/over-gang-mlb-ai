@@ -559,13 +559,15 @@ class DataManager:
         blend_ip_cap: float = EARLY_SEASON_BLEND_IP_CAP,
     ) -> pd.DataFrame:
         """
-        Early-season carryover: for each mlb_id, blend current-season xERA/WHIP with prior full season.
+        Early-season carryover: for each mlb_id, blend current-season ERA/xERA/WHIP with prior full season.
 
         w26 = min(max(ip_current, 0), blend_ip_cap) / blend_ip_cap
         blended xERA = w26 * xERA_cur + (1 - w26) * xERA_prev (with coalesce when one side is missing).
+        Same blend rule is applied to ERA so the real season ERA is preserved on disk for downstream
+        Away/Home_Starter_ERA_xERA_Gap telemetry.
         Final IP is current-season IP when a current row exists, else prior IP. LowIP is veteran-aware when both seasons exist (see low_ip assignments below).
         """
-        cols = ["mlb_id", "Name", "xERA", "WHIP", "IP", "LowIP"]
+        cols = ["mlb_id", "Name", "ERA", "xERA", "WHIP", "IP", "LowIP"]
 
         def _low_ip_veteran(ip_cur, ip_prev, ip_final: float) -> bool:
             if ip_cur is not None and ip_prev is not None:
@@ -641,6 +643,8 @@ class DataManager:
             xp = r.get("xERA_prev")
             wc = r.get("WHIP_cur")
             wp = r.get("WHIP_prev")
+            ec = r.get("ERA_cur")
+            ep = r.get("ERA_prev")
 
             if ip_cur is not None and ip_prev is None:
                 norm_name = _norm_key(r.get("Name_cur"))
@@ -651,6 +655,7 @@ class DataManager:
                             ip_prev = float(prior_row["IP"])
                             xp = prior_row.get("xERA")
                             wp = prior_row.get("WHIP")
+                            ep = prior_row.get("ERA")
                         except (TypeError, ValueError):
                             pass
             has_prev = ip_prev is not None
@@ -660,10 +665,13 @@ class DataManager:
                 xp_eff = _nz(xp, xc, 4.25)
                 wc_eff = _nz(wc, wp, 1.30)
                 wp_eff = _nz(wp, wc, 1.30)
+                ec_eff = _nz(ec, ep, 4.25)
+                ep_eff = _nz(ep, ec, 4.25)
                 ip26 = float(ip_cur) if ip_cur is not None else 0.0
                 w26 = min(max(ip26, 0.0), float(blend_ip_cap)) / float(blend_ip_cap)
                 x_bl = w26 * xc_eff + (1.0 - w26) * xp_eff
                 whip_bl = w26 * wc_eff + (1.0 - w26) * wp_eff
+                era_bl = w26 * ec_eff + (1.0 - w26) * ep_eff
                 ip_final = ip_cur if ip_cur is not None else 0.0
                 low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = (
@@ -674,12 +682,14 @@ class DataManager:
             elif has_cur:
                 x_bl = _nz(xc, xp, 4.25)
                 whip_bl = _nz(wc, wp, 1.30)
+                era_bl = _nz(ec, ep, 4.25)
                 ip_final = ip_cur if ip_cur is not None else 0.0
                 low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = str(r["Name_cur"]).strip()
             else:
                 x_bl = _nz(xp, xc, 4.25)
                 whip_bl = _nz(wp, wc, 1.30)
+                era_bl = _nz(ep, ec, 4.25)
                 ip_final = ip_prev if ip_prev is not None else 0.0
                 low_ip = _low_ip_veteran(ip_cur, ip_prev, ip_final)
                 name = str(r["Name_prev"]).strip()
@@ -706,7 +716,15 @@ class DataManager:
                     f"branch={blend_branch!r} low_ip={low_ip!r}",
                 )
             out_rows.append(
-                {"mlb_id": mid, "Name": name, "xERA": x_bl, "WHIP": whip_bl, "IP": ip_final, "LowIP": low_ip}
+                {
+                    "mlb_id": mid,
+                    "Name": name,
+                    "ERA": era_bl,
+                    "xERA": x_bl,
+                    "WHIP": whip_bl,
+                    "IP": ip_final,
+                    "LowIP": low_ip,
+                }
             )
 
         return pd.DataFrame(out_rows)
@@ -718,7 +736,7 @@ class DataManager:
     def update_pitcher_stats():
         """
         Nightly updater using MLB StatsAPI (ERA/WHIP/IP) + Savant (xERA).
-        Writes data/pitcher_stats.csv with columns: Name, xERA, WHIP, IP, LowIP
+        Writes data/pitcher_stats.csv with columns: Name, ERA, xERA, WHIP, IP, LowIP
 
         Early season: fetches both the current regular season and the prior full season, then blends xERA/WHIP
         toward live stats using current-season IP (see EARLY_SEASON_BLEND_IP_CAP). Thin current-year pulls no
@@ -813,7 +831,7 @@ class DataManager:
             blended = blended.sort_values(["norm_name", "IP"], ascending=[True, False])
             blended = blended.drop_duplicates(subset=["norm_name"], keep="first")
 
-            out = blended[["norm_name", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
+            out = blended[["norm_name", "ERA", "xERA", "WHIP", "IP", "LowIP"]].rename(columns={"norm_name": "Name"})
             out["Name"] = out["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
             out = out.drop_duplicates(subset="Name", keep="first")
             refresh_n = len(out)
@@ -823,17 +841,17 @@ class DataManager:
             )
 
             # Load existing canonical base (broad universe) before row-count guard and merge.
-            existing_canon = pd.DataFrame(columns=["Name", "xERA", "WHIP", "IP", "LowIP"])
+            existing_canon = pd.DataFrame(columns=["Name", "ERA", "xERA", "WHIP", "IP", "LowIP"])
             existing_n = 0
             if os.path.exists(STATS_FILE):
                 _ex = DataManager._read_csv_with_column_normalization(STATS_FILE)
                 if _ex is not None and not _ex.empty and "Name" in _ex.columns:
-                    for c in ("xERA", "WHIP", "IP", "LowIP"):
+                    for c in ("ERA", "xERA", "WHIP", "IP", "LowIP"):
                         if c not in _ex.columns:
                             _ex[c] = pd.NA
                     _ex["Name"] = _ex["Name"].astype(str).str.strip().apply(DataManager.normalize_name)
                     _ex = _ex.drop_duplicates(subset="Name", keep="last")
-                    existing_canon = _ex[["Name", "xERA", "WHIP", "IP", "LowIP"]].copy()
+                    existing_canon = _ex[["Name", "ERA", "xERA", "WHIP", "IP", "LowIP"]].copy()
                     existing_n = len(existing_canon)
 
             # Strict row-count guard only when there is no canonical file to merge into (first bootstrap).
