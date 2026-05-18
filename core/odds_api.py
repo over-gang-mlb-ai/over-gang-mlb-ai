@@ -557,29 +557,41 @@ def _parse_valid_totals_market(book):
     return None
 
 
-def _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness():
-    """The Odds API Pinnacle-only totals fallback for OU sharpness telemetry.
+def _toa_totals_line_ok(line) -> bool:
+    try:
+        lf = float(line)
+        return 5.0 <= lf <= 15.0
+    except (TypeError, ValueError):
+        return False
 
-    Returns mapping of normalized ``_game_key(away, home)`` -> {
-      pinnacle_total_line, pinnacle_over_juice, pinnacle_under_juice, source
-    }
 
-    Fail-soft: returns {} on missing key, request failure, or malformed response.
-    Does not touch Parlay results; does not log credentials.
+def _fetch_the_odds_api_sharp_fallback_totals():
+    """The Odds API totals fallback for OU sharpness (Pinnacle + DraftKings/FanDuel).
+
+    Returns ``(mapping, pairing_rejects)`` where *mapping* is normalized
+    ``_game_key(away, home)`` -> full row shape compatible with ``fetch_ou_sharp_totals``
+    (pinnacle + retail fields, source=the_odds_api_sharp_fallback). *pairing_rejects*
+    counts events where both lines parsed but differed by more than 0.5 (retail was dropped).
+
+    When Pinnacle and retail lines both parse but differ by more than 0.5, the row
+    keeps Pinnacle only and drops retail so we do not pair mismatched markets.
+
+    Fail-soft: returns ``({}, 0)`` on missing key, request failure, or malformed response.
+    Does not log credentials.
     """
     api_key = str(os.getenv("THE_ODDS_API_KEY", "")).strip()
     if not api_key:
         logging.warning(
-            "⚠️ THE_ODDS_API_KEY not set; The Odds API OU sharp Pinnacle fallback disabled."
+            "⚠️ THE_ODDS_API_KEY not set; The Odds API OU sharp fallback disabled."
         )
-        return {}
+        return {}, 0
     try:
         import requests
     except ImportError:
         logging.warning(
-            "⚠️ requests not available; The Odds API OU sharp Pinnacle fallback disabled."
+            "⚠️ requests not available; The Odds API OU sharp fallback disabled."
         )
-        return {}
+        return {}, 0
 
     url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
     params = {
@@ -587,7 +599,7 @@ def _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness():
         "regions": "us",
         "markets": "totals",
         "oddsFormat": "american",
-        "bookmakers": "pinnacle",
+        "bookmakers": "pinnacle,draftkings,fanduel",
     }
     try:
         r = requests.get(
@@ -599,17 +611,18 @@ def _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness():
         r.raise_for_status()
         body = r.json()
     except Exception as e:
-        logging.warning("⚠️ The Odds API OU sharp Pinnacle fallback fetch failed: %s", e)
-        return {}
+        logging.warning("⚠️ The Odds API OU sharp fallback fetch failed: %s", e)
+        return {}, 0
 
     if not isinstance(body, list):
         logging.warning(
-            "⚠️ The Odds API OU sharp Pinnacle fallback response unusable: %s",
+            "⚠️ The Odds API OU sharp fallback response unusable: %s",
             type(body).__name__,
         )
-        return {}
+        return {}, 0
 
     out = {}
+    pairing_rejects = 0
     for event in body:
         if not isinstance(event, dict):
             continue
@@ -621,35 +634,75 @@ def _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness():
         if not key:
             continue
 
-        pinn_book = None
+        parsed_by_book = {}
         for book in event.get("bookmakers") or []:
             if not isinstance(book, dict):
                 continue
-            if (book.get("key") or "").strip().lower() == "pinnacle":
-                pinn_book = book
-                break
-        if pinn_book is None:
+            book_key = (book.get("key") or "").strip().lower()
+            if book_key not in ("pinnacle", "draftkings", "fanduel"):
+                continue
+            parsed = _parse_valid_totals_market(book)
+            if parsed is None:
+                continue
+            tl, oj, uj = parsed
+            if not _toa_totals_line_ok(tl):
+                continue
+            if book_key not in parsed_by_book:
+                parsed_by_book[book_key] = (float(tl), oj, uj)
+
+        pinnacle = parsed_by_book.get("pinnacle")
+        retail_book = (
+            "draftkings"
+            if "draftkings" in parsed_by_book
+            else "fanduel"
+            if "fanduel" in parsed_by_book
+            else ""
+        )
+        retail = parsed_by_book.get(retail_book) if retail_book else None
+
+        p_line = p_over = p_under = None
+        if pinnacle is not None:
+            p_line, p_over, p_under = pinnacle
+
+        r_line = r_over = r_under = None
+        rb = ""
+        if retail is not None:
+            r_line, r_over, r_under = retail
+            rb = retail_book
+
+        if p_line is None and r_line is None:
             continue
 
-        parsed = _parse_valid_totals_market(pinn_book)
-        if parsed is None:
-            continue
-        total_line, over_juice, under_juice = parsed
-        try:
-            line_f = float(total_line)
-        except (TypeError, ValueError):
-            continue
-        if line_f < 5.0 or line_f > 15.0:
-            continue
+        if p_line is not None and r_line is not None:
+            if abs(p_line - r_line) > 0.5:
+                pairing_rejects += 1
+                r_line = r_over = r_under = None
+                rb = ""
+
         if key in out:
             continue
+
         out[key] = {
-            "pinnacle_total_line": line_f,
-            "pinnacle_over_juice": over_juice,
-            "pinnacle_under_juice": under_juice,
-            "source": "the_odds_api_pinnacle_fallback",
+            "pinnacle_total_line": p_line,
+            "pinnacle_over_juice": p_over,
+            "pinnacle_under_juice": p_under,
+            "retail_total_line": r_line,
+            "retail_over_juice": r_over,
+            "retail_under_juice": r_under,
+            "retail_book": rb,
+            "source": "the_odds_api_sharp_fallback",
         }
-    return out
+    return out, pairing_rejects
+
+
+def _append_the_odds_api_sharp_fallback_source(source_str: str) -> str:
+    tag = "the_odds_api_sharp_fallback"
+    s = (source_str or "").strip()
+    if not s:
+        return tag
+    if tag in s:
+        return s
+    return f"{s}|{tag}"
 
 
 def fetch_ou_sharp_totals():
@@ -662,8 +715,8 @@ def fetch_ou_sharp_totals():
       source
     }
 
-    When Parlay does not carry Pinnacle for a game, The Odds API is consulted as a
-    Pinnacle-only fallback for OU sharpness inputs. Retail fields stay Parlay-sourced.
+    When Parlay omits a book for a game, The Odds API fills Pinnacle and/or retail
+    (DraftKings preferred, FanDuel fallback) with line-matched pairing.
 
     Fail-soft: returns {} on missing key, request failure, malformed response, or no usable data.
     """
@@ -747,54 +800,96 @@ def fetch_ou_sharp_totals():
             row["retail_total_line"], row["retail_over_juice"], row["retail_under_juice"] = retail
         result[key] = row
 
-    fallback_map = _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness()
+    fallback_map, toa_pairing_rejects = _fetch_the_odds_api_sharp_fallback_totals()
     fallback_loaded = len(fallback_map)
-    fallback_fills = 0
-    fallback_line_mismatches = 0
+    fallback_paired = sum(
+        1
+        for r in fallback_map.values()
+        if r.get("pinnacle_total_line") is not None and r.get("retail_total_line") is not None
+    )
+    fallback_pinn_fills = 0
+    fallback_retail_fills = 0
+    fallback_line_mismatches = toa_pairing_rejects
+
     for fb_key, fb_row in fallback_map.items():
-        fb_total = fb_row.get("pinnacle_total_line")
-        fb_over = fb_row.get("pinnacle_over_juice")
-        fb_under = fb_row.get("pinnacle_under_juice")
-        if fb_total is None or fb_over is None or fb_under is None:
+        fb_p = fb_row.get("pinnacle_total_line")
+        fb_po = fb_row.get("pinnacle_over_juice")
+        fb_pu = fb_row.get("pinnacle_under_juice")
+        fb_r = fb_row.get("retail_total_line")
+        fb_ro = fb_row.get("retail_over_juice")
+        fb_ru = fb_row.get("retail_under_juice")
+        fb_rb = fb_row.get("retail_book") or ""
+
+        if fb_p is None and fb_r is None:
             continue
+
         existing = result.get(fb_key)
         if existing is None:
             result[fb_key] = {
-                "pinnacle_total_line": fb_total,
-                "pinnacle_over_juice": fb_over,
-                "pinnacle_under_juice": fb_under,
-                "retail_total_line": None,
-                "retail_over_juice": None,
-                "retail_under_juice": None,
-                "retail_book": "",
-                "source": "the_odds_api_pinnacle_fallback",
+                "pinnacle_total_line": fb_p,
+                "pinnacle_over_juice": fb_po,
+                "pinnacle_under_juice": fb_pu,
+                "retail_total_line": fb_r,
+                "retail_over_juice": fb_ro,
+                "retail_under_juice": fb_ru,
+                "retail_book": fb_rb,
+                "source": fb_row.get("source") or "the_odds_api_sharp_fallback",
             }
-            fallback_fills += 1
+            if fb_p is not None:
+                fallback_pinn_fills += 1
+            if fb_r is not None:
+                fallback_retail_fills += 1
             continue
-        if existing.get("pinnacle_total_line") is not None:
-            continue
-        retail_total = existing.get("retail_total_line")
-        if retail_total is not None:
-            try:
-                if abs(float(fb_total) - float(retail_total)) > 0.5:
-                    fallback_line_mismatches += 1
-                    continue
-            except (TypeError, ValueError):
-                fallback_line_mismatches += 1
-                continue
-        existing["pinnacle_total_line"] = fb_total
-        existing["pinnacle_over_juice"] = fb_over
-        existing["pinnacle_under_juice"] = fb_under
-        prev_source = existing.get("source") or ""
-        existing["source"] = (
-            f"{prev_source}|the_odds_api_pinnacle_fallback"
-            if prev_source and "the_odds_api_pinnacle_fallback" not in prev_source
-            else (prev_source or "the_odds_api_pinnacle_fallback")
-        )
-        fallback_fills += 1
 
-    print(f"[OU sharpness] The Odds API Pinnacle fallback rows loaded: {fallback_loaded}")
-    print(f"[OU sharpness] OU sharp fallback Pinnacle fills: {fallback_fills}")
+        changed = False
+
+        if existing.get("pinnacle_total_line") is None and fb_p is not None:
+            ok = True
+            retail_total = existing.get("retail_total_line")
+            if retail_total is not None:
+                try:
+                    if abs(float(fb_p) - float(retail_total)) > 0.5:
+                        ok = False
+                        fallback_line_mismatches += 1
+                except (TypeError, ValueError):
+                    ok = False
+                    fallback_line_mismatches += 1
+            if ok:
+                existing["pinnacle_total_line"] = fb_p
+                existing["pinnacle_over_juice"] = fb_po
+                existing["pinnacle_under_juice"] = fb_pu
+                changed = True
+                fallback_pinn_fills += 1
+
+        if existing.get("retail_total_line") is None and fb_r is not None:
+            ok = True
+            pinn_total = existing.get("pinnacle_total_line")
+            if pinn_total is not None:
+                try:
+                    if abs(float(pinn_total) - float(fb_r)) > 0.5:
+                        ok = False
+                        fallback_line_mismatches += 1
+                except (TypeError, ValueError):
+                    ok = False
+                    fallback_line_mismatches += 1
+            if ok:
+                existing["retail_total_line"] = fb_r
+                existing["retail_over_juice"] = fb_ro
+                existing["retail_under_juice"] = fb_ru
+                if fb_rb:
+                    existing["retail_book"] = fb_rb
+                changed = True
+                fallback_retail_fills += 1
+
+        if changed:
+            existing["source"] = _append_the_odds_api_sharp_fallback_source(
+                existing.get("source") or ""
+            )
+
+    print(f"[OU sharpness] The Odds API sharp fallback rows loaded: {fallback_loaded}")
+    print(f"[OU sharpness] OU sharp fallback Pinnacle fills: {fallback_pinn_fills}")
+    print(f"[OU sharpness] OU sharp fallback retail fills: {fallback_retail_fills}")
+    print(f"[OU sharpness] OU sharp fallback paired rows: {fallback_paired}")
     print(f"[OU sharpness] OU sharp fallback line mismatches rejected: {fallback_line_mismatches}")
 
     if not result:
