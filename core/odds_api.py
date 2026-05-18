@@ -557,6 +557,101 @@ def _parse_valid_totals_market(book):
     return None
 
 
+def _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness():
+    """The Odds API Pinnacle-only totals fallback for OU sharpness telemetry.
+
+    Returns mapping of normalized ``_game_key(away, home)`` -> {
+      pinnacle_total_line, pinnacle_over_juice, pinnacle_under_juice, source
+    }
+
+    Fail-soft: returns {} on missing key, request failure, or malformed response.
+    Does not touch Parlay results; does not log credentials.
+    """
+    api_key = str(os.getenv("THE_ODDS_API_KEY", "")).strip()
+    if not api_key:
+        logging.warning(
+            "⚠️ THE_ODDS_API_KEY not set; The Odds API OU sharp Pinnacle fallback disabled."
+        )
+        return {}
+    try:
+        import requests
+    except ImportError:
+        logging.warning(
+            "⚠️ requests not available; The Odds API OU sharp Pinnacle fallback disabled."
+        )
+        return {}
+
+    url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": "totals",
+        "oddsFormat": "american",
+        "bookmakers": "pinnacle",
+    }
+    try:
+        r = requests.get(
+            url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=PARLAY_FETCH_TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        body = r.json()
+    except Exception as e:
+        logging.warning("⚠️ The Odds API OU sharp Pinnacle fallback fetch failed: %s", e)
+        return {}
+
+    if not isinstance(body, list):
+        logging.warning(
+            "⚠️ The Odds API OU sharp Pinnacle fallback response unusable: %s",
+            type(body).__name__,
+        )
+        return {}
+
+    out = {}
+    for event in body:
+        if not isinstance(event, dict):
+            continue
+        away = (event.get("away_team") or "").strip()
+        home = (event.get("home_team") or "").strip()
+        if not away or not home or _parlay_row_excludes_non_mlb_teams(away, home):
+            continue
+        key = _game_key(away, home)
+        if not key:
+            continue
+
+        pinn_book = None
+        for book in event.get("bookmakers") or []:
+            if not isinstance(book, dict):
+                continue
+            if (book.get("key") or "").strip().lower() == "pinnacle":
+                pinn_book = book
+                break
+        if pinn_book is None:
+            continue
+
+        parsed = _parse_valid_totals_market(pinn_book)
+        if parsed is None:
+            continue
+        total_line, over_juice, under_juice = parsed
+        try:
+            line_f = float(total_line)
+        except (TypeError, ValueError):
+            continue
+        if line_f < 5.0 or line_f > 15.0:
+            continue
+        if key in out:
+            continue
+        out[key] = {
+            "pinnacle_total_line": line_f,
+            "pinnacle_over_juice": over_juice,
+            "pinnacle_under_juice": under_juice,
+            "source": "the_odds_api_pinnacle_fallback",
+        }
+    return out
+
+
 def fetch_ou_sharp_totals():
     """
     Targeted Parlay totals fetch for O/U sharpness telemetry only.
@@ -566,6 +661,9 @@ def fetch_ou_sharp_totals():
       retail_total_line, retail_over_juice, retail_under_juice, retail_book,
       source
     }
+
+    When Parlay does not carry Pinnacle for a game, The Odds API is consulted as a
+    Pinnacle-only fallback for OU sharpness inputs. Retail fields stay Parlay-sourced.
 
     Fail-soft: returns {} on missing key, request failure, malformed response, or no usable data.
     """
@@ -648,6 +746,56 @@ def fetch_ou_sharp_totals():
         if retail is not None:
             row["retail_total_line"], row["retail_over_juice"], row["retail_under_juice"] = retail
         result[key] = row
+
+    fallback_map = _fetch_the_odds_api_pinnacle_totals_for_ou_sharpness()
+    fallback_loaded = len(fallback_map)
+    fallback_fills = 0
+    fallback_line_mismatches = 0
+    for fb_key, fb_row in fallback_map.items():
+        fb_total = fb_row.get("pinnacle_total_line")
+        fb_over = fb_row.get("pinnacle_over_juice")
+        fb_under = fb_row.get("pinnacle_under_juice")
+        if fb_total is None or fb_over is None or fb_under is None:
+            continue
+        existing = result.get(fb_key)
+        if existing is None:
+            result[fb_key] = {
+                "pinnacle_total_line": fb_total,
+                "pinnacle_over_juice": fb_over,
+                "pinnacle_under_juice": fb_under,
+                "retail_total_line": None,
+                "retail_over_juice": None,
+                "retail_under_juice": None,
+                "retail_book": "",
+                "source": "the_odds_api_pinnacle_fallback",
+            }
+            fallback_fills += 1
+            continue
+        if existing.get("pinnacle_total_line") is not None:
+            continue
+        retail_total = existing.get("retail_total_line")
+        if retail_total is not None:
+            try:
+                if abs(float(fb_total) - float(retail_total)) > 0.5:
+                    fallback_line_mismatches += 1
+                    continue
+            except (TypeError, ValueError):
+                fallback_line_mismatches += 1
+                continue
+        existing["pinnacle_total_line"] = fb_total
+        existing["pinnacle_over_juice"] = fb_over
+        existing["pinnacle_under_juice"] = fb_under
+        prev_source = existing.get("source") or ""
+        existing["source"] = (
+            f"{prev_source}|the_odds_api_pinnacle_fallback"
+            if prev_source and "the_odds_api_pinnacle_fallback" not in prev_source
+            else (prev_source or "the_odds_api_pinnacle_fallback")
+        )
+        fallback_fills += 1
+
+    print(f"[OU sharpness] The Odds API Pinnacle fallback rows loaded: {fallback_loaded}")
+    print(f"[OU sharpness] OU sharp fallback Pinnacle fills: {fallback_fills}")
+    print(f"[OU sharpness] OU sharp fallback line mismatches rejected: {fallback_line_mismatches}")
 
     if not result:
         logging.warning("⚠️ Targeted OU sharp totals fetch returned no usable totals.")
