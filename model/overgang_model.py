@@ -2519,6 +2519,15 @@ def _game_is_playable_for_prediction(g) -> bool:
     return base in _PREGAME_STATUSES_FOR_PREDICTION
 
 
+def _main_the_odds_api_fallback_allowed():
+    return str(os.getenv("OVERGANG_ALLOW_THE_ODDS_API_MAIN_FALLBACK", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def run_predictions():
     print(f"🔮 OVER GANG PREDICTOR v4.0 (projection model) | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*50 + "\n")
@@ -2645,6 +2654,20 @@ def run_predictions():
         parlay_usable_non_manual_totals = _preflight_count_games_with_non_manual_real_totals(games, odds_map)
         print(f"[ODDS] Parlay usable non-manual scheduled totals: {parlay_usable_non_manual_totals}/{len(games)}")
         if games and parlay_usable_non_manual_totals == 0:
+            if not _main_the_odds_api_fallback_allowed():
+                print("[ODDS] STOP: Parlay returned 0 usable scheduled totals after retry.")
+                print(
+                    "[ODDS] The Odds API main fallback disabled by "
+                    "OVERGANG_ALLOW_THE_ODDS_API_MAIN_FALLBACK."
+                )
+                print(
+                    "[ODDS] Engine stopped to avoid synthetic fallback totals and "
+                    "protect The Odds API credits."
+                )
+                return
+            print(
+                "[ODDS] The Odds API main fallback explicitly enabled via env flag; proceeding."
+            )
             toa_fallback_map = fetch_full_game_odds_map() or {}
             print(f"[ODDS] The Odds API fallback rows: {len(toa_fallback_map)}")
             toa_trusted_total_source_map = {}

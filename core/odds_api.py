@@ -7,6 +7,7 @@ Target-date filtering: keep events whose commence_time maps to target_date (YYYY
 """
 import os
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -897,93 +898,15 @@ def fetch_ou_sharp_totals():
     return result
 
 
-def fetch_mlb_odds(target_date=None):
-    """
-    Fetch MLB odds from The Odds API (US, American odds, h2h + totals).
-    target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). If set, we pass
-    commenceTimeFrom/commenceTimeTo so the API returns only events on that date (MT), and we keep
-    only events whose commence_time falls on that date.
-    Returns dict: event_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }.
-    Note: The API returns only events that bookmakers have posted; there is no param to "request
-    more events" for a date—if no odds exist for that date, the response will be empty.
-    """
-    print(f"[ODDS API] ODDS_API_KEY exists: {bool(ODDS_API_KEY)}")
-    if target_date:
-        print(f"[ODDS API] Target date filter: {target_date} (MT)")
-    if not ODDS_API_KEY:
-        logging.warning("⚠️ ODDS_API_KEY not set; odds API disabled.")
-        return {}
+def _count_usable_target_date_total_lines(odds_map):
+    """Count odds_map rows with a non-empty total_line (target-slate usable totals)."""
+    if not isinstance(odds_map, dict):
+        return 0
+    return sum(1 for row in odds_map.values() if row.get("total_line") not in (None, ""))
 
-    url = f"{ODDS_BASE_URL}/sports/{MLB_SPORT_KEY}/odds"
-    params = {
-        "regions": "us",
-        "markets": "h2h,totals",
-        "oddsFormat": "american",
-    }
-    headers = {"X-API-Key": ODDS_API_KEY, "Accept": "application/json"}
-    # Python-side target_date filtering only (no commenceTimeFrom/To on request) for backfill testing.
-    if target_date:
-        print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
-    try:
-        import requests
-        from requests.exceptions import RequestException
-    except ImportError:
-        logging.warning("⚠️ requests not available; odds API disabled.")
-        return {}
 
-    r = None
-    for attempt in (1, 2):
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=PARLAY_FETCH_TIMEOUT_SEC)
-            break
-        except RequestException as e:
-            if attempt == 1:
-                print(
-                    f"[ODDS API] Parlay API HTTPS request failed (attempt {attempt}/2): {e}; "
-                    f"retrying once with timeout={PARLAY_FETCH_TIMEOUT_SEC}s..."
-                )
-                logging.warning(f"⚠️ Odds API request failed (will retry once): {e}")
-                continue
-            print(f"[ODDS API] Request failed after retry: {e}")
-            logging.warning(f"⚠️ Odds API request failed after retry: {e}")
-            return {}
-
-    try:
-        print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
-        r.raise_for_status()
-        raw_payload = r.json()
-        if isinstance(raw_payload, list):
-            data = raw_payload
-        elif (
-            isinstance(raw_payload, dict)
-            and isinstance(raw_payload.get("data"), list)
-        ):
-            data = raw_payload["data"]
-            print(
-                f"[ODDS API] Parlay API response wrapper detected: rows={len(data)}"
-            )
-        else:
-            if isinstance(raw_payload, dict):
-                keys_preview = list(raw_payload.keys())[:12]
-                print(
-                    "[ODDS API] Unrecognized odds JSON "
-                    f"(dict keys={keys_preview}); returning empty odds_map."
-                )
-            else:
-                print(
-                    "[ODDS API] Unrecognized odds JSON "
-                    f"(type={type(raw_payload).__name__}); returning empty odds_map."
-                )
-            return {}
-        if len(data) == 0:
-            print("[ODDS API] Empty events list from API; returning empty odds_map (no error).")
-            return {}
-        print(f"[ODDS API] Events returned: {len(data)}")
-    except Exception as e:
-        print(f"[ODDS API] Request failed: {e}")
-        logging.warning(f"⚠️ Odds API request failed: {e}")
-        return {}
-
+def _parlay_payload_to_odds_map(data, target_date=None):
+    """Parse Parlay events list into odds_map (unchanged row shape)."""
     # Raw event inspection (first 5 events)
     events_to_inspect = data[:5] if isinstance(data, list) else []
     for i, ev in enumerate(events_to_inspect):
@@ -1000,7 +923,7 @@ def fetch_mlb_odds(target_date=None):
         print(f"[ODDS API] Event[{i}] away={repr(away)} home={repr(home)} commence_time={commence}")
         print(f"[ODDS API]   bookmakers ({len(books)}): {book_names}")
         print(f"[ODDS API]   totals exists per book: {totals_per_book}  any_totals={any_totals}")
-
+    
     result = {}
     skip_log_cap = 3
     skip_log_count = 0
@@ -1028,7 +951,7 @@ def fetch_mlb_odds(target_date=None):
                 )
                 date_skip_count += 1
             continue
-
+    
         home = (event.get("home_team") or "").strip()
         away = (event.get("away_team") or "").strip()
         if _parlay_row_excludes_non_mlb_teams(away, home):
@@ -1041,7 +964,7 @@ def fetch_mlb_odds(target_date=None):
                 print(f"[ODDS API] Skip reason (event {repr(away)} @ {repr(home)}): {reason}")
                 skip_log_count += 1
             continue
-
+    
         if _is_parlay_flat_event_row(event):
             try:
                 selected_total_line = float(event["total"])
@@ -1092,7 +1015,7 @@ def fetch_mlb_odds(target_date=None):
             }
             parlay_flat_count += 1
             continue
-
+    
         best = None
         best_rank = len(BOOK_PRIORITY) + 1
         for book in event.get("bookmakers") or []:
@@ -1108,7 +1031,7 @@ def fetch_mlb_odds(target_date=None):
                 continue
             best_rank = rank
             best = book
-
+    
         used_fallback_loop = False
         if best is None:
             for book in event.get("bookmakers") or []:
@@ -1116,7 +1039,7 @@ def fetch_mlb_odds(target_date=None):
                     best = book
                     used_fallback_loop = True
                     break
-
+    
         if best is None:
             # No totals book on this event: keep the diagnostic log but do NOT early-exit.
             # Totals fields stay at defaults; the h2h / per-book ML passes below still run so
@@ -1130,12 +1053,12 @@ def fetch_mlb_odds(target_date=None):
                 print(f"[ODDS API] Event has no book with totals market: away={repr(away)} home={repr(home)}")
                 print(f"[ODDS API]   books: {book_keys}; markets per book: {market_keys_per_book}")
                 no_totals_log_count += 1
-
+    
         if best is not None and book_choice_log_count < book_choice_log_cap:
             book_name = best.get("title") or best.get("key") or "?"
             print(f"[ODDS API] Event parsed: away={repr(away)} home={repr(home)} key={repr(key)} book={book_name} (from_fallback_loop={used_fallback_loop})")
             book_choice_log_count += 1
-
+    
         # Select h2h-capable book independently using the same BOOK_PRIORITY ranking.
         # Sharp totals books (e.g. pinnacle) may lack h2h; moneylines then come from the
         # highest-ranked h2h-capable book on the same event. Totals still come from `best`,
@@ -1184,7 +1107,7 @@ def fetch_mlb_odds(target_date=None):
                 if any((m.get("key") == "h2h") for m in (book.get("markets") or [])):
                     best_ml = book
                     break
-
+    
         # Totals parsing (only when a totals book exists). When best is None, totals fields
         # remain at the defaults declared above — matching the prior no-totals row shape.
         if best is not None:
@@ -1203,7 +1126,7 @@ def fetch_mlb_odds(target_date=None):
             ml_home = None
             ml_away = None
         per_book_ml = _extract_per_book_ml_flags(event, home, away)
-
+    
         # Missing-side backfill: if selected-book parsing left ml_home or ml_away as None,
         # fill the missing side from already-computed per-book ML pairs in priority order
         # (Pinnacle → Novig → ProphetX). `book` stays tied to the totals source for O/U
@@ -1220,7 +1143,7 @@ def fetch_mlb_odds(target_date=None):
                 if _v is not None:
                     ml_away = _v
                     break
-
+    
         # Observational-only: when the tracked-donor backfill cannot complete the ML pair,
         # emit a single capped diagnostic dumping every per-book ML value we already parsed
         # (tracked + untracked). This is evidence-gathering to prove whether untracked books
@@ -1237,7 +1160,7 @@ def fetch_mlb_odds(target_date=None):
             )
             print(f"[ODDS API]   per_book_ml_snapshot={per_book_ml_snapshot}")
             ml_incomplete_log_count += 1
-
+    
         # Observational-only per-book totals overlay. Mirrors the ML overlay
         # pattern and is written into result[key] so later inspection can
         # prove whether a Pinnacle-based O/U sharpness pivot is supported by
@@ -1246,7 +1169,7 @@ def fetch_mlb_odds(target_date=None):
         # the selected `total_line`, O/U confidence, O/U fire logic, or any
         # existing export contract.
         per_book_totals = _extract_per_book_totals_flags(event)
-
+    
         # Capped O/U diagnostic: surface events where per-book totals truth
         # diverges from the selected-book scalar. Fires when at least two
         # tracked books carry totals, or Pinnacle totals exist but were not
@@ -1284,7 +1207,7 @@ def fetch_mlb_odds(target_date=None):
             )
             print(f"[ODDS API]   per_book_totals_snapshot={per_book_totals_snapshot}")
             ou_diag_log_count += 1
-
+    
         result[key] = {
             "total_line": total_line,
             "over_juice": over_juice,
@@ -1310,7 +1233,126 @@ def fetch_mlb_odds(target_date=None):
     print(f"[ODDS API] Sample odds_map keys (3): {sample_keys}")
     for k in sample_keys:
         v = result.get(k, {})
-        print(f"[ODDS API]   Sample value: total_line={v.get('total_line')}, over_juice={v.get('over_juice')}, under_juice={v.get('under_juice')}, book={repr(v.get('book'))}")
+        print(
+            f"[ODDS API]   Sample value: total_line={v.get('total_line')}, "
+            f"over_juice={v.get('over_juice')}, under_juice={v.get('under_juice')}, "
+            f"book={repr(v.get('book'))}"
+        )
+    return result
+
+
+def fetch_mlb_odds(target_date=None):
+    """
+    Fetch MLB odds from Parlay API (US, American odds, h2h + totals).
+    target_date: optional YYYY-MM-DD string (e.g. predictor slate date in MT). Events are
+    filtered to the active slate date in Python (04:00 MT rollover), not via commenceTime params.
+    Returns dict: event_key -> { total_line, over_juice, under_juice, ml_home, ml_away, book }.
+    On empty payload or zero usable target-date totals, retries the same Parlay request once.
+    """
+    print(f"[ODDS API] ODDS_API_KEY exists: {bool(ODDS_API_KEY)}")
+    if target_date:
+        print(f"[ODDS API] Target date filter: {target_date} (MT)")
+    if not ODDS_API_KEY:
+        logging.warning("⚠️ ODDS_API_KEY not set; odds API disabled.")
+        return {}
+
+    url = f"{ODDS_BASE_URL}/sports/{MLB_SPORT_KEY}/odds"
+    params = {
+        "regions": "us",
+        "markets": "h2h,totals",
+        "oddsFormat": "american",
+    }
+    headers = {"X-API-Key": ODDS_API_KEY, "Accept": "application/json"}
+    if target_date:
+        print(f"[ODDS API] Using Python-side target_date filtering only for: {target_date}")
+    try:
+        import requests
+        from requests.exceptions import RequestException
+    except ImportError:
+        logging.warning("⚠️ requests not available; odds API disabled.")
+        return {}
+
+    result = None
+    data = None
+    for attempt in (1, 2):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=PARLAY_FETCH_TIMEOUT_SEC)
+            print(f"[ODDS API] Request succeeded: {r.status_code == 200}, HTTP status: {r.status_code}")
+            r.raise_for_status()
+            raw_payload = r.json()
+            if isinstance(raw_payload, list):
+                data = raw_payload
+            elif (
+                isinstance(raw_payload, dict)
+                and isinstance(raw_payload.get("data"), list)
+            ):
+                data = raw_payload["data"]
+                print(
+                    f"[ODDS API] Parlay API response wrapper detected: rows={len(data)}"
+                )
+            else:
+                if isinstance(raw_payload, dict):
+                    keys_preview = list(raw_payload.keys())[:12]
+                    print(
+                        "[ODDS API] Unrecognized odds JSON "
+                        f"(dict keys={keys_preview}); returning empty odds_map."
+                    )
+                else:
+                    print(
+                        "[ODDS API] Unrecognized odds JSON "
+                        f"(type={type(raw_payload).__name__}); returning empty odds_map."
+                    )
+                return {}
+        except RequestException as e:
+            if attempt == 1:
+                print(
+                    f"[ODDS API] Parlay API HTTPS request failed (attempt {attempt}/2): {e}; "
+                    f"retrying once with timeout={PARLAY_FETCH_TIMEOUT_SEC}s..."
+                )
+                logging.warning(f"⚠️ Odds API request failed (will retry once): {e}")
+                continue
+            print(f"[ODDS API] Request failed after retry: {e}")
+            logging.warning(f"⚠️ Odds API request failed after retry: {e}")
+            return {}
+        except Exception as e:
+            print(f"[ODDS API] Request failed: {e}")
+            logging.warning(f"⚠️ Odds API request failed: {e}")
+            return {}
+
+        if not isinstance(data, list) or len(data) == 0:
+            if attempt == 1:
+                print(
+                    "[ODDS API] Empty Parlay events list on attempt 1/2; retrying once after 3s..."
+                )
+                time.sleep(3)
+                continue
+            print(
+                "[ODDS API] Empty Parlay events list after retry; returning empty odds_map."
+            )
+            return {}
+
+        print(f"[ODDS API] Events returned: {len(data)}")
+        result = _parlay_payload_to_odds_map(data, target_date=target_date)
+
+        if target_date:
+            usable_n = _count_usable_target_date_total_lines(result)
+            if usable_n == 0:
+                if attempt == 1:
+                    print(
+                        "[ODDS API] Parlay returned 0 usable target-date odds on attempt 1/2; "
+                        "retrying once after 3s..."
+                    )
+                    time.sleep(3)
+                    continue
+                print(
+                    "[ODDS API] Parlay returned 0 usable target-date odds after retry; "
+                    "returning empty odds_map."
+                )
+                return {}
+        break
+
+    if result is None:
+        return {}
     return result
 
 
@@ -1428,3 +1470,4 @@ def get_game_odds(away_team, home_team, odds_map=None, commence_time=None):
         "prophetx_present": False,
         "pinnacle_present": False,
     }
+
