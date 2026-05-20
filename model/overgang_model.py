@@ -5816,6 +5816,89 @@ def run_predictions():
         # alter either. Uses the same eligible_export rows and the same
         # timestamp as the archive file. Renames internal `Prediction` to
         # `OU_Pick` for readability without touching the archive schema.
+
+        def _picks_board_key(row):
+            date = str(row.get("Game_Date", "") or "")[:10]
+            game = str(row.get("Game", "") or "").strip()
+            dt = str(row.get("Datetime", "") or "").strip()
+            if dt:
+                return (date, game, dt)
+            game_num = str(row.get("Game_Num", "") or "").strip()
+            return (date, game, game_num)
+
+        def _build_profile_lookup(rows_or_df, fields):
+            lookup = {}
+            if rows_or_df is None:
+                return lookup
+            if hasattr(rows_or_df, "empty"):
+                if rows_or_df.empty:
+                    return lookup
+                rows = rows_or_df.to_dict("records")
+            else:
+                rows = rows_or_df or []
+            if not rows:
+                return lookup
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                key = _picks_board_key(row)
+                payload = {f: row.get(f, "") for f in fields}
+                if key in lookup:
+                    print(
+                        f"[PICKS_BOARD] duplicate profile key while enriching picks board: {key}"
+                    )
+                lookup[key] = payload
+            return lookup
+
+        def _format_f5_pick(side, line):
+            side = str(side or "").strip().upper()
+            if side not in ("OVER", "UNDER"):
+                return ""
+            if line is None or not pd.notna(line):
+                return ""
+            line_str = str(line).strip()
+            if line_str == "" or line_str.lower() == "nan":
+                return ""
+            try:
+                return f"{side} {float(line):.1f}"
+            except (TypeError, ValueError):
+                return f"{side} {line_str}"
+
+        over_profile_fields = [
+            "OU_Over_Low_Total_Profile",
+            "OU_Over_Prob_Sweet_Spot",
+            "OU_Over_Thin_Edge_Profile",
+            "OU_Over_Large_Edge_Risk",
+            "OU_Over_High_Total_Risk",
+            "OU_Over_Profile_Bucket",
+            "OU_Over_Profile_Grade",
+            "F5_Over_Profile_Signal",
+            "F5_Over_Preference",
+            "F5_Over_Profile_Reason",
+            "F5_Over_Profile_Grade",
+        ]
+        under_profile_fields = [
+            "OU_Under_Prob_Support",
+            "OU_Under_Low_Total_Risk",
+            "OU_Under_High_Total_Cushion",
+            "OU_Under_Mid_Edge_Risk",
+            "OU_Under_Large_Edge_Profile",
+            "OU_Under_Reliever_Depth_Risk_Profile",
+            "OU_Under_HighHigh_Bullpen_Risk",
+            "OU_Under_Profile_Bucket",
+            "OU_Under_Profile_Grade",
+            "F5_Under_Profile_Signal",
+            "F5_Under_Preference",
+            "F5_Under_Profile_Reason",
+            "F5_Under_Profile_Grade",
+        ]
+        over_profile_lookup = _build_profile_lookup(
+            ou_over_profile_board_df, over_profile_fields
+        )
+        under_profile_lookup = _build_profile_lookup(
+            ou_under_profile_board_df, under_profile_fields
+        )
+
         picks_board_front_cols = [
             "Game_Date", "Game_Time_MT", "Venue", "Doubleheader", "Game",
             "Away_Pitcher", "Away_xERA", "Away_WHIP",
@@ -5829,6 +5912,21 @@ def run_predictions():
         picks_board_ou_cols = [
             "OU_Pick", "OU_Confidence", "OU_Fired", "OU_Edge",
         ]
+        picks_board_f5_cols = [
+            "F5_Pick",
+            "F5_Projected_Total",
+            "F5_Market_Line",
+            "F5_Edge",
+            "F5_Model_Side",
+            "F5_Starter_Lean",
+            "F5_Eligible",
+            "F5_Market_OK",
+            "F5_Source",
+            "F5_Book",
+            "F5_Over_Juice",
+            "F5_Under_Juice",
+            "F5_No_Line_Reason",
+        ]
         picks_board_ou_prob_cols = [
             "OU_Implied_Prob_Pick", "OU_True_Prob_Pick",
             "OU_Prob_Edge", "OU_Prob_Edge_Side", "OU_Prob_Method",
@@ -5836,6 +5934,34 @@ def run_predictions():
             "OU_Prob_Over_Juice", "OU_Prob_Under_Juice",
             "OU_Prob_Calibration_Flag",
             "No_Fire_OU_Reason", "Projection_Cap_Flag", "Total_Is_Real",
+        ]
+        picks_board_ou_over_profile_cols = [
+            "OU_Over_Low_Total_Profile",
+            "OU_Over_Prob_Sweet_Spot",
+            "OU_Over_Thin_Edge_Profile",
+            "OU_Over_Large_Edge_Risk",
+            "OU_Over_High_Total_Risk",
+            "OU_Over_Profile_Bucket",
+            "OU_Over_Profile_Grade",
+            "F5_Over_Profile_Signal",
+            "F5_Over_Preference",
+            "F5_Over_Profile_Reason",
+            "F5_Over_Profile_Grade",
+        ]
+        picks_board_ou_under_profile_cols = [
+            "OU_Under_Prob_Support",
+            "OU_Under_Low_Total_Risk",
+            "OU_Under_High_Total_Cushion",
+            "OU_Under_Mid_Edge_Risk",
+            "OU_Under_Large_Edge_Profile",
+            "OU_Under_Reliever_Depth_Risk_Profile",
+            "OU_Under_HighHigh_Bullpen_Risk",
+            "OU_Under_Profile_Bucket",
+            "OU_Under_Profile_Grade",
+            "F5_Under_Profile_Signal",
+            "F5_Under_Preference",
+            "F5_Under_Profile_Reason",
+            "F5_Under_Profile_Grade",
         ]
         picks_board_ml_cols = [
             "ML_Pick", "ML_Confidence", "ML_Fired", "ML_Edge",
@@ -5871,7 +5997,10 @@ def run_predictions():
             picks_board_front_cols
             + picks_board_starter_cols
             + picks_board_ou_cols
+            + picks_board_f5_cols
             + picks_board_ou_prob_cols
+            + picks_board_ou_over_profile_cols
+            + picks_board_ou_under_profile_cols
             + picks_board_ml_cols
             + picks_board_market_cols
             + picks_board_ou_sharp_cols
@@ -5879,10 +6008,47 @@ def run_predictions():
             + picks_board_reliever_cols
             + picks_board_tail_cols
         )
+        _seen_picks_board_cols = set()
+        _deduped_picks_board_cols = []
+        _dup_picks_board_cols = []
+        for _c in picks_board_cols:
+            if _c in _seen_picks_board_cols:
+                _dup_picks_board_cols.append(_c)
+                continue
+            _seen_picks_board_cols.add(_c)
+            _deduped_picks_board_cols.append(_c)
+        if _dup_picks_board_cols:
+            print(
+                f"[PICKS_BOARD] removed duplicate picks-board columns: {_dup_picks_board_cols}"
+            )
+        picks_board_cols = _deduped_picks_board_cols
         picks_board_rows = []
         for _r in eligible_export:
             _row = dict(_r)
             _row["OU_Pick"] = _r.get("Prediction", "")
+            _pb_key = _picks_board_key(_row)
+            _row.update(over_profile_lookup.get(_pb_key, {}))
+            _row.update(under_profile_lookup.get(_pb_key, {}))
+            _f5_edge_val = _row.get("F5_Edge")
+            _f5_edge_missing = (
+                _f5_edge_val is None
+                or _f5_edge_val == ""
+                or (isinstance(_f5_edge_val, float) and pd.isna(_f5_edge_val))
+            )
+            if _f5_edge_missing:
+                try:
+                    _row["F5_Edge"] = round(
+                        float(_row["F5_Projected_Total"]) - float(_row["F5_Market_Line"]),
+                        2,
+                    )
+                except (TypeError, ValueError):
+                    pass
+            _existing_f5_pick = str(_row.get("F5_Pick", "") or "").strip()
+            if not _existing_f5_pick or _existing_f5_pick.lower() == "nan":
+                _row["F5_Pick"] = _format_f5_pick(
+                    _row.get("F5_Model_Side", ""),
+                    _row.get("F5_Market_Line"),
+                )
             picks_board_rows.append(_row)
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
         picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
