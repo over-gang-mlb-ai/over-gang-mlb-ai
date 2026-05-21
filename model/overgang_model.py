@@ -5927,6 +5927,17 @@ def run_predictions():
             "F5_Under_Juice",
             "F5_No_Line_Reason",
         ]
+        picks_board_daily_analysis_cols = [
+            "Daily_OU_Profile_Side",
+            "Daily_OU_Profile_Grade",
+            "Daily_OU_Profile_Bucket",
+            "Daily_OU_Profile_Read",
+            "Daily_F5_Profile_Side",
+            "Daily_F5_Profile_Pick",
+            "Daily_F5_Profile_Grade",
+            "Daily_F5_Profile_Reason",
+            "Daily_F5_Analysis_Read",
+        ]
         picks_board_ou_prob_cols = [
             "OU_Implied_Prob_Pick", "OU_True_Prob_Pick",
             "OU_Prob_Edge", "OU_Prob_Edge_Side", "OU_Prob_Method",
@@ -5998,6 +6009,7 @@ def run_predictions():
             + picks_board_starter_cols
             + picks_board_ou_cols
             + picks_board_f5_cols
+            + picks_board_daily_analysis_cols
             + picks_board_ou_prob_cols
             + picks_board_ou_over_profile_cols
             + picks_board_ou_under_profile_cols
@@ -6022,6 +6034,47 @@ def run_predictions():
                 f"[PICKS_BOARD] removed duplicate picks-board columns: {_dup_picks_board_cols}"
             )
         picks_board_cols = _deduped_picks_board_cols
+
+        def _daily_blank(v):
+            if v is None:
+                return True
+            try:
+                if pd.isna(v):
+                    return True
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            return s == "" or s.lower() in ("nan", "none", "null", "<na>")
+
+        def _daily_clean(v):
+            return "" if _daily_blank(v) else str(v).strip()
+
+        def _daily_ou_side_from_pick(pick):
+            p = str(pick or "").upper().strip()
+            if p.startswith("LEAN OVER") or p.startswith("OVER"):
+                return "OVER"
+            if p.startswith("LEAN UNDER") or p.startswith("UNDER"):
+                return "UNDER"
+            return ""
+
+        def _f5_pref_true(v):
+            if v is True:
+                return True
+            s = str(v).strip().lower()
+            return s in ("true", "1", "yes")
+
+        def _daily_f5_profile_side(row):
+            over_pref = _f5_pref_true(row.get("F5_Over_Preference"))
+            under_pref = _f5_pref_true(row.get("F5_Under_Preference"))
+            if over_pref and not under_pref:
+                return "OVER"
+            if under_pref and not over_pref:
+                return "UNDER"
+            model_side = str(row.get("F5_Model_Side", "") or "").strip().upper()
+            if model_side in ("OVER", "UNDER"):
+                return model_side
+            return ""
+
         picks_board_rows = []
         for _r in eligible_export:
             _row = dict(_r)
@@ -6049,6 +6102,65 @@ def run_predictions():
                     _row.get("F5_Model_Side", ""),
                     _row.get("F5_Market_Line"),
                 )
+
+            _ou_over_grade = _daily_clean(_row.get("OU_Over_Profile_Grade"))
+            _ou_over_bucket = _daily_clean(_row.get("OU_Over_Profile_Bucket"))
+            _ou_under_grade = _daily_clean(_row.get("OU_Under_Profile_Grade"))
+            _ou_under_bucket = _daily_clean(_row.get("OU_Under_Profile_Bucket"))
+            if _ou_over_grade or _ou_over_bucket:
+                _daily_ou_side = "OVER"
+                _daily_ou_grade = _ou_over_grade
+                _daily_ou_bucket = _ou_over_bucket
+            elif _ou_under_grade or _ou_under_bucket:
+                _daily_ou_side = "UNDER"
+                _daily_ou_grade = _ou_under_grade
+                _daily_ou_bucket = _ou_under_bucket
+            else:
+                _daily_ou_side = _daily_ou_side_from_pick(_row.get("OU_Pick", ""))
+                _daily_ou_grade = ""
+                _daily_ou_bucket = ""
+            _row["Daily_OU_Profile_Side"] = _daily_ou_side
+            _row["Daily_OU_Profile_Grade"] = _daily_ou_grade
+            _row["Daily_OU_Profile_Bucket"] = _daily_ou_bucket
+            _daily_ou_read_parts = []
+            if _daily_ou_side:
+                _daily_ou_read_parts.append(_daily_ou_side)
+            if _daily_ou_grade:
+                _daily_ou_read_parts.append(f"Grade: {_daily_ou_grade}")
+            if _daily_ou_bucket:
+                _daily_ou_read_parts.append(f"Bucket: {_daily_ou_bucket}")
+            _row["Daily_OU_Profile_Read"] = " | ".join(_daily_ou_read_parts)
+
+            _daily_f5_side = _daily_f5_profile_side(_row)
+            if _daily_f5_side == "OVER":
+                _daily_f5_grade = _daily_clean(_row.get("F5_Over_Profile_Grade"))
+                _daily_f5_reason = _daily_clean(_row.get("F5_Over_Profile_Reason"))
+                _derived_f5_pick = _format_f5_pick("OVER", _row.get("F5_Market_Line"))
+            elif _daily_f5_side == "UNDER":
+                _daily_f5_grade = _daily_clean(_row.get("F5_Under_Profile_Grade"))
+                _daily_f5_reason = _daily_clean(_row.get("F5_Under_Profile_Reason"))
+                _derived_f5_pick = _format_f5_pick("UNDER", _row.get("F5_Market_Line"))
+            else:
+                _daily_f5_grade = ""
+                _daily_f5_reason = ""
+                _derived_f5_pick = ""
+            _row["Daily_F5_Profile_Side"] = _daily_f5_side
+            _row["Daily_F5_Profile_Grade"] = _daily_f5_grade
+            _row["Daily_F5_Profile_Reason"] = _daily_f5_reason
+            if not _daily_blank(_derived_f5_pick):
+                _row["Daily_F5_Profile_Pick"] = _derived_f5_pick
+            else:
+                _existing_f5_pick_for_daily = _daily_clean(_row.get("F5_Pick"))
+                _row["Daily_F5_Profile_Pick"] = _existing_f5_pick_for_daily
+            _daily_f5_read_parts = []
+            if not _daily_blank(_row.get("Daily_F5_Profile_Pick")):
+                _daily_f5_read_parts.append(str(_row.get("Daily_F5_Profile_Pick")))
+            if _daily_f5_grade:
+                _daily_f5_read_parts.append(f"Profile Grade: {_daily_f5_grade}")
+            if _daily_f5_reason:
+                _daily_f5_read_parts.append(_daily_f5_reason.replace("|", ", "))
+            _row["Daily_F5_Analysis_Read"] = " | ".join(_daily_f5_read_parts)
+
             picks_board_rows.append(_row)
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
         picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
