@@ -2164,6 +2164,60 @@ def _fmt_num_one(v) -> str:
     return str(v)
 
 
+def _alert_clean(v) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if s.lower() in ("nan", "none", "null", "<na>"):
+        return ""
+    return s
+
+
+def _alert_bool(v) -> bool:
+    if v is True:
+        return True
+    return str(v).strip().lower() in ("true", "1", "yes")
+
+
+def _alert_float_or_none(v):
+    try:
+        if v is None:
+            return None
+        if isinstance(v, float) and pd.isna(v):
+            return None
+        s = str(v).strip()
+        if s == "" or s.lower() in ("nan", "none", "null", "<na>"):
+            return None
+        f = float(v)
+        if f != f:
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_f5_telegram_candidate(row: dict) -> bool:
+    if not _alert_bool(row.get("F5_Market_OK")):
+        return False
+    edge = _alert_float_or_none(row.get("F5_Edge"))
+    if edge is None or abs(edge) < 0.75:
+        return False
+    pick = _alert_clean(row.get("Daily_F5_Profile_Pick")) or _alert_clean(row.get("F5_Pick"))
+    if not pick:
+        return False
+    if _alert_clean(row.get("F5_Market_Line")) == "":
+        return False
+    grade = _alert_clean(row.get("Daily_F5_Profile_Grade"))
+    if grade.lower() == "risk":
+        return False
+    return True
+
+
 def format_ou_alert(game_data: dict) -> str:
     """Customer-facing O/U Telegram message (CSV remains full detail)."""
     t = _alert_formatted_time(game_data)
@@ -2201,6 +2255,60 @@ def format_ml_alert(game_data: dict) -> str:
         f"💪 *Confidence*: {conf}{f' {emoji}' if emoji else ''} · *Kelly*: {game_data.get('ML_Kelly_Units', '-')}\n\n"
         "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly."
     )
+
+
+def format_f5_alert(game_data: dict) -> str:
+    """Customer-facing F5 Telegram message (CSV remains full detail)."""
+    if game_data.get("Datetime"):
+        t = _alert_formatted_time(game_data)
+    else:
+        t = _alert_clean(game_data.get("Game_Time_MT")) or "TBD"
+    pitchers = game_data.get("Pitchers")
+    if not pitchers:
+        away_p = game_data.get("Away_Pitcher") or "?"
+        home_p = game_data.get("Home_Pitcher") or "?"
+        pitchers = f"{away_p} vs {home_p}"
+    away_xera = _alert_clean(game_data.get("Away_Starter_xERA"))
+    home_xera = _alert_clean(game_data.get("Home_Starter_xERA"))
+    away_whip = _alert_clean(game_data.get("Away_Starter_WHIP"))
+    home_whip = _alert_clean(game_data.get("Home_Starter_WHIP"))
+    xera_str = f"{away_xera or '-'}/{home_xera or '-'}"
+    whip_str = f"{away_whip or '-'}/{home_whip or '-'}"
+    pick = (
+        _alert_clean(game_data.get("Daily_F5_Profile_Pick"))
+        or _alert_clean(game_data.get("F5_Pick"))
+        or "-"
+    )
+    edge_f = _alert_float_or_none(game_data.get("F5_Edge"))
+    edge_str = f"{edge_f:+.1f}" if edge_f is not None else "?"
+    grade = _alert_clean(game_data.get("Daily_F5_Profile_Grade"))
+    analysis = _alert_clean(game_data.get("Daily_F5_Analysis_Read")) or _alert_clean(
+        game_data.get("Daily_F5_Profile_Reason")
+    )
+    ou_context = _alert_clean(game_data.get("Daily_OU_Profile_Read"))
+    lines = [
+        "\u23f1\ufe0f *F5 \u00b7 Over Gang*",
+        f"\U0001f3df\ufe0f *{game_data.get('Game', 'Unknown')}*",
+        f"\U0001f4cd {game_data.get('Venue', 'Unknown')} | \U0001f552 {t}",
+        "",
+        f"\U0001f3af {pitchers}",
+        f"\U0001f4ca xERA {xera_str} \u00b7 WHIP {whip_str}",
+        "",
+        f"\U0001f9e0 *Pick*: {pick}",
+        f"\U0001f4d0 *F5 Edge*: {edge_str}",
+    ]
+    if grade:
+        lines.append(f"\U0001f3f7\ufe0f *Profile Grade*: {grade}")
+    if analysis:
+        lines.append(f"\U0001f9fe {analysis}")
+    if ou_context:
+        lines.append(f"\U0001f3af Full-game context: {ou_context}")
+    lines.extend([
+        "",
+        "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly.",
+    ])
+    return "\n".join(lines)
+
 
 def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
     try:
@@ -4717,6 +4825,8 @@ def run_predictions():
         r for r in results
         if r.get("Total_Is_Real", False) or r.get("ML_Fired", False)
     ]
+    telegram_f5_alerts = []
+    _f5_candidate_n = 0
     if eligible_export:
         # Filename YYYYMMDD = active MT slate date (04:00 rollover), not wall-clock
         # calendar date — so late-night reruns of the prior slate do not shift the
@@ -6162,6 +6272,21 @@ def run_predictions():
             _row["Daily_F5_Analysis_Read"] = " | ".join(_daily_f5_read_parts)
 
             picks_board_rows.append(_row)
+        _f5_candidate_n = len(picks_board_rows)
+        telegram_f5_alerts = []
+        _seen_f5_telegram = set()
+        for _f5_row in picks_board_rows:
+            if not _is_f5_telegram_candidate(_f5_row):
+                continue
+            _f5_pick = (
+                _alert_clean(_f5_row.get("Daily_F5_Profile_Pick"))
+                or _alert_clean(_f5_row.get("F5_Pick"))
+            )
+            _f5_key = (str(_f5_row.get("Game", "")), _f5_pick)
+            if _f5_key in _seen_f5_telegram:
+                continue
+            _seen_f5_telegram.add(_f5_key)
+            telegram_f5_alerts.append(_f5_row)
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
         picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
         picks_board_df.to_csv(picks_board_path, index=False)
@@ -6204,6 +6329,14 @@ def run_predictions():
             message = format_ml_alert(alert)
             if send_telegram_alert(message):
                 print(f"📤 ML alert sent for {alert['Game']}")
+                time.sleep(1)
+
+    if telegram_f5_alerts:
+        print(f"\n\U0001f6a8 Sending {len(telegram_f5_alerts)} F5 Telegram alert(s) (abs edge >= 0.75)...")
+        for alert in telegram_f5_alerts:
+            message = format_f5_alert(alert)
+            if send_telegram_alert(message):
+                print(f"\U0001f4e4 F5 alert sent for {alert['Game']}")
                 time.sleep(1)
 
     # Log unmatched
@@ -6369,6 +6502,7 @@ def run_predictions():
     print(f"  Games with ML_Fired: {sum(1 for r in results if r.get('ML_Fired'))}")
     print(f"  O/U Telegram alerts sent: {len(telegram_ou_alerts)} (candidates: {len(alerts)})")
     print(f"  ML Telegram alerts sent: {len(telegram_ml_alerts)} (candidates: {len(ml_alerts)})")
+    print(f"  F5 Telegram alerts sent: {len(telegram_f5_alerts)} (candidates: {_f5_candidate_n})")
     print(f"  Manual totals loaded: {len(_manual)}")
     print("-------------------")
 
