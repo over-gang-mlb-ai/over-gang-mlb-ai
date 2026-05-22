@@ -2178,6 +2178,19 @@ def _alert_clean(v) -> str:
     return s
 
 
+def _telegram_markdown_escape(v) -> str:
+    s = _alert_clean(v)
+    if not s:
+        return ""
+    return (
+        s.replace("\\", "\\\\")
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+    )
+
+
 def _alert_bool(v) -> bool:
     if v is True:
         return True
@@ -2286,23 +2299,37 @@ def format_f5_alert(game_data: dict) -> str:
         game_data.get("Daily_F5_Profile_Reason")
     )
     ou_context = _alert_clean(game_data.get("Daily_OU_Profile_Read"))
+    game_display = _telegram_markdown_escape(game_data.get("Game", "Unknown"))
+    venue_display = _telegram_markdown_escape(game_data.get("Venue", "Unknown"))
+    pitchers_display = _telegram_markdown_escape(pitchers)
+    pick_display = _telegram_markdown_escape(pick)
+    grade_display = _telegram_markdown_escape(grade)
+    analysis_display = _telegram_markdown_escape(
+        analysis.replace("|", ", ") if analysis else ""
+    )
+    ou_context_display = _telegram_markdown_escape(
+        ou_context.replace("|", ", ") if ou_context else ""
+    )
+    xera_display = _telegram_markdown_escape(xera_str)
+    whip_display = _telegram_markdown_escape(whip_str)
+    edge_display = _telegram_markdown_escape(edge_str)
     lines = [
         "\u23f1\ufe0f *F5 \u00b7 Over Gang*",
-        f"\U0001f3df\ufe0f *{game_data.get('Game', 'Unknown')}*",
-        f"\U0001f4cd {game_data.get('Venue', 'Unknown')} | \U0001f552 {t}",
+        f"\U0001f3df\ufe0f *{game_display}*",
+        f"\U0001f4cd {venue_display} | \U0001f552 {t}",
         "",
-        f"\U0001f3af {pitchers}",
-        f"\U0001f4ca xERA {xera_str} \u00b7 WHIP {whip_str}",
+        f"\U0001f3af {pitchers_display}",
+        f"\U0001f4ca xERA {xera_display} \u00b7 WHIP {whip_display}",
         "",
-        f"\U0001f9e0 *Pick*: {pick}",
-        f"\U0001f4d0 *F5 Edge*: {edge_str}",
+        f"\U0001f9e0 *Pick*: {pick_display}",
+        f"\U0001f4d0 *F5 Edge*: {edge_display}",
     ]
     if grade:
-        lines.append(f"\U0001f3f7\ufe0f *Profile Grade*: {grade}")
+        lines.append(f"\U0001f3f7\ufe0f *Profile Grade*: {grade_display}")
     if analysis:
-        lines.append(f"\U0001f9fe {analysis}")
+        lines.append(f"\U0001f9fe {analysis_display}")
     if ou_context:
-        lines.append(f"\U0001f3af Full-game context: {ou_context}")
+        lines.append(f"\U0001f3af Full-game context: {ou_context_display}")
     lines.extend([
         "",
         "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly.",
