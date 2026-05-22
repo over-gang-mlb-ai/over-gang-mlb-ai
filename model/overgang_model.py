@@ -6027,7 +6027,9 @@ def run_predictions():
             "F5_Projected_Total",
             "F5_Market_Line",
             "F5_Edge",
+            "F5_Edge_Side",
             "F5_Model_Side",
+            "F5_Model_Edge_Conflict",
             "F5_Starter_Lean",
             "F5_Eligible",
             "F5_Market_OK",
@@ -6185,6 +6187,19 @@ def run_predictions():
                 return model_side
             return ""
 
+        def _f5_edge_side_from_edge(edge):
+            try:
+                if edge is None or not pd.notna(edge):
+                    return ""
+                edge_f = float(edge)
+            except (TypeError, ValueError):
+                return ""
+            if edge_f > 0:
+                return "OVER"
+            if edge_f < 0:
+                return "UNDER"
+            return "EVEN"
+
         picks_board_rows = []
         for _r in eligible_export:
             _row = dict(_r)
@@ -6206,12 +6221,18 @@ def run_predictions():
                     )
                 except (TypeError, ValueError):
                     pass
-            _existing_f5_pick = str(_row.get("F5_Pick", "") or "").strip()
-            if not _existing_f5_pick or _existing_f5_pick.lower() == "nan":
-                _row["F5_Pick"] = _format_f5_pick(
-                    _row.get("F5_Model_Side", ""),
-                    _row.get("F5_Market_Line"),
-                )
+            _row["F5_Edge_Side"] = _f5_edge_side_from_edge(_row.get("F5_Edge"))
+            _row["F5_Pick"] = _format_f5_pick(
+                _row.get("F5_Edge_Side", ""),
+                _row.get("F5_Market_Line"),
+            )
+            _f5_model_side = str(_row.get("F5_Model_Side", "") or "").strip().upper()
+            _f5_edge_side = str(_row.get("F5_Edge_Side", "") or "").strip().upper()
+            _row["F5_Model_Edge_Conflict"] = bool(
+                _f5_model_side in ("OVER", "UNDER")
+                and _f5_edge_side in ("OVER", "UNDER")
+                and _f5_model_side != _f5_edge_side
+            )
 
             _ou_over_grade = _daily_clean(_row.get("OU_Over_Profile_Grade"))
             _ou_over_bucket = _daily_clean(_row.get("OU_Over_Profile_Bucket"))
