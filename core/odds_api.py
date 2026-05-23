@@ -238,15 +238,15 @@ def _parse_totals_and_h2h(book):
     outcomes with explicit ``"price": null`` / ``"point": null`` for illiquid sides. ``dict.get``
     returns the stored ``None`` rather than the default in that case, so each cast is guarded
     before ``int()`` / ``float()`` is invoked. Return shape and existing semantics are unchanged
-    when values are valid; missing/null totals fall through to DEFAULT_TOTAL / DEFAULT_JUICE, and
-    a missing/null h2h price for a side leaves that side's ML value as ``None``.
+    when values are valid; missing/null totals remain ``None`` (no DEFAULT_TOTAL / DEFAULT_JUICE
+    injection), and a missing/null h2h price for a side leaves that side's ML value as ``None``.
 
     Team-label matching on the h2h branch goes through ``_h2h_name_matches`` which accepts
     provider abbreviations / aliases (e.g. ``"ARI Diamondbacks"`` vs ``"Arizona Diamondbacks"``)
     in addition to exact-string equality. Does not invent prices.
     """
-    total_line = DEFAULT_TOTAL
-    over_juice = under_juice = DEFAULT_JUICE
+    total_line = None
+    over_juice = under_juice = None
     ml_home = ml_away = None
     for market in book.get("markets") or []:
         if market.get("key") == "totals":
@@ -258,19 +258,23 @@ def _parse_totals_and_h2h(book):
                 raw_point = o.get("point")
                 raw_price = o.get("price")
                 try:
-                    pt = float(raw_point) if raw_point is not None else DEFAULT_TOTAL
+                    pt = float(raw_point) if raw_point is not None else None
                 except (TypeError, ValueError):
-                    pt = DEFAULT_TOTAL
+                    pt = None
                 try:
-                    pr = int(raw_price) if raw_price is not None else DEFAULT_JUICE
+                    pr = int(raw_price) if raw_price is not None else None
                 except (TypeError, ValueError):
-                    pr = DEFAULT_JUICE
+                    pr = None
                 if name == "over":
-                    total_line = pt
-                    over_juice = pr
+                    if pt is not None:
+                        total_line = pt
+                    if pr is not None:
+                        over_juice = pr
                 else:
-                    total_line = pt
-                    under_juice = pr
+                    if pt is not None:
+                        total_line = pt
+                    if pr is not None:
+                        under_juice = pr
         elif market.get("key") == "h2h":
             home = book.get("_home")  # we'll set this from event
             away = book.get("_away")
@@ -1042,7 +1046,7 @@ def _parlay_payload_to_odds_map(data, target_date=None):
     
         if best is None:
             # No totals book on this event: keep the diagnostic log but do NOT early-exit.
-            # Totals fields stay at defaults; the h2h / per-book ML passes below still run so
+            # Totals fields stay None; the h2h / per-book ML passes below still run so
             # moneyline markets and sharpness inputs aren't discarded along with missing totals.
             if no_totals_log_count < no_totals_log_cap:
                 book_keys = [b.get("key") or "?" for b in (event.get("bookmakers") or [])]
@@ -1109,15 +1113,15 @@ def _parlay_payload_to_odds_map(data, target_date=None):
                     break
     
         # Totals parsing (only when a totals book exists). When best is None, totals fields
-        # remain at the defaults declared above — matching the prior no-totals row shape.
+        # remain None — matching the no-totals row shape.
         if best is not None:
             best["_home"] = home
             best["_away"] = away
             total_line, over_juice, under_juice, _, _ = _parse_totals_and_h2h(best)
         else:
-            total_line = DEFAULT_TOTAL
-            over_juice = DEFAULT_JUICE
-            under_juice = DEFAULT_JUICE
+            total_line = None
+            over_juice = None
+            under_juice = None
         if best_ml is not None:
             best_ml["_home"] = home
             best_ml["_away"] = away
