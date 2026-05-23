@@ -6209,9 +6209,6 @@ def run_predictions():
                 return "OVER"
             if under_pref and not over_pref:
                 return "UNDER"
-            model_side = str(row.get("F5_Model_Side", "") or "").strip().upper()
-            if model_side in ("OVER", "UNDER"):
-                return model_side
             return ""
 
         def _f5_edge_side_from_edge(edge):
