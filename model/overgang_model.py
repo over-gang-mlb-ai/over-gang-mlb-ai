@@ -2219,7 +2219,14 @@ def _is_f5_telegram_candidate(row: dict) -> bool:
     if not _alert_bool(row.get("F5_Market_OK")):
         return False
     edge = _alert_float_or_none(row.get("F5_Edge"))
-    if edge is None or abs(edge) < 0.75:
+    if edge is None:
+        return False
+    abs_edge = abs(edge)
+    in_tight_bucket = (
+        0.75 <= abs_edge <= 1.00
+        or abs_edge >= 1.50
+    )
+    if not in_tight_bucket:
         return False
     pick = _alert_clean(row.get("Daily_F5_Profile_Pick")) or _alert_clean(row.get("F5_Pick"))
     if not pick:
@@ -6379,7 +6386,7 @@ def run_predictions():
                 time.sleep(1)
 
     if telegram_f5_alerts:
-        print(f"\n\U0001f6a8 Sending {len(telegram_f5_alerts)} F5 Telegram alert(s) (abs edge >= 0.75)...")
+        print(f"\n\U0001f6a8 Sending {len(telegram_f5_alerts)} F5 Telegram alert(s) (edge 0.75-1.00 or >= 1.50)...")
         for alert in telegram_f5_alerts:
             message = format_f5_alert(alert)
             if send_telegram_alert(message):
