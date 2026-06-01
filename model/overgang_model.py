@@ -4948,16 +4948,23 @@ def run_predictions():
             "betrivers", "fanatics", "caesars", "parx", "hardrock",
         ]
         book_rank = {book: i for i, book in enumerate(book_order)}
+        valid_k_market_keys = {"player_strikeouts", "player_pitcher_strikeouts"}
         for prop in k_prop_rows:
             if not isinstance(prop, dict):
                 continue
             player = str(prop.get("player") or "").strip()
+            market_key = str(prop.get("market_key") or "").strip().lower()
+            market_name = str(prop.get("market") or "").strip().lower()
             if (
-                prop.get("market_key") != "player_strikeouts"
+                market_key not in valid_k_market_keys
+                or (market_name and market_name != "pitcher strikeouts")
+                or "combo" in market_key
+                or "combo" in market_name
                 or prop.get("line") is None
                 or prop.get("over_price") is None
                 or prop.get("under_price") is None
                 or not player
+                or "+" in player
                 or "{" in player
                 or "}" in player
             ):
