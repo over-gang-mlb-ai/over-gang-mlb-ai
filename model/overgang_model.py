@@ -4996,6 +4996,83 @@ def run_predictions():
             except (TypeError, ValueError):
                 return None
 
+        def _load_opponent_k_profiles():
+            """Build team strikeout profiles from local batter_stats.csv for K prop board context.
+
+            Export-only helper. Does not change K projections, K edge, K fired logic,
+            or Telegram behavior.
+            """
+            profiles = {}
+            batter_path = os.path.join(DATA_DIR, "batter_stats.csv")
+            try:
+                bdf = pd.read_csv(batter_path)
+            except Exception as _e_opp_k:
+                print(f"⚠️ opponent K profiles unavailable for K board: {_e_opp_k}")
+                return profiles
+
+            required_cols = {"team_name", "pa", "so"}
+            if not required_cols.issubset(set(bdf.columns)):
+                missing = sorted(required_cols - set(bdf.columns))
+                print(f"⚠️ opponent K profiles unavailable; batter_stats missing columns: {missing}")
+                return profiles
+
+            bdf = bdf.copy()
+            bdf["_pa_num"] = pd.to_numeric(bdf["pa"], errors="coerce")
+            bdf["_so_num"] = pd.to_numeric(bdf["so"], errors="coerce")
+
+            team = (
+                bdf.groupby("team_name", dropna=False)
+                .agg(PA=("_pa_num", "sum"), SO=("_so_num", "sum"))
+                .reset_index()
+            )
+
+            total_pa = float(team["PA"].sum()) if "PA" in team.columns else 0.0
+            total_so = float(team["SO"].sum()) if "SO" in team.columns else 0.0
+            if total_pa <= 0 or total_so < 0:
+                print("⚠️ opponent K profiles unavailable; invalid league PA/SO totals")
+                return profiles
+
+            league_k_pct = total_so / total_pa
+            if league_k_pct <= 0:
+                print("⚠️ opponent K profiles unavailable; invalid league K%")
+                return profiles
+
+            def _opp_k_profile(k_index):
+                if k_index >= 1.08:
+                    return "HIGH_K"
+                if k_index <= 0.92:
+                    return "LOW_K"
+                return "NEUTRAL"
+
+            for _, trow in team.iterrows():
+                team_name = str(trow.get("team_name") or "").strip()
+                pa = _k_float(trow.get("PA"))
+                so_val = _k_float(trow.get("SO"))
+                if not team_name or pa is None or so_val is None or pa <= 0:
+                    continue
+
+                k_pct = so_val / pa
+                k_index = k_pct / league_k_pct if league_k_pct else None
+                if k_index is None:
+                    continue
+
+                rec = {
+                    "Opponent_K_Pct": k_pct,
+                    "Opponent_K_Index": k_index,
+                    "Opponent_K_Profile": _opp_k_profile(k_index),
+                }
+                profiles[team_name] = rec
+                profiles[DataManager.normalize_name(team_name)] = rec
+
+            print(
+                f"✅ Loaded opponent K profiles for K board: "
+                f"{len({str(x).strip() for x in team['team_name'].dropna()})} team(s), "
+                f"league_k_pct={league_k_pct:.4f}"
+            )
+            return profiles
+
+        opponent_k_profiles = _load_opponent_k_profiles()
+
         for _r in eligible_export:
             game_name_k = str(_r.get("Game") or "")
             if " @ " in game_name_k:
@@ -5099,11 +5176,49 @@ def run_predictions():
                 if k_fired:
                     no_fire_k_reason = "fired"
 
+                opp_k_clean = str(opp_k or "").strip()
+                opp_k_profile = (
+                    opponent_k_profiles.get(opp_k_clean)
+                    or opponent_k_profiles.get(DataManager.normalize_name(opp_k_clean))
+                    or {}
+                )
+                opponent_k_pct = opp_k_profile.get("Opponent_K_Pct")
+                opponent_k_index = opp_k_profile.get("Opponent_K_Index")
+                opponent_k_profile_name = opp_k_profile.get("Opponent_K_Profile", "")
+
+                k_matchup_support = ""
+                k_matchup_tag = ""
+                if k_pick == "OVER":
+                    if opponent_k_profile_name == "HIGH_K":
+                        k_matchup_support = "support"
+                        k_matchup_tag = "over_supported_by_high_opp_k"
+                    elif opponent_k_profile_name == "LOW_K":
+                        k_matchup_support = "downgrade"
+                        k_matchup_tag = "over_downgrade_low_opp_k"
+                    elif opponent_k_profile_name == "NEUTRAL":
+                        k_matchup_support = "neutral"
+                        k_matchup_tag = "over_neutral_opp_k"
+                elif k_pick == "UNDER":
+                    if opponent_k_profile_name == "LOW_K":
+                        k_matchup_support = "support"
+                        k_matchup_tag = "under_supported_by_low_opp_k"
+                    elif opponent_k_profile_name == "HIGH_K":
+                        k_matchup_support = "downgrade"
+                        k_matchup_tag = "under_downgrade_high_opp_k"
+                    elif opponent_k_profile_name == "NEUTRAL":
+                        k_matchup_support = "neutral"
+                        k_matchup_tag = "under_neutral_opp_k"
+
                 k_board_rows.append({
                     "Game": game_name_k,
                     "Pitcher": pitcher,
                     "Team": team_k,
                     "Opponent": opp_k,
+                    "Opponent_K_Pct": round(opponent_k_pct, 4) if opponent_k_pct is not None else "",
+                    "Opponent_K_Index": round(opponent_k_index, 3) if opponent_k_index is not None else "",
+                    "Opponent_K_Profile": opponent_k_profile_name,
+                    "K_Matchup_Support": k_matchup_support,
+                    "K_Matchup_Tag": k_matchup_tag,
                     "Bookmaker": prop.get("bookmaker") if prop else "",
                     "K_Line": k_line if k_line is not None else "",
                     "Over_Price": over_price if over_price is not None else "",
@@ -5124,10 +5239,12 @@ def run_predictions():
                 })
 
         pitcher_k_board_cols = [
-            "Game", "Pitcher", "Team", "Opponent", "Bookmaker", "K_Line",
-            "Over_Price", "Under_Price", "K9", "IP", "SO", "Games_Started",
-            "Games_Pitched", "Projected_IP", "Projected_Ks", "K_Edge",
-            "K_Pick", "K_Fired", "No_Fire_K_Reason", "Prop_Last_Update",
+            "Game", "Pitcher", "Team", "Opponent",
+            "Opponent_K_Pct", "Opponent_K_Index", "Opponent_K_Profile",
+            "K_Matchup_Support", "K_Matchup_Tag",
+            "Bookmaker", "K_Line", "Over_Price", "Under_Price", "K9", "IP", "SO",
+            "Games_Started", "Games_Pitched", "Projected_IP", "Projected_Ks",
+            "K_Edge", "K_Pick", "K_Fired", "No_Fire_K_Reason", "Prop_Last_Update",
             "Canonical_Event_ID",
         ]
         pitcher_k_board_path = f"{ARCHIVE_DIR}/pitcher_k_board_{archive_date}.csv"
@@ -5369,6 +5486,155 @@ def run_predictions():
             s = str(v).strip()
             return s == "" or s.lower() == "nan"
 
+        _ou_batter_df_cache = {"df": None}
+
+        def _ou_batter_df():
+            if _ou_batter_df_cache["df"] is None:
+                try:
+                    _ou_batter_df_cache["df"] = Batters.load_batter_table()
+                except Exception as _e_batter_pressure:
+                    print(f"⚠️ OU batter pressure unavailable: {_e_batter_pressure}")
+                    _ou_batter_df_cache["df"] = pd.DataFrame()
+            return _ou_batter_df_cache["df"]
+
+        def _ou_split_game_teams(game_name):
+            game_s = str(game_name or "").strip()
+            if " @ " not in game_s:
+                return "", ""
+            away_team, home_team = game_s.split(" @ ", 1)
+            return away_team.strip(), home_team.strip()
+
+        def _ou_batter_pressure_profile(mult):
+            if mult is None:
+                return "UNKNOWN"
+            try:
+                mult_f = float(mult)
+            except (TypeError, ValueError):
+                return "UNKNOWN"
+
+            # Strong pressure thresholds drive grade movement.
+            # Borderline zones add readable caution tags only.
+            if mult_f >= 1.06:
+                return "HIGH_PRESSURE"
+            if mult_f >= 1.04:
+                return "HIGH_PRESSURE_CAUTION"
+            if mult_f <= 0.94:
+                return "LOW_PRESSURE"
+            if mult_f <= 0.96:
+                return "LOW_PRESSURE_CAUTION"
+            return "NEUTRAL_PRESSURE"
+
+        def _ou_batter_pressure_for_row(row):
+            away_team, home_team = _ou_split_game_teams(row.get("Game", ""))
+            away_pitcher = str(row.get("Away_Pitcher", "") or "").strip()
+            home_pitcher = str(row.get("Home_Pitcher", "") or "").strip()
+
+            away_hand = Batters.get_pitcher_hand(away_pitcher)
+            home_hand = Batters.get_pitcher_hand(home_pitcher)
+
+            bdf = _ou_batter_df()
+            away_vs_home = Batters.offense_vs_hand_dict(bdf, away_team, home_hand)
+            home_vs_away = Batters.offense_vs_hand_dict(bdf, home_team, away_hand)
+
+            away_mult = away_vs_home.get("mult")
+            home_mult = home_vs_away.get("mult")
+
+            vals = []
+            for _v in (away_mult, home_mult):
+                try:
+                    vals.append(float(_v))
+                except (TypeError, ValueError):
+                    pass
+
+            combined = sum(vals) / len(vals) if vals else None
+            profile = _ou_batter_pressure_profile(combined)
+
+            return {
+                "away_mult": away_mult,
+                "home_mult": home_mult,
+                "combined": combined,
+                "profile": profile,
+                "away_pop": away_vs_home.get("pop"),
+                "home_pop": home_vs_away.get("pop"),
+                "away_hand": away_hand,
+                "home_hand": home_hand,
+            }
+
+        def _ou_batter_pressure_support(side, profile):
+            side = str(side or "").strip().upper()
+            if side == "OVER":
+                if profile == "HIGH_PRESSURE":
+                    return "support", "over_supported_by_batter_pressure"
+                if profile == "HIGH_PRESSURE_CAUTION":
+                    return "caution", "over_caution_positive_vs_hand_pressure"
+                if profile == "LOW_PRESSURE":
+                    return "downgrade", "over_downgrade_low_vs_hand_pressure"
+                if profile == "LOW_PRESSURE_CAUTION":
+                    return "caution", "over_caution_low_vs_hand_pressure"
+            elif side == "UNDER":
+                if profile == "LOW_PRESSURE":
+                    return "support", "under_supported_by_offense_suppression"
+                if profile == "LOW_PRESSURE_CAUTION":
+                    return "caution", "under_caution_light_offense_suppression"
+                if profile == "HIGH_PRESSURE":
+                    return "downgrade", "under_downgrade_batter_pressure_conflict"
+                if profile == "HIGH_PRESSURE_CAUTION":
+                    return "caution", "under_caution_high_vs_hand_pressure"
+            return "neutral", "batter_pressure_neutral"
+
+        def _ou_downgrade_grade_one_step(grade):
+            grade_s = str(grade or "").strip()
+            if grade_s == "A":
+                return "B"
+            if grade_s == "B":
+                return "C"
+            if grade_s == "C":
+                return "Pass"
+            return grade_s
+
+        def _ou_batter_adjust_grade(grade, side, support, ou_edge, bet_line,
+                                    reliever_depth_risk=False, high_high_bullpen_risk=False):
+            grade_s = str(grade or "").strip()
+            side_s = str(side or "").strip().upper()
+
+            # Batter pressure cannot rescue existing risk conditions.
+            if grade_s == "Risk":
+                return grade_s
+
+            if support == "downgrade":
+                return _ou_downgrade_grade_one_step(grade_s)
+
+            if support != "support":
+                return grade_s
+
+            # Conservative support: strengthen review grades, but do not force A.
+            if grade_s == "C":
+                return "B"
+
+            # Allow only UNDER Pass -> C when edge is meaningful, total is not the
+            # fragile 7.5-under zone, and bullpen/depth risk is clean.
+            try:
+                edge_f = float(ou_edge)
+            except (TypeError, ValueError):
+                edge_f = None
+            try:
+                bet_line_f = float(bet_line)
+            except (TypeError, ValueError):
+                bet_line_f = None
+
+            if (
+                grade_s == "Pass"
+                and side_s == "UNDER"
+                and edge_f is not None
+                and edge_f <= -0.50
+                and (bet_line_f is None or bet_line_f > 7.5)
+                and not reliever_depth_risk
+                and not high_high_bullpen_risk
+            ):
+                return "C"
+
+            return grade_s
+
         ou_over_profile_board_cols = [
             "Game_Date", "Datetime", "Game", "Venue",
             "Prediction", "OU_Side", "Projected_Total", "Bet_Line",
@@ -5472,6 +5738,15 @@ def run_predictions():
                 _bucket_tags.append("large_edge_risk_over")
             if _high_total_risk:
                 _bucket_tags.append("high_total_risk_over")
+
+            _batter_pressure = _ou_batter_pressure_for_row(_r)
+            _batter_pressure_support, _batter_pressure_tag = _ou_batter_pressure_support(
+                "OVER",
+                _batter_pressure.get("profile"),
+            )
+            if _batter_pressure_tag != "batter_pressure_neutral":
+                _bucket_tags.append(_batter_pressure_tag)
+
             _profile_bucket = "|".join(_bucket_tags) if _bucket_tags else "standard_over"
 
             if _clean_data and _low_total_profile and _prob_sweet_spot:
@@ -5489,6 +5764,14 @@ def run_predictions():
                 _profile_grade = "Risk"
             else:
                 _profile_grade = "Pass"
+
+            _profile_grade = _ou_batter_adjust_grade(
+                _profile_grade,
+                "OVER",
+                _batter_pressure_support,
+                _ou_edge,
+                _bet_line,
+            )
 
             _f5_signal = bool(
                 _is_over_row
@@ -5765,6 +6048,15 @@ def run_predictions():
                 _bucket_tags.append("reliever_depth_risk_under")
             if _high_high_bullpen_risk:
                 _bucket_tags.append("high_high_bullpen_risk_under")
+
+            _batter_pressure = _ou_batter_pressure_for_row(_r)
+            _batter_pressure_support, _batter_pressure_tag = _ou_batter_pressure_support(
+                "UNDER",
+                _batter_pressure.get("profile"),
+            )
+            if _batter_pressure_tag != "batter_pressure_neutral":
+                _bucket_tags.append(_batter_pressure_tag)
+
             _profile_bucket = "|".join(_bucket_tags) if _bucket_tags else "standard_under"
 
             if (
@@ -5798,6 +6090,16 @@ def run_predictions():
                 _profile_grade = "Risk"
             else:
                 _profile_grade = "Pass"
+
+            _profile_grade = _ou_batter_adjust_grade(
+                _profile_grade,
+                "UNDER",
+                _batter_pressure_support,
+                _ou_edge,
+                _bet_line,
+                reliever_depth_risk=_reliever_depth_risk_profile,
+                high_high_bullpen_risk=_high_high_bullpen_risk,
+            )
 
             _f5_signal = bool(
                 _is_under_row

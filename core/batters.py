@@ -44,7 +44,19 @@ _LEAGUE_WRC_SCALE = 100.0
 _LEAGUE_OPS = 0.715
 _LEAGUE_OBP = 0.320
 _LEAGUE_SLG = 0.410
-# Halve deviation from 1.0 so OPS/OBP/SLG fallback does not move lineup impact as aggressively as wRC+/wOBA
+_LEAGUE_ISO = 0.155
+
+# Weighted fallback run-pressure index when advanced wRC+/wOBA splits are unavailable.
+# OPS = broad production, OBP = traffic, SLG = damage, ISO = pure power.
+_FALLBACK_RUN_PRESSURE_WEIGHTS = {
+    "OPS": 0.35,
+    "OBP": 0.25,
+    "SLG": 0.25,
+    "ISO": 0.15,
+}
+
+# Halve deviation from 1.0 so basic split fallback does not move lineup impact
+# as aggressively as wRC+/wOBA.
 _FALLBACK_DAMP = 0.5
 
 
@@ -71,6 +83,7 @@ def _platoon_split_relative(
     col_ops = f"{prefix}_OPS" if f"{prefix}_OPS" in df.columns else None
     col_obp = f"{prefix}_OBP" if f"{prefix}_OBP" in df.columns else None
     col_slg = f"{prefix}_SLG" if f"{prefix}_SLG" in df.columns else None
+    col_iso = f"{prefix}_ISO" if f"{prefix}_ISO" in df.columns else None
 
     adv: List[float] = []
     if col_wrc and df[col_wrc].notna().any():
@@ -81,21 +94,41 @@ def _platoon_split_relative(
     if adv:
         return float(np.nanmean(adv)), "advanced"
 
-    # Basic split fallback (statSplits supplies OPS/OBP/SLG but often not wOBA/wRC+)
-    if col_ops and df[col_ops].notna().any():
-        rel = float(np.nanmean(df[col_ops].values)) / _LEAGUE_OPS
-    else:
-        parts: List[float] = []
-        if col_obp and df[col_obp].notna().any():
-            parts.append(float(np.nanmean(df[col_obp].values)) / _LEAGUE_OBP)
-        if col_slg and df[col_slg].notna().any():
-            parts.append(float(np.nanmean(df[col_slg].values)) / _LEAGUE_SLG)
-        if not parts:
-            return None
-        rel = float(np.nanmean(parts))
+    # Basic split fallback (statSplits supplies OPS/OBP/SLG/ISO but often not wOBA/wRC+).
+    # Use a transparent internal run-pressure index instead of OPS alone.
+    parts: List[Tuple[float, float]] = []
 
+    if col_ops and df[col_ops].notna().any():
+        parts.append((
+            float(np.nanmean(df[col_ops].values)) / _LEAGUE_OPS,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["OPS"],
+        ))
+    if col_obp and df[col_obp].notna().any():
+        parts.append((
+            float(np.nanmean(df[col_obp].values)) / _LEAGUE_OBP,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["OBP"],
+        ))
+    if col_slg and df[col_slg].notna().any():
+        parts.append((
+            float(np.nanmean(df[col_slg].values)) / _LEAGUE_SLG,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["SLG"],
+        ))
+    if col_iso and df[col_iso].notna().any():
+        parts.append((
+            float(np.nanmean(df[col_iso].values)) / _LEAGUE_ISO,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["ISO"],
+        ))
+
+    if not parts:
+        return None
+
+    weight_sum = sum(weight for _, weight in parts)
+    if weight_sum <= 0:
+        return None
+
+    rel = sum(value * weight for value, weight in parts) / weight_sum
     rel = 1.0 + (rel - 1.0) * _FALLBACK_DAMP
-    return rel, "fallback"
+    return rel, "fallback_run_pressure"
 
 
 class Batters:
@@ -233,15 +266,17 @@ class Batters:
         team_key = _norm(team_name)
         df = batter_df
 
-        # Filter by team if Team column exists and is populated
+        # Filter by team if Team column exists and is populated.
+        # Use the same _norm() helper as the rest of this module so names like
+        # "St. Louis Cardinals" and normalized game/team strings match safely.
         if "Team" in df.columns and df["Team"].notna().any():
-            team_df = df[df["Team"].astype(str).str.lower() == team_key]
+            team_df = df[df["Team"].astype(str).map(_norm) == team_key]
             if team_df.empty:
                 team_df = df.copy()
         else:
             team_df = df.copy()
 
-        # If a specific lineup is provided, try to filter by those batters
+        # If a specific lineup is provided, try to filter by those batters.
         used_scope = "team"
         if lineup_names:
             norms = [_norm(n) for n in lineup_names if isinstance(n, str)]
@@ -250,25 +285,14 @@ class Batters:
                 team_df = li_df
                 used_scope = "lineup"
 
-        # choose split columns for the hand
-        if pitcher_hand == "R":
-            col_woba = "vsR_wOBA" if "vsR_wOBA" in team_df.columns else None
-            col_wrc = "vsR_wRC+" if "vsR_wRC+" in team_df.columns else None
-        else:
-            col_woba = "vsL_wOBA" if "vsL_wOBA" in team_df.columns else None
-            col_wrc = "vsL_wRC+" if "vsL_wRC+" in team_df.columns else None
-
-        vals = []
-        if col_wrc and team_df[col_wrc].notna().any():
-            vals.append(np.nanmean(team_df[col_wrc].values) / 100.0)  # 100 -> 1.0
-        if col_woba and team_df[col_woba].notna().any():
-            vals.append(np.nanmean(team_df[col_woba].values) / 0.310)  # ~league wOBA
-
-        if not vals:
+        # Reuse the central split scorer so advanced splits are preferred, but
+        # OPS/OBP/SLG fallback splits are used when wRC+/wOBA are unavailable.
+        rel = _platoon_split_relative(team_df, pitcher_hand)
+        if rel is None:
             return {"mult": 1.0, "pop": "none"}
 
-        mult = float(np.nanmean(vals))
-        mult = max(0.90, min(1.10, mult))  # gentle clamp
+        mult, _source = rel
+        mult = max(0.90, min(1.10, float(mult)))  # gentle clamp
         return {"mult": mult, "pop": used_scope}
 
     @staticmethod
