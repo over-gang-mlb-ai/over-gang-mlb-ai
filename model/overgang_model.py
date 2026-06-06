@@ -1554,6 +1554,45 @@ def fetch_mlb_odds_by_date_allow_empty_book(target_date_yyyy_mm_dd):
 # ================================
 # 📈 PREDICTION ENGINE (true projection model)
 # ================================
+def _calibrate_ou_edge(raw_edge):
+    """
+    Calibrate final O/U edge toward the market when raw model edge is large.
+
+    This preserves the model's raw baseball projection separately, while using
+    calibrated edge for O/U decision projection, confidence, fire logic, and
+    downstream profile boards.
+
+    Based on 2026 archive residual audit:
+      - tail edges improved MAE after shrinkage
+      - small/sweet-spot edges should be protected
+    """
+    try:
+        edge_f = float(raw_edge)
+    except (TypeError, ValueError):
+        return 0.0, 1.0, "uncalibrated_invalid_edge"
+
+    abs_edge = abs(edge_f)
+
+    if abs_edge >= 2.0:
+        factor = 0.45
+        tag = "calibrated_tail_ge_2_00"
+    elif abs_edge >= 1.5:
+        factor = 0.60
+        tag = "calibrated_tail_1_50_to_2_00"
+    elif abs_edge >= 1.0:
+        factor = 0.75
+        tag = "calibrated_mid_1_00_to_1_50"
+    elif abs_edge >= 0.75:
+        factor = 0.90
+        tag = "calibrated_sweet_0_75_to_1_00"
+    else:
+        factor = 1.00
+        tag = "uncalibrated_small_edge"
+
+    calibrated_edge = round(edge_f * factor, 2)
+    return calibrated_edge, factor, tag
+
+
 def generate_prediction(
     away_stats,
     home_stats,
@@ -1759,8 +1798,19 @@ def generate_prediction(
         float(home_runs) > float(home_runs_safety)
     )
 
-    projected_total = round(away_runs + home_runs, 2)
-    edge = round(projected_total - vegas_line, 2)
+    raw_projected_total = round(away_runs + home_runs, 2)
+    raw_edge = round(raw_projected_total - vegas_line, 2)
+
+    # Only calibrate against a real/trusted total. Do not pull projection toward
+    # default/fallback lines because that would hide data-quality problems.
+    if bool(odds_info.get("_has_real_total")):
+        edge, ou_edge_calibration_factor, ou_edge_calibration_tag = _calibrate_ou_edge(raw_edge)
+        projected_total = round(vegas_line + edge, 2)
+    else:
+        edge = raw_edge
+        projected_total = raw_projected_total
+        ou_edge_calibration_factor = 1.0
+        ou_edge_calibration_tag = "uncalibrated_no_real_total"
 
     # ---------- Pick: OVER / UNDER based on edge vs threshold ----------
     if edge >= EDGE_THRESHOLD:
@@ -1869,7 +1919,8 @@ def generate_prediction(
         recommended_units = round(0.5 + 0.5 * (abs_edge - EDGE_THRESHOLD) / (EDGE_FOR_FULL_UNIT - EDGE_THRESHOLD), 2)
 
     print(
-        f"📦 Projection: {away_runs:.2f} + {home_runs:.2f} = {projected_total:.2f} | "
+        f"📦 Raw Projection: {away_runs:.2f} + {home_runs:.2f} = {raw_projected_total:.2f} | "
+        f"Calibrated O/U: {projected_total:.2f} ({ou_edge_calibration_tag}, factor={ou_edge_calibration_factor:.2f}) | "
         f"Edge: {edge:+.2f} | {prediction_str} | Conf: {confidence:.2f}"
     )
 
@@ -1958,6 +2009,10 @@ def generate_prediction(
     return {
         "skip": False,
         "projected_total": projected_total,
+        "raw_projected_total": raw_projected_total,
+        "raw_ou_edge": raw_edge,
+        "ou_edge_calibration_factor": ou_edge_calibration_factor,
+        "ou_edge_calibration_tag": ou_edge_calibration_tag,
         "away_runs": away_runs,
         "home_runs": home_runs,
         "away_runs_raw": away_runs_raw,
@@ -3924,6 +3979,10 @@ def run_predictions():
 
             game_data.update({
                 "Projected_Total": projected_total,
+                "Raw_Projected_Total": proj.get("raw_projected_total", ""),
+                "Raw_OU_Edge": proj.get("raw_ou_edge", ""),
+                "OU_Edge_Calibration_Factor": proj.get("ou_edge_calibration_factor", ""),
+                "OU_Edge_Calibration_Tag": proj.get("ou_edge_calibration_tag", ""),
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
                 "Away_Runs_Raw": away_runs_raw,
@@ -4786,7 +4845,9 @@ def run_predictions():
         "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
         "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Retractable_Roof_Weather",
         "ENV_Is_Retractable", "ENV_Validation", "ENV_Conflict",
-        "Projected_Total", "Away_Runs", "Home_Runs",
+        "Projected_Total", "Raw_Projected_Total", "Raw_OU_Edge",
+        "OU_Edge_Calibration_Factor", "OU_Edge_Calibration_Tag",
+        "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
         "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
