@@ -4619,6 +4619,8 @@ def run_predictions():
             game_data["Home_Effective_ERA"] = _tel.get("home_effective_era", "")
 
             # Export-only starter / offense snapshot (same stats objects + telemetry as the row).
+            game_data["Away_Starter_ERA"] = safe_get(away_stats, "ERA", "")
+            game_data["Home_Starter_ERA"] = safe_get(home_stats, "ERA", "")
             game_data["Away_Starter_xERA"] = _tel.get("away_starter_xera", "")
             game_data["Home_Starter_xERA"] = _tel.get("home_starter_xera", "")
             game_data["Away_Starter_WHIP"] = safe_get(away_stats, "WHIP", "")
@@ -4891,6 +4893,7 @@ def run_predictions():
         "Away_Bullpen_Fatigue_Ratio", "Home_Bullpen_Fatigue_Ratio",
         "Away_Bullpen_Fatigue_Mult", "Home_Bullpen_Fatigue_Mult",
         "Away_Effective_ERA", "Home_Effective_ERA",
+        "Away_Starter_ERA", "Home_Starter_ERA",
         "Away_Starter_xERA", "Home_Starter_xERA",
         "Away_Starter_WHIP", "Home_Starter_WHIP",
         "Away_Starter_IP", "Home_Starter_IP",
