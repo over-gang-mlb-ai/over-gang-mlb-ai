@@ -6714,15 +6714,178 @@ def run_predictions():
                 continue
             _seen_f5_telegram.add(_f5_key)
             telegram_f5_alerts.append(_f5_row)
+        # Export-only OU/F5 decision board.
+        # Purpose: one clean totals board for deciding full-game O/U vs F5.
+        # No model math, fire logic, Telegram, ML, or K behavior changes.
+        def _ou_f5_board_float(_v):
+            try:
+                if _v is None or _v == "":
+                    return None
+                return float(_v)
+            except (TypeError, ValueError):
+                return None
+
+        def _ou_f5_board_bool(_v):
+            return str(_v).strip().lower() in ("true", "1", "yes", "y")
+
+        def _ou_prob_bucket(_v):
+            _f = _ou_f5_board_float(_v)
+            if _f is None:
+                return ""
+            if _f < 0:
+                return "prob_edge_lt_0"
+            if _f < 0.03:
+                return "prob_edge_0_00_to_0_03"
+            if _f < 0.05:
+                return "prob_edge_0_03_to_0_05"
+            if _f < 0.10:
+                return "prob_edge_0_05_to_0_10"
+            if _f < 0.15:
+                return "prob_edge_0_10_to_0_15"
+            if _f < 0.20:
+                return "prob_edge_0_15_to_0_20"
+            return "prob_edge_ge_0_20"
+
+        def _ou_side_from_pick(_v):
+            _s = str(_v or "").upper()
+            if "OVER" in _s:
+                return "OVER"
+            if "UNDER" in _s:
+                return "UNDER"
+            return ""
+
+        def _clean_text(_v):
+            if _v is None:
+                return ""
+            _s = str(_v)
+            if _s.lower() in ("nan", "none"):
+                return ""
+            return _s
+
+        def _ou_f5_market_view(_row):
+            _ou_fired = _ou_f5_board_bool(_row.get("OU_Fired"))
+            _f5_pick = _clean_text(_row.get("Daily_F5_Profile_Pick") or _row.get("F5_Pick"))
+            _f5_grade = _clean_text(_row.get("Daily_F5_Profile_Grade"))
+            _f5_market_ok = _ou_f5_board_bool(_row.get("F5_Market_OK"))
+            _prob_watch = _ou_f5_board_bool(_row.get("OU_Prob_Over_Sweet_Spot_Watch"))
+            if _ou_fired:
+                return "FULL_GAME_OU"
+            if _prob_watch:
+                return "WATCH_FULL_GAME_OVER"
+            if _f5_market_ok and _f5_pick and _f5_grade in ("A", "B"):
+                return "F5"
+            return "WATCH"
+
+        def _ou_f5_decision_reason(_row):
+            _parts = []
+            if _ou_f5_board_bool(_row.get("OU_Fired")):
+                _parts.append("ou_fired")
+            if _ou_f5_board_bool(_row.get("OU_Prob_Over_Sweet_Spot_Watch")):
+                _parts.append("prob_over_sweet_spot_watch")
+            _ou_bucket = _clean_text(_row.get("Daily_OU_Profile_Bucket"))
+            if _ou_bucket:
+                _parts.append(_ou_bucket)
+            _f5_read = _clean_text(_row.get("Daily_F5_Analysis_Read"))
+            if _f5_read:
+                _parts.append("f5=" + _f5_read)
+            _dq = _clean_text(_row.get("Data_Quality_Flag"))
+            if _dq:
+                _parts.append("dq=" + _dq)
+            return " | ".join(_parts)
+
+        ou_f5_decision_board_rows = []
+        for _src in picks_board_rows:
+            _row = dict(_src)
+            _ou_pick = _clean_text(_row.get("OU_Pick") or _row.get("Prediction"))
+            _ou_side = _ou_side_from_pick(_ou_pick)
+            _ou_prob_edge = _ou_f5_board_float(_row.get("OU_Prob_Edge"))
+            _ou_edge = _ou_f5_board_float(_row.get("OU_Edge"))
+            _dq = _clean_text(_row.get("Data_Quality_Flag")).lower()
+            _bucket_text = (
+                _clean_text(_row.get("Daily_OU_Profile_Bucket")) + "|"
+                + _clean_text(_row.get("OU_Over_Profile_Bucket")) + "|"
+                + _clean_text(_row.get("OU_Under_Profile_Bucket")) + "|"
+                + _clean_text(_row.get("Trigger_Tags"))
+            ).lower()
+
+            _prob_over_watch = bool(
+                _ou_side == "OVER"
+                and _ou_prob_edge is not None
+                and 0.05 <= _ou_prob_edge < 0.10
+                and _ou_edge is not None
+                and 0.20 <= _ou_edge <= 0.60
+                and "fallback_pitcher" not in _dq
+                and "low_ip" not in _dq
+                and "high_total_risk_over" not in _bucket_text
+                and "large_edge_risk_over" not in _bucket_text
+                and "over_caution_low_vs_hand_pressure" not in _bucket_text
+                and "over_downgrade_low_vs_hand_pressure" not in _bucket_text
+            )
+
+            _row["OU_Prob_Bucket"] = _ou_prob_bucket(_row.get("OU_Prob_Edge"))
+            _row["OU_Prob_Over_Sweet_Spot_Watch"] = _prob_over_watch
+            _row["Preferred_Market"] = _ou_f5_market_view(_row)
+            _row["Decision_Reason"] = _ou_f5_decision_reason(_row)
+
+            ou_f5_decision_board_rows.append(_row)
+
+        ou_f5_decision_board_cols = [
+            "Game_Date", "Datetime", "Game_Status", "Venue", "Game",
+
+            "Away_Pitcher", "Away_Starter_ERA", "Away_Starter_xERA",
+            "Away_Starter_ERA_xERA_Gap", "Away_Starter_WHIP",
+            "Home_Pitcher", "Home_Starter_ERA", "Home_Starter_xERA",
+            "Home_Starter_ERA_xERA_Gap", "Home_Starter_WHIP",
+
+            "Vegas_Line", "Raw_Projected_Total", "Raw_OU_Edge",
+            "Projected_Total", "OU_Edge",
+            "OU_Edge_Calibration_Factor", "OU_Edge_Calibration_Tag",
+            "OU_Pick", "OU_Confidence", "OU_Fired",
+
+            "OU_Implied_Prob_Pick", "OU_True_Prob_Pick",
+            "OU_Prob_Edge", "OU_Prob_Bucket",
+            "OU_Prob_Over_Sweet_Spot_Watch",
+
+            "Daily_OU_Profile_Side", "Daily_OU_Profile_Grade",
+            "Daily_OU_Profile_Bucket", "Daily_OU_Profile_Read",
+
+            "F5_Pick", "Daily_F5_Profile_Pick",
+            "F5_Market_Line", "F5_Projected_Total", "F5_Edge",
+            "F5_Market_OK", "Daily_F5_Profile_Side",
+            "Daily_F5_Profile_Grade", "Daily_F5_Analysis_Read",
+
+            "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
+            "OU_Full_Game_Under_Reliever_Depth_Risk",
+            "OU_Under_HighHigh_Bullpen_Risk",
+            "OU_Over_High_Total_Risk", "OU_Over_Large_Edge_Risk",
+
+            "Data_Quality_Flag", "No_Fire_Reason", "Trigger_Tags",
+            "Preferred_Market", "Decision_Reason",
+        ]
+
+        ou_f5_decision_board_df = pd.DataFrame(
+            ou_f5_decision_board_rows,
+            columns=ou_f5_decision_board_cols,
+        )
+        ou_f5_decision_board_path = f"{ARCHIVE_DIR}/ou_f5_decision_board_{archive_date}.csv"
+        ou_f5_decision_board_df.to_csv(ou_f5_decision_board_path, index=False)
+        print(
+            f"💾 Saved {len(ou_f5_decision_board_rows)} OU/F5 decision-board row(s) "
+            f"→ {ou_f5_decision_board_path}"
+        )
+        if os.path.exists(ou_f5_decision_board_path):
+            send_telegram_file(
+                ou_f5_decision_board_path,
+                caption=f"📊 Over Gang OU/F5 decision board — {datetime.now().strftime('%b %d')}",
+            )
+
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
         picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
         picks_board_df.to_csv(picks_board_path, index=False)
         print(f"💾 Saved {len(picks_board_rows)} picks-board row(s) → {picks_board_path}")
-        if os.path.exists(picks_board_path):
-            send_telegram_file(
-                picks_board_path,
-                caption=f"📋 Over Gang picks board — {datetime.now().strftime('%b %d')}",
-            )
+        # Legacy picks_board is still generated temporarily for compatibility,
+        # but it is no longer sent to Telegram. Operator workflow is moving to
+        # market-specific boards: OU/F5 decision board, ML decision board, K board.
     elif results:
         print("\nℹ️ No export rows (no trusted O/U games and no ML_Fired games).")
 
