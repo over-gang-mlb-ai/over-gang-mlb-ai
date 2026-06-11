@@ -1593,6 +1593,357 @@ def _calibrate_ou_edge(raw_edge):
     return calibrated_edge, factor, tag
 
 
+def _fp_safe_float(value, default=0.0):
+    try:
+        if value in ("", None):
+            return default
+        f = float(value)
+        if f != f:
+            return default
+        return f
+    except Exception:
+        return default
+
+
+def _fp_get(obj, key, default=0.0):
+    try:
+        if obj is None:
+            return default
+        if hasattr(obj, "get"):
+            return _fp_safe_float(obj.get(key, default), default)
+        return _fp_safe_float(obj[key], default)
+    except Exception:
+        return default
+
+
+def _fp_metric(metrics, keys, default=0.0):
+    try:
+        if metrics is None:
+            return default
+        for key in keys:
+            if hasattr(metrics, "get") and metrics.get(key, None) not in ("", None):
+                return _fp_safe_float(metrics.get(key), default)
+        return default
+    except Exception:
+        return default
+
+
+def _fp_depth_level(value):
+    s = str(value or "").strip().lower()
+    if s in {"high", "true", "1", "yes"} or "high" in s:
+        return "high"
+    if s in {"medium", "med"} or "medium" in s:
+        return "medium"
+    if s in {"low"} or "low" in s:
+        return "low"
+    return ""
+
+
+def _fp_offense_component(offense_mult, lineup_impact):
+    pressure = 0.0
+    suppression = 0.0
+    reasons = []
+
+    off = _fp_safe_float(offense_mult, 1.0)
+    li = _fp_safe_float(lineup_impact, 0.0)
+
+    if off >= 1.08:
+        pressure += 0.18
+        reasons.append("elite_offense_mult_1.08+")
+    elif off >= 1.04:
+        pressure += 0.12
+        reasons.append("strong_offense_mult_1.04+")
+    elif off >= 1.02:
+        pressure += 0.06
+        reasons.append("mild_offense_mult_1.02+")
+
+    if off <= 0.92:
+        suppression += 0.18
+        reasons.append("very_weak_offense_mult_0.92-")
+    elif off <= 0.96:
+        suppression += 0.12
+        reasons.append("weak_offense_mult_0.96-")
+    elif off <= 0.98:
+        suppression += 0.06
+        reasons.append("mild_weak_offense_mult_0.98-")
+
+    if li >= 0.08:
+        pressure += 0.10
+        reasons.append("strong_lineup_boost_0.08+")
+    elif li >= 0.04:
+        pressure += 0.06
+        reasons.append("lineup_boost_0.04+")
+    elif li >= 0.02:
+        pressure += 0.03
+        reasons.append("mild_lineup_boost_0.02+")
+
+    if li <= -0.08:
+        suppression += 0.10
+        reasons.append("strong_lineup_suppression_-0.08")
+    elif li <= -0.04:
+        suppression += 0.06
+        reasons.append("lineup_suppression_-0.04")
+    elif li <= -0.02:
+        suppression += 0.03
+        reasons.append("mild_lineup_suppression_-0.02")
+
+    return pressure, suppression, reasons
+
+
+def _fp_starter_prevention_component(opp_stats):
+    weak = 0.0
+    strong = 0.0
+    reasons = []
+
+    xera = _fp_get(opp_stats, "xERA", 4.20)
+    whip = _fp_get(opp_stats, "WHIP", 1.30)
+    era = _fp_get(opp_stats, "ERA", xera)
+    gap = era - xera
+
+    if xera >= 5.50:
+        weak += 0.24
+        reasons.append("opp_starter_xera_5.50+")
+    elif xera >= 5.00:
+        weak += 0.18
+        reasons.append("opp_starter_xera_5.00+")
+    elif xera >= 4.60:
+        weak += 0.10
+        reasons.append("opp_starter_xera_4.60+")
+
+    if xera <= 3.10:
+        strong += 0.14
+        reasons.append("opp_starter_xera_3.10-")
+    elif xera <= 3.50:
+        strong += 0.09
+        reasons.append("opp_starter_xera_3.50-")
+    elif xera <= 3.80:
+        strong += 0.05
+        reasons.append("opp_starter_xera_3.80-")
+
+    if whip >= 1.50:
+        weak += 0.16
+        reasons.append("opp_starter_whip_1.50+")
+    elif whip >= 1.38:
+        weak += 0.09
+        reasons.append("opp_starter_whip_1.38+")
+
+    if whip <= 1.00:
+        strong += 0.10
+        reasons.append("opp_starter_whip_1.00-")
+    elif whip <= 1.12:
+        strong += 0.06
+        reasons.append("opp_starter_whip_1.12-")
+
+    # Negative ERA-xERA gap means ERA looks better than xERA: regression/run risk.
+    if gap <= -1.00:
+        weak += 0.14
+        reasons.append("opp_starter_lucky_era_gap_-1.00")
+    elif gap <= -0.50:
+        weak += 0.08
+        reasons.append("opp_starter_lucky_era_gap_-0.50")
+
+    if gap >= 1.00:
+        strong += 0.07
+        reasons.append("opp_starter_unlucky_era_gap_1.00+")
+    elif gap >= 0.50:
+        strong += 0.04
+        reasons.append("opp_starter_unlucky_era_gap_0.50+")
+
+    return weak, strong, reasons
+
+
+def _fp_bullpen_prevention_component(metrics):
+    weak = 0.0
+    strong = 0.0
+    reasons = []
+
+    bad_xera = _fp_metric(metrics, ["bad_xera_count", "Bad_xERA_Count", "bad_xera"], 0.0)
+    bad_whip = _fp_metric(metrics, ["bad_whip_count", "Bad_WHIP_Count", "bad_whip"], 0.0)
+    recent_bad = _fp_metric(metrics, ["recent_bad_arm_count", "Recent_Bad_Arm_Count", "recent_bad"], 0.0)
+    total_bad = bad_xera + bad_whip + recent_bad
+
+    depth_raw = ""
+    try:
+        if metrics is not None and hasattr(metrics, "get"):
+            depth_raw = metrics.get("depth_risk", metrics.get("Reliever_Depth_Risk", ""))
+    except Exception:
+        depth_raw = ""
+    depth = _fp_depth_level(depth_raw)
+
+    if total_bad >= 8:
+        weak += 0.34
+        reasons.append("pen_bad_arms_8+")
+    elif total_bad >= 6:
+        weak += 0.26
+        reasons.append("pen_bad_arms_6+")
+    elif total_bad >= 4:
+        weak += 0.18
+        reasons.append("pen_bad_arms_4+")
+    elif total_bad >= 2:
+        weak += 0.08
+        reasons.append("pen_bad_arms_2+")
+
+    if recent_bad >= 4:
+        weak += 0.16
+        reasons.append("recent_bad_arms_4+")
+    elif recent_bad >= 2:
+        weak += 0.10
+        reasons.append("recent_bad_arms_2+")
+    elif recent_bad >= 1:
+        weak += 0.05
+        reasons.append("recent_bad_arms_1+")
+
+    if depth == "high":
+        weak += 0.18
+        reasons.append("reliever_depth_high")
+    elif depth == "medium":
+        weak += 0.07
+        reasons.append("reliever_depth_medium")
+
+    if total_bad <= 1 and depth == "low":
+        strong += 0.10
+        reasons.append("clean_late_pen_profile")
+    elif total_bad <= 2 and depth in {"low", ""}:
+        strong += 0.05
+        reasons.append("mostly_clean_late_pen_profile")
+
+    return weak, strong, reasons
+
+
+def _fp_team_pressure(
+    *,
+    team_prefix,
+    offense_mult,
+    lineup_impact,
+    opposing_starter_stats,
+    opposing_reliever_metrics,
+):
+    offense_pressure, offense_suppression, offense_reasons = _fp_offense_component(
+        offense_mult,
+        lineup_impact,
+    )
+    starter_weak, starter_strong, starter_reasons = _fp_starter_prevention_component(
+        opposing_starter_stats,
+    )
+    pen_weak, pen_strong, pen_reasons = _fp_bullpen_prevention_component(
+        opposing_reliever_metrics,
+    )
+
+    early_pressure = starter_weak + offense_pressure + 0.60 * min(starter_weak, offense_pressure)
+    early_suppression = starter_strong + offense_suppression + 0.60 * min(starter_strong, offense_suppression)
+    late_pressure = pen_weak + 0.55 * min(pen_weak, offense_pressure)
+    late_suppression = pen_strong + 0.55 * min(pen_strong, offense_suppression)
+
+    reasons = []
+    reasons.extend([f"{team_prefix.lower()}_bat_{r}" for r in offense_reasons])
+    reasons.extend([f"{team_prefix.lower()}_early_{r}" for r in starter_reasons])
+    reasons.extend([f"{team_prefix.lower()}_late_{r}" for r in pen_reasons])
+
+    return {
+        f"{team_prefix}_Early_Run_Pressure": round(early_pressure, 3),
+        f"{team_prefix}_Early_Run_Suppression": round(early_suppression, 3),
+        f"{team_prefix}_Late_Run_Pressure": round(late_pressure, 3),
+        f"{team_prefix}_Late_Run_Suppression": round(late_suppression, 3),
+        f"{team_prefix}_Run_Pressure_Reasons": "|".join(reasons),
+    }
+
+
+def _calculate_full_picture_run_pressure(
+    *,
+    base_edge,
+    has_real_total,
+    away_stats,
+    home_stats,
+    away_lineup_impact,
+    home_lineup_impact,
+    away_offense_mult,
+    home_offense_mult,
+    weather_runs_mult,
+    away_reliever_metrics=None,
+    home_reliever_metrics=None,
+):
+    away = _fp_team_pressure(
+        team_prefix="Away",
+        offense_mult=away_offense_mult,
+        lineup_impact=away_lineup_impact,
+        opposing_starter_stats=home_stats,
+        opposing_reliever_metrics=home_reliever_metrics,
+    )
+    home = _fp_team_pressure(
+        team_prefix="Home",
+        offense_mult=home_offense_mult,
+        lineup_impact=home_lineup_impact,
+        opposing_starter_stats=away_stats,
+        opposing_reliever_metrics=away_reliever_metrics,
+    )
+
+    weather = _fp_safe_float(weather_runs_mult, 1.0)
+    weather_adj = 0.0
+    weather_reason = ""
+
+    # Weather is already in base projection, so this is a small residual interaction only.
+    if weather >= 1.015:
+        weather_adj = 0.08
+        weather_reason = "weather_boost_1.015+"
+    elif weather <= 0.990:
+        weather_adj = -0.08
+        weather_reason = "weather_suppression_0.990-"
+
+    raw = (
+        away["Away_Early_Run_Pressure"]
+        - away["Away_Early_Run_Suppression"]
+        + away["Away_Late_Run_Pressure"]
+        - away["Away_Late_Run_Suppression"]
+        + home["Home_Early_Run_Pressure"]
+        - home["Home_Early_Run_Suppression"]
+        + home["Home_Late_Run_Pressure"]
+        - home["Home_Late_Run_Suppression"]
+        + weather_adj
+    )
+
+    # SIDE_TARGETED v1 from offline sim:
+    # - true UNDER side can receive positive run-pressure correction up to +0.60
+    # - true OVER side can receive only light suppression, avoiding double-counted positive pressure
+    # - neutral / lean-only edges are not adjusted so tiny base edges do not flip sides artificially
+    # - no-real-total rows are not adjusted because side targeting depends on market line
+    try:
+        ou_edge_threshold = float(EDGE_THRESHOLD)
+    except Exception:
+        ou_edge_threshold = 0.25
+
+    if not has_real_total:
+        adj = 0.0
+        mode = "no_real_total_no_adjust"
+    elif base_edge <= -ou_edge_threshold:
+        adj = max(0.0, min(0.60, raw))
+        mode = "side_targeted_under_positive_cap_0_60"
+    elif base_edge >= ou_edge_threshold:
+        adj = min(0.0, max(-0.40, raw))
+        mode = "side_targeted_over_suppression_only"
+    else:
+        adj = 0.0
+        mode = "side_targeted_neutral_no_adjust"
+
+    reasons = []
+    if away["Away_Run_Pressure_Reasons"]:
+        reasons.append(away["Away_Run_Pressure_Reasons"])
+    if home["Home_Run_Pressure_Reasons"]:
+        reasons.append(home["Home_Run_Pressure_Reasons"])
+    if weather_reason:
+        reasons.append(weather_reason)
+    reasons.append(mode)
+
+    out = {}
+    out.update(away)
+    out.update(home)
+    out["Weather_Interaction_Adjustment"] = round(weather_adj, 3)
+    out["Full_Picture_Adjustment_Raw"] = round(raw, 3)
+    out["Run_Pressure_Adjustment"] = round(adj, 3)
+    out["Run_Pressure_Mode"] = mode
+    out["Run_Pressure_Reasons"] = "|".join(reasons)
+    return out
+
+
 def generate_prediction(
     away_stats,
     home_stats,
@@ -1614,6 +1965,8 @@ def generate_prediction(
     game_datetime=None,
     schedule_game_date=None,
     odds_info=None,
+    away_reliever_metrics=None,
+    home_reliever_metrics=None,
 ):
     """
     Project expected runs for each team, sum to projected total, then compare to Vegas.
@@ -1798,7 +2151,28 @@ def generate_prediction(
         float(home_runs) > float(home_runs_safety)
     )
 
-    raw_projected_total = round(away_runs + home_runs, 2)
+    base_projected_total = round(away_runs + home_runs, 2)
+    base_ou_edge = round(base_projected_total - vegas_line, 2)
+
+    run_pressure = _calculate_full_picture_run_pressure(
+        base_edge=base_ou_edge,
+        has_real_total=bool(odds_info.get("_has_real_total")),
+        away_stats=away_stats,
+        home_stats=home_stats,
+        away_lineup_impact=away_lineup_impact,
+        home_lineup_impact=home_lineup_impact,
+        away_offense_mult=away_offense_mult,
+        home_offense_mult=home_offense_mult,
+        weather_runs_mult=weather_runs_mult,
+        away_reliever_metrics=away_reliever_metrics,
+        home_reliever_metrics=home_reliever_metrics,
+    )
+    run_pressure_adjustment = _fp_safe_float(
+        run_pressure.get("Run_Pressure_Adjustment"),
+        0.0,
+    )
+
+    raw_projected_total = round(base_projected_total + run_pressure_adjustment, 2)
     raw_edge = round(raw_projected_total - vegas_line, 2)
 
     # Only calibrate against a real/trusted total. Do not pull projection toward
@@ -1919,7 +2293,8 @@ def generate_prediction(
         recommended_units = round(0.5 + 0.5 * (abs_edge - EDGE_THRESHOLD) / (EDGE_FOR_FULL_UNIT - EDGE_THRESHOLD), 2)
 
     print(
-        f"📦 Raw Projection: {away_runs:.2f} + {home_runs:.2f} = {raw_projected_total:.2f} | "
+        f"📦 Base Projection: {away_runs:.2f} + {home_runs:.2f} = {base_projected_total:.2f} | "
+        f"RunPressure={run_pressure_adjustment:+.2f} | Raw O/U={raw_projected_total:.2f} | "
         f"Calibrated O/U: {projected_total:.2f} ({ou_edge_calibration_tag}, factor={ou_edge_calibration_factor:.2f}) | "
         f"Edge: {edge:+.2f} | {prediction_str} | Conf: {confidence:.2f}"
     )
@@ -2009,10 +2384,25 @@ def generate_prediction(
     return {
         "skip": False,
         "projected_total": projected_total,
+        "base_projected_total": base_projected_total,
+        "base_ou_edge": base_ou_edge,
         "raw_projected_total": raw_projected_total,
         "raw_ou_edge": raw_edge,
         "ou_edge_calibration_factor": ou_edge_calibration_factor,
         "ou_edge_calibration_tag": ou_edge_calibration_tag,
+        "away_early_run_pressure": run_pressure.get("Away_Early_Run_Pressure", ""),
+        "away_early_run_suppression": run_pressure.get("Away_Early_Run_Suppression", ""),
+        "away_late_run_pressure": run_pressure.get("Away_Late_Run_Pressure", ""),
+        "away_late_run_suppression": run_pressure.get("Away_Late_Run_Suppression", ""),
+        "home_early_run_pressure": run_pressure.get("Home_Early_Run_Pressure", ""),
+        "home_early_run_suppression": run_pressure.get("Home_Early_Run_Suppression", ""),
+        "home_late_run_pressure": run_pressure.get("Home_Late_Run_Pressure", ""),
+        "home_late_run_suppression": run_pressure.get("Home_Late_Run_Suppression", ""),
+        "weather_interaction_adjustment": run_pressure.get("Weather_Interaction_Adjustment", ""),
+        "full_picture_adjustment_raw": run_pressure.get("Full_Picture_Adjustment_Raw", ""),
+        "run_pressure_adjustment": run_pressure.get("Run_Pressure_Adjustment", ""),
+        "run_pressure_mode": run_pressure.get("Run_Pressure_Mode", ""),
+        "run_pressure_reasons": run_pressure.get("Run_Pressure_Reasons", ""),
         "away_runs": away_runs,
         "home_runs": home_runs,
         "away_runs_raw": away_runs_raw,
@@ -3871,6 +4261,8 @@ def run_predictions():
                 game_datetime=safe_get(game, "game_datetime", ""),
                 schedule_game_date=safe_get(game, "game_date", ""),
                 odds_info=odds_info,
+                away_reliever_metrics=away_reliever_metrics,
+                home_reliever_metrics=home_reliever_metrics,
             )
 
             if proj.get("skip"):
@@ -3979,10 +4371,25 @@ def run_predictions():
 
             game_data.update({
                 "Projected_Total": projected_total,
+                "Base_Projected_Total": proj.get("base_projected_total", ""),
+                "Base_OU_Edge": proj.get("base_ou_edge", ""),
                 "Raw_Projected_Total": proj.get("raw_projected_total", ""),
                 "Raw_OU_Edge": proj.get("raw_ou_edge", ""),
                 "OU_Edge_Calibration_Factor": proj.get("ou_edge_calibration_factor", ""),
                 "OU_Edge_Calibration_Tag": proj.get("ou_edge_calibration_tag", ""),
+                "Away_Early_Run_Pressure": proj.get("away_early_run_pressure", ""),
+                "Away_Early_Run_Suppression": proj.get("away_early_run_suppression", ""),
+                "Away_Late_Run_Pressure": proj.get("away_late_run_pressure", ""),
+                "Away_Late_Run_Suppression": proj.get("away_late_run_suppression", ""),
+                "Home_Early_Run_Pressure": proj.get("home_early_run_pressure", ""),
+                "Home_Early_Run_Suppression": proj.get("home_early_run_suppression", ""),
+                "Home_Late_Run_Pressure": proj.get("home_late_run_pressure", ""),
+                "Home_Late_Run_Suppression": proj.get("home_late_run_suppression", ""),
+                "Weather_Interaction_Adjustment": proj.get("weather_interaction_adjustment", ""),
+                "Full_Picture_Adjustment_Raw": proj.get("full_picture_adjustment_raw", ""),
+                "Run_Pressure_Adjustment": proj.get("run_pressure_adjustment", ""),
+                "Run_Pressure_Mode": proj.get("run_pressure_mode", ""),
+                "Run_Pressure_Reasons": proj.get("run_pressure_reasons", ""),
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
                 "Away_Runs_Raw": away_runs_raw,
@@ -4847,8 +5254,15 @@ def run_predictions():
         "Game_ID", "Game_Num", "Doubleheader", "Datetime", "Game_Date",
         "Game", "Game_Status", "Venue", "Weather_Runs_Mult", "Retractable_Roof_Weather",
         "ENV_Is_Retractable", "ENV_Validation", "ENV_Conflict",
-        "Projected_Total", "Raw_Projected_Total", "Raw_OU_Edge",
+        "Projected_Total", "Base_Projected_Total", "Base_OU_Edge",
+        "Raw_Projected_Total", "Raw_OU_Edge",
         "OU_Edge_Calibration_Factor", "OU_Edge_Calibration_Tag",
+        "Away_Early_Run_Pressure", "Away_Early_Run_Suppression",
+        "Away_Late_Run_Pressure", "Away_Late_Run_Suppression",
+        "Home_Early_Run_Pressure", "Home_Early_Run_Suppression",
+        "Home_Late_Run_Pressure", "Home_Late_Run_Suppression",
+        "Weather_Interaction_Adjustment", "Full_Picture_Adjustment_Raw",
+        "Run_Pressure_Adjustment", "Run_Pressure_Mode", "Run_Pressure_Reasons",
         "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
         "Away_Cap_Diff", "Home_Cap_Diff", "Projection_Cap_Flag",
@@ -6837,9 +7251,16 @@ def run_predictions():
             "Home_Pitcher", "Home_Starter_ERA", "Home_Starter_xERA",
             "Home_Starter_ERA_xERA_Gap", "Home_Starter_WHIP",
 
-            "Vegas_Line", "Raw_Projected_Total", "Raw_OU_Edge",
+            "Vegas_Line", "Base_Projected_Total", "Base_OU_Edge",
+            "Raw_Projected_Total", "Raw_OU_Edge",
             "Projected_Total", "OU_Edge",
             "OU_Edge_Calibration_Factor", "OU_Edge_Calibration_Tag",
+            "Run_Pressure_Adjustment", "Full_Picture_Adjustment_Raw",
+            "Run_Pressure_Mode", "Run_Pressure_Reasons",
+            "Away_Early_Run_Pressure", "Away_Early_Run_Suppression",
+            "Away_Late_Run_Pressure", "Away_Late_Run_Suppression",
+            "Home_Early_Run_Pressure", "Home_Early_Run_Suppression",
+            "Home_Late_Run_Pressure", "Home_Late_Run_Suppression",
             "OU_Pick", "OU_Confidence", "OU_Fired",
 
             "OU_Implied_Prob_Pick", "OU_True_Prob_Pick",
@@ -6877,6 +7298,162 @@ def run_predictions():
             send_telegram_file(
                 ou_f5_decision_board_path,
                 caption=f"📊 Over Gang OU/F5 decision board — {datetime.now().strftime('%b %d')}",
+            )
+
+        # Export-only ML decision board.
+        # Purpose: one clean moneyline board with ML-specific context only.
+        # No ML fire logic, Kelly, sharpness, O/U, F5, K, or model math changes.
+        def _ml_board_clean(_v):
+            if _v is None:
+                return ""
+            _s = str(_v)
+            if _s.lower() in ("nan", "none", "null", "<na>"):
+                return ""
+            return _s
+
+        def _ml_board_float(_v):
+            try:
+                if _v is None or str(_v).strip() == "":
+                    return None
+                _f = float(str(_v).replace("%", "").replace("u", "").strip())
+                if _f != _f:
+                    return None
+                return _f
+            except (TypeError, ValueError):
+                return None
+
+        def _ml_board_bool(_v):
+            return str(_v).strip().lower() in ("true", "1", "yes", "y")
+
+        def _ml_board_pick_side(_v):
+            _s = str(_v or "").upper()
+            if "HOME" in _s:
+                return "home"
+            if "AWAY" in _s:
+                return "away"
+            return ""
+
+        def _ml_board_first_present(_row, _keys):
+            for _k in _keys:
+                _v = _row.get(_k)
+                if _v is None:
+                    continue
+                _s = str(_v).strip()
+                if _s and _s.lower() not in ("nan", "none", "null", "<na>"):
+                    return _v
+            return ""
+
+        def _ml_board_picked_odds(_row):
+            _side = str(_row.get("ML_Side") or "").strip().lower()
+            if _side == "home":
+                return _ml_board_first_present(
+                    _row,
+                    ["ML_Home_Odds", "Captured_ML_Home", "Home_ML", "ML_Home", "Home_Odds"],
+                )
+            if _side == "away":
+                return _ml_board_first_present(
+                    _row,
+                    ["ML_Away_Odds", "Captured_ML_Away", "Away_ML", "ML_Away", "Away_Odds"],
+                )
+            return ""
+
+        def _ml_board_short_favorite(_row):
+            _odds = _ml_board_float(_ml_board_picked_odds(_row))
+            if _odds is None:
+                return False
+            return -125 <= _odds <= -110
+
+        def _ml_board_lane(_row):
+            _ml_fired = _ml_board_bool(_row.get("ML_Fired"))
+            _short_fav = _ml_board_short_favorite(_row)
+            _market_ok = _ml_board_bool(_row.get("ML_Market_OK"))
+            _sharp_ok = _ml_board_bool(_row.get("ML_Sharpness_OK")) or not _ml_board_bool(
+                _row.get("ML_Sharpness_Inputs_OK")
+            )
+            if _ml_fired and _short_fav:
+                return "ML_SHORT_FAVORITE_FIRE"
+            if _ml_fired:
+                return "ML_FIRE"
+            if _short_fav and _market_ok and _sharp_ok:
+                return "ML_SHORT_FAVORITE_WATCH"
+            if not _market_ok:
+                return "ML_MARKET_INCOMPLETE"
+            return "ML_WATCH"
+
+        def _ml_board_decision_reason(_row):
+            _parts = []
+            if _ml_board_bool(_row.get("ML_Fired")):
+                _parts.append("ml_fired")
+            _lane = _ml_board_clean(_row.get("ML_Lane"))
+            if _lane:
+                _parts.append(_lane)
+            _edge = _ml_board_clean(_row.get("ML_Edge"))
+            if _edge:
+                _parts.append(f"edge={_edge}")
+            _conf = _ml_board_clean(_row.get("ML_Confidence"))
+            if _conf:
+                _parts.append(f"conf={_conf}")
+            _kelly = _ml_board_clean(_row.get("ML_Kelly_Units"))
+            if _kelly:
+                _parts.append(f"kelly={_kelly}")
+            _market_status = _ml_board_clean(_row.get("ML_Market_Status"))
+            if _market_status:
+                _parts.append(f"market={_market_status}")
+            _sharp_ok = _ml_board_clean(_row.get("ML_Sharpness_OK"))
+            if _sharp_ok:
+                _parts.append(f"sharp_ok={_sharp_ok}")
+            _no_fire = _ml_board_clean(_row.get("No_Fire_ML_Reason"))
+            if _no_fire and _no_fire.lower() not in ("nan", "none"):
+                _parts.append(f"no_fire={_no_fire}")
+            _dq = _ml_board_clean(_row.get("Data_Quality_Flag"))
+            if _dq:
+                _parts.append(f"dq={_dq}")
+            return " | ".join(_parts)
+
+        ml_decision_board_rows = []
+        for _src in picks_board_rows:
+            _row = dict(_src)
+            _row["ML_Picked_Odds"] = _ml_board_picked_odds(_row)
+            _row["ML_Short_Favorite_Flag"] = _ml_board_short_favorite(_row)
+            _row["ML_Lane"] = _ml_board_lane(_row)
+            _row["ML_Decision_Reason"] = _ml_board_decision_reason(_row)
+            ml_decision_board_rows.append(_row)
+
+        ml_decision_board_cols = [
+            "Game_Date", "Datetime", "Game_Status", "Venue", "Game",
+
+            "Away_Pitcher", "Away_Starter_ERA", "Away_Starter_xERA", "Away_Starter_WHIP",
+            "Home_Pitcher", "Home_Starter_ERA", "Home_Starter_xERA", "Home_Starter_WHIP",
+
+            "ML_Pick", "ML_Side", "ML_Bet_Type",
+            "ML_Confidence", "ML_Edge", "ML_Value", "ML_Kelly_Units",
+            "ML_Picked_Odds", "ML_Short_Favorite_Flag", "ML_Lane",
+
+            "ML_Fired", "No_Fire_ML_Reason",
+            "ML_Market_OK", "ML_Market_Status",
+            "ML_Quality_Flag", "ML_Quality_Factor",
+
+            "ML_Sharpness_Inputs_OK", "ML_Sharpness_OK",
+            "ML_Sharpness_Gate_Open", "ML_Exchange_Vs_Sharp_Gap",
+            "ML_Exchange_Present", "ML_Prophetx_Present", "ML_Pinnacle_Present",
+
+            "Data_Quality_Flag", "Trigger_Tags", "ML_Decision_Reason",
+        ]
+
+        ml_decision_board_df = pd.DataFrame(
+            ml_decision_board_rows,
+            columns=ml_decision_board_cols,
+        )
+        ml_decision_board_path = f"{ARCHIVE_DIR}/ml_decision_board_{archive_date}.csv"
+        ml_decision_board_df.to_csv(ml_decision_board_path, index=False)
+        print(
+            f"💾 Saved {len(ml_decision_board_rows)} ML decision-board row(s) "
+            f"→ {ml_decision_board_path}"
+        )
+        if os.path.exists(ml_decision_board_path):
+            send_telegram_file(
+                ml_decision_board_path,
+                caption=f"📈 Over Gang ML decision board — {datetime.now().strftime('%b %d')}",
             )
 
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
