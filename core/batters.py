@@ -14,6 +14,7 @@ DATA_DIR = os.path.join(ROOT_DIR, "data")
 BATTER_STATS_CSV = os.path.join(DATA_DIR, "batter_stats.csv")
 TEAM_BEST9_JSON = os.path.join(DATA_DIR, "team_best9.json")          # optional
 PITCHER_HAND_CSV = os.path.join(DATA_DIR, "pitcher_handedness.csv")  # optional
+TEAM_OFFENSE_SPLITS_CSV = os.path.join(DATA_DIR, "team_offense_splits.csv")  # optional clean team-vs-hand source
 
 
 # ---------- Helpers ----------
@@ -36,6 +37,158 @@ def _safe_float(x, default=np.nan):
         return float(x)
     except Exception:
         return default
+
+
+_TEAM_OFFENSE_SPLITS_CACHE = None
+
+_TEAM_NAME_ALIASES = {
+    "oakland athletics": "athletics",
+    "as": "athletics",
+    "a s": "athletics",
+    "az": "arizona diamondbacks",
+    "ari": "arizona diamondbacks",
+}
+
+
+def _team_alias_norm(s: str) -> str:
+    key = _norm(s)
+    return _TEAM_NAME_ALIASES.get(key, key)
+
+
+def _bounded_ratio(value, anchor, lo=0.80, hi=1.20):
+    v = _safe_float(value)
+    if np.isnan(v) or not anchor:
+        return None
+    try:
+        ratio = float(v) / float(anchor)
+    except Exception:
+        return None
+    return max(lo, min(hi, ratio))
+
+
+def _load_team_offense_splits() -> pd.DataFrame:
+    """
+    Load clean team offense vs pitcher-hand splits if available.
+    Source file is created by scripts/update_team_offense_splits.py.
+    """
+    global _TEAM_OFFENSE_SPLITS_CACHE
+
+    if _TEAM_OFFENSE_SPLITS_CACHE is not None:
+        return _TEAM_OFFENSE_SPLITS_CACHE
+
+    if not os.path.exists(TEAM_OFFENSE_SPLITS_CSV):
+        _TEAM_OFFENSE_SPLITS_CACHE = pd.DataFrame()
+        return _TEAM_OFFENSE_SPLITS_CACHE
+
+    try:
+        df = pd.read_csv(TEAM_OFFENSE_SPLITS_CSV)
+    except Exception as e:
+        logging.warning(f"⚠️ Could not read team_offense_splits.csv: {e}")
+        df = pd.DataFrame()
+
+    _TEAM_OFFENSE_SPLITS_CACHE = df
+    return _TEAM_OFFENSE_SPLITS_CACHE
+
+
+def _team_offense_split_dict(team_name: str, pitcher_hand: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Prefer clean MLB StatsAPI team-vs-hand splits when available.
+
+    Returns the same caller-facing shape as offense_vs_hand_dict:
+    {"mult": float, "pop": "team", ...extra diagnostic keys...}
+
+    Extra keys are intentionally backward-compatible; existing callers use "mult"/"pop".
+    """
+    if not team_name or pitcher_hand not in ("R", "L"):
+        return None
+
+    df = _load_team_offense_splits()
+    if df is None or df.empty:
+        return None
+
+    required = {"Pitcher_Hand", "Quality", "Estimated_wOBA", "OPS", "ISO", "BB_Pct", "K_Pct"}
+    if not required.issubset(set(df.columns)):
+        return None
+
+    hand = str(pitcher_hand).upper()
+    team_key = _team_alias_norm(team_name)
+
+    sdf = df[df["Pitcher_Hand"].astype(str).str.upper() == hand].copy()
+    if sdf.empty:
+        return None
+
+    match = pd.DataFrame()
+    for col in ["Team_Name", "Team", "Team_Code", "File_Code"]:
+        if col in sdf.columns:
+            col_norm = sdf[col].astype(str).map(_team_alias_norm)
+            match = sdf[col_norm == team_key]
+            if not match.empty:
+                break
+
+    if match.empty:
+        return None
+
+    row = match.iloc[0]
+
+    if str(row.get("Quality", "")).strip() != "mlb_raw_complete":
+        return None
+
+    pa = _safe_float(row.get("PA"))
+    if np.isnan(pa) or pa <= 0:
+        return None
+
+    # Clean source multiplier:
+    # - Estimated_wOBA/OPS: broad scoring quality
+    # - ISO: damage/power pressure
+    # - BB%: traffic pressure
+    # - K%: contact suppression/pressure, inverted because lower K% is better for offense
+    factors = []
+
+    woba_ratio = _bounded_ratio(row.get("Estimated_wOBA"), _LEAGUE_WOBA)
+    if woba_ratio is not None:
+        factors.append((0.42, woba_ratio))
+
+    ops_ratio = _bounded_ratio(row.get("OPS"), _LEAGUE_OPS)
+    if ops_ratio is not None:
+        factors.append((0.26, ops_ratio))
+
+    iso_ratio = _bounded_ratio(row.get("ISO"), _LEAGUE_ISO)
+    if iso_ratio is not None:
+        factors.append((0.16, iso_ratio))
+
+    bb_ratio = _bounded_ratio(row.get("BB_Pct"), 8.5, lo=0.85, hi=1.15)
+    if bb_ratio is not None:
+        factors.append((0.08, bb_ratio))
+
+    k_pct = _safe_float(row.get("K_Pct"))
+    if not np.isnan(k_pct) and k_pct > 0:
+        k_ratio = max(0.85, min(1.15, 22.0 / k_pct))
+        factors.append((0.08, k_ratio))
+
+    if not factors:
+        return None
+
+    weight_sum = sum(w for w, _ in factors)
+    raw_rel = sum(w * v for w, v in factors) / weight_sum
+
+    # Damp small-sample split rows toward neutral. Most team rows are safely above this.
+    reliability = max(0.35, min(1.0, pa / 500.0))
+    mult = 1.0 + ((raw_rel - 1.0) * reliability)
+
+    # Keep existing offense multiplier safety rails.
+    mult = max(0.90, min(1.10, float(mult)))
+
+    return {
+        "mult": mult,
+        "pop": "team",
+        "source": "team_offense_splits",
+        "pa": int(pa),
+        "estimated_woba": _safe_float(row.get("Estimated_wOBA")),
+        "ops": _safe_float(row.get("OPS")),
+        "iso": _safe_float(row.get("ISO")),
+        "bb_pct": _safe_float(row.get("BB_Pct")),
+        "k_pct": _safe_float(row.get("K_Pct")),
+    }
 
 
 # Anchors for normalizing platoon stats (fallback when MLB omits wOBA/wRC+ on statSplits)
@@ -260,7 +413,17 @@ class Batters:
         Dict API for callers that prefer a mapping.
         Returns: {"mult": float, "pop": "team|lineup|none"}
         """
-        if batter_df is None or batter_df.empty or not team_name or pitcher_hand not in ("R", "L"):
+        if not team_name or pitcher_hand not in ("R", "L"):
+            return {"mult": 1.0, "pop": "none"}
+
+        # Prefer the clean MLB StatsAPI team-vs-hand split source when available.
+        # This keeps the existing model call chain intact while replacing the weak
+        # batter_stats fallback multiplier with a complete 30-team source.
+        team_split = _team_offense_split_dict(team_name, pitcher_hand)
+        if team_split is not None:
+            return team_split
+
+        if batter_df is None or batter_df.empty:
             return {"mult": 1.0, "pop": "none"}
 
         team_key = _norm(team_name)
