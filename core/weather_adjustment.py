@@ -11,6 +11,7 @@ coordinates are known. On any failure or unknown venue, returns 1.0.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
@@ -34,6 +35,7 @@ VENUE_LAT_LON: dict[str, Tuple[float, float]] = {
     "Coors Field": (39.7559, -104.9942),
     "Fenway Park": (42.3467, -71.0972),
     "Globe Life Field": (32.7512, -97.0828),
+    "Daikin Park": (29.7569, -95.3555),
     "Oriole Park at Camden Yards": (39.2839, -76.6217),
     "Great American Ball Park": (39.0974, -84.5066),
     "Wrigley Field": (41.9484, -87.6553),
@@ -81,10 +83,11 @@ def _parse_game_datetime_utc(game_datetime: Optional[str]) -> Optional[datetime]
 
 def _fetch_hourly_temp_wind_ms(
     lat: float, lon: float, dt_utc: datetime
-) -> Optional[Tuple[float, float, float]]:
-    """Return (temp_c, wind_m/s, gust_m/s) for the hourly slot closest to dt_utc, or None.
+) -> Optional[Tuple[float, float, float, Optional[float]]]:
+    """Return (temp_c, wind_m/s, gust_m/s, wind_dir_from_deg) for closest hourly slot, or None.
 
-    gust_m/s falls back to wind_m/s when the gust array is missing or unparsable for the slot.
+    gust_m/s falls back to wind_m/s when the gust array is missing or unparsable.
+    wind_dir_from_deg is meteorological direction the wind comes FROM; None if unavailable.
     """
     now = datetime.now(timezone.utc)
     date_str = dt_utc.strftime("%Y-%m-%d")
@@ -96,7 +99,7 @@ def _fetch_hourly_temp_wind_ms(
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m,wind_speed_10m,wind_gusts_10m",
+        "hourly": "temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m",
         "timezone": "UTC",
         "start_date": date_str,
         "end_date": date_str,
@@ -115,6 +118,7 @@ def _fetch_hourly_temp_wind_ms(
     temps = hourly.get("temperature_2m") or []
     winds = hourly.get("wind_speed_10m") or []
     gusts = hourly.get("wind_gusts_10m") or []
+    wind_dirs = hourly.get("wind_direction_10m") or []
     if not times or len(temps) != len(times) or len(winds) != len(times):
         return None
 
@@ -148,19 +152,120 @@ def _fetch_hourly_temp_wind_ms(
     except (TypeError, ValueError, IndexError):
         gust_ms = wind_ms
 
-    return temp_c, wind_ms, gust_ms
+    wind_dir_from_deg = None
+    try:
+        wind_dir_from_deg = float(wind_dirs[best_i])
+        if not (wind_dir_from_deg == wind_dir_from_deg):  # NaN guard
+            wind_dir_from_deg = None
+        elif not (0.0 <= wind_dir_from_deg <= 360.0):
+            wind_dir_from_deg = None
+    except (TypeError, ValueError, IndexError):
+        wind_dir_from_deg = None
+
+    return temp_c, wind_ms, gust_ms, wind_dir_from_deg
 
 
-def _mult_from_temp_wind(temp_c: float, wind_ms: float, gust_ms: float) -> float:
-    """Combine small temp + wind deltas; clamp total multiplier to WEATHER_* bounds.
+# Coordinate-derived center-field bearings in degrees from home plate toward center field.
+# Source type: public Google Earth / coordinate-derived stadium orientation work, not live MLB API.
+# Missing venues fall back to the prior scalar gust behavior.
+VENUE_CF_BEARING_DEG: dict[str, float] = {
+    "American Family Field": 128.8537047,
+    "Angel Stadium": 44.17136547,
+    "Busch Stadium": 62.69629144,
+    "Chase Field": 359.7491679,
+    "Citi Field": 13.99114182,
+    "Citizens Bank Park": 10.07051968,
+    "Coors Field": 4.962490772,
+    "Comerica Park": 151.2270493,
+    "Daikin Park": 343.1738414,
+    "Fenway Park": 44.17424096,
+    "Globe Life Field": 32.80283371,
+    "Great American Ball Park": 122.3427354,
+    "Kauffman Stadium": 46.71018194,
+    "loanDepot park": 128.1321885,
+    "Nationals Park": 28.94819353,
+    "Oriole Park at Camden Yards": 31.33978546,
+    "Oracle Park": 85.1519466,
+    "Petco Park": 359.7374753,
+    "PNC Park": 116.5764243,
+    "Progressive Field": 359.2547923,
+    "Rate Field": 127.0606723,
+    "Rogers Centre": 344.0904107,
+    "T-Mobile Park": 49.30884076,
+    "Target Field": 90.50394579,
+    "Truist Park": 157.64687,
+    "UNIQLO Field at Dodger Stadium": 26.4845402,
+    "Wrigley Field": 37.61572884,
+    "Yankee Stadium": 75.61766684,
+}
 
-    Wind contribution uses effective_wind_ms = max(wind_ms, gust_ms) so peak hourly gusts can
-    lift the carry signal without changing the existing coefficient or component cap.
+
+def _angle_diff_deg(a: float, b: float) -> float:
+    """Smallest absolute difference between two compass bearings."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def _directional_wind_component(
+    venue_name: str,
+    wind_ms: float,
+    gust_ms: float,
+    wind_dir_from_deg: Optional[float],
+) -> Optional[float]:
+    """Return signed wind component in m/s above the neutral wind threshold.
+
+    Positive = blowing out toward center field.
+    Negative = blowing in toward home plate.
+    Zero = weak wind or crosswind.
+    None = no trusted bearing / no wind direction available.
     """
+    cf_bearing = VENUE_CF_BEARING_DEG.get(str(venue_name).strip())
+    if cf_bearing is None or wind_dir_from_deg is None:
+        return None
+
+    effective_wind_ms = max(float(wind_ms), float(gust_ms))
+    if effective_wind_ms <= _NEUTRAL_WIND_MS:
+        return 0.0
+
+    # Open-Meteo wind direction is meteorological: direction wind comes FROM.
+    # Convert to direction wind is blowing TO.
+    wind_to_deg = (float(wind_dir_from_deg) + 180.0) % 360.0
+    diff_to_cf = _angle_diff_deg(wind_to_deg, float(cf_bearing))
+
+    # +1 = directly out to CF, -1 = directly in from CF, 0 = crosswind.
+    alignment = math.cos(math.radians(diff_to_cf))
+
+    # Ignore weak crosswind noise.
+    if abs(alignment) < 0.35:
+        return 0.0
+
+    return (effective_wind_ms - _NEUTRAL_WIND_MS) * alignment
+
+
+def _mult_from_temp_wind(
+    temp_c: float,
+    wind_ms: float,
+    gust_ms: float,
+    wind_dir_from_deg: Optional[float] = None,
+    venue_name: Optional[str] = None,
+) -> float:
+    """Combine temp + directional wind deltas; clamp total multiplier to WEATHER_* bounds."""
     t_comp = _TEMP_COEFF * (temp_c - _NEUTRAL_TEMP_C)
     t_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, t_comp))
-    effective_wind_ms = max(wind_ms, gust_ms)
-    w_comp = _WIND_COEFF * (effective_wind_ms - _NEUTRAL_WIND_MS)
+
+    directional_component = None
+    if venue_name:
+        directional_component = _directional_wind_component(
+            venue_name, wind_ms, gust_ms, wind_dir_from_deg
+        )
+
+    if directional_component is None:
+        # Fallback for venues without a bearing: preserve prior scalar gust behavior.
+        effective_wind_ms = max(wind_ms, gust_ms)
+        w_comp = _WIND_COEFF * (effective_wind_ms - _NEUTRAL_WIND_MS)
+    else:
+        # Directional path: blowing out boosts, blowing in suppresses, crosswind is neutral.
+        w_comp = _WIND_COEFF * directional_component
+
     w_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, w_comp))
     m = 1.0 + t_comp + w_comp
     return max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, m))
@@ -250,5 +355,11 @@ def compute_weather_runs_mult(
     tw = _fetch_hourly_temp_wind_ms(lat, lon, dt_utc)
     if tw is None:
         return 1.0
-    temp_c, wind_ms, gust_ms = tw
-    return _mult_from_temp_wind(temp_c, wind_ms, gust_ms)
+    temp_c, wind_ms, gust_ms, wind_dir_from_deg = tw
+    return _mult_from_temp_wind(
+        temp_c,
+        wind_ms,
+        gust_ms,
+        wind_dir_from_deg=wind_dir_from_deg,
+        venue_name=key,
+    )
