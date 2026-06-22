@@ -1266,6 +1266,25 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
         "recent_bad_arm_count": 0,
         "depth_risk": "low",
         "reliever_metrics_source": "neutral",
+
+        # Bullpen clarity v1: grade actual arm quality + availability.
+        "reliever_total_count": 0,
+        "shutdown_arm_count": 0,
+        "good_arm_count": 0,
+        "average_arm_count": 0,
+        "risky_arm_count": 0,
+        "disaster_arm_count": 0,
+        "recent_used_count": 0,
+        "taxed_arm_count": 0,
+        "heavy_week_count": 0,
+        "good_available_count": 0,
+        "bad_recent_count": 0,
+        "disaster_recent_count": 0,
+        "bullpen_quality_tier": "unknown",
+        "bullpen_availability_tier": "unknown",
+        "bullpen_clarity_score": 0.0,
+        "late_run_pressure_score": 0.0,
+        "late_run_suppression_score": 0.0,
     }
     if reliever_df is None or not isinstance(reliever_df, pd.DataFrame):
         out["depth_risk"] = "unknown"
@@ -1315,33 +1334,173 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
             return 0
 
     bad_xera = bad_whip = recent_bad = 0
+
+    total = shutdown = good = average = risky = disaster = 0
+    recent_used = taxed = heavy_week = 0
+    good_available = bad_recent = disaster_recent = 0
+
     for _, row in sub.iterrows():
         xera = _as_float(row.get("xERA"))
         whip = _as_float(row.get("WHIP"))
+        ip_week = _as_float(row.get("IP_Week"))
         a3 = _as_int_nonneg(row.get("Appearances_3D"))
+
+        total += 1
+
         if xera is not None and xera >= 4.50:
             bad_xera += 1
         if whip is not None and whip >= 1.50:
             bad_whip += 1
-        if a3 > 0:
-            bad_enough = False
-            if xera is not None and xera >= 4.50:
-                bad_enough = True
-            if whip is not None and whip >= 1.50:
-                bad_enough = True
-            if bad_enough:
-                recent_bad += 1
+
+        is_recent = a3 > 0
+        is_taxed = a3 >= 2 or (ip_week is not None and ip_week >= 3.0)
+        is_heavy_week = ip_week is not None and ip_week >= 4.0
+
+        if is_recent:
+            recent_used += 1
+        if is_taxed:
+            taxed += 1
+        if is_heavy_week:
+            heavy_week += 1
+
+        # Arm grade v1.
+        # Use xERA + WHIP together when available. Unknown values do not force
+        # a bad grade; they fall to average/risky only when one known metric is poor.
+        if (
+            xera is not None and whip is not None
+            and xera <= 3.20 and whip <= 1.15
+        ):
+            grade = "shutdown"
+            shutdown += 1
+        elif (
+            xera is not None and whip is not None
+            and xera <= 3.80 and whip <= 1.25
+        ):
+            grade = "good"
+            good += 1
+        elif (
+            (xera is not None and xera >= 5.50)
+            or (whip is not None and whip >= 1.70)
+        ):
+            grade = "disaster"
+            disaster += 1
+        elif (
+            (xera is not None and xera >= 4.50)
+            or (whip is not None and whip >= 1.50)
+        ):
+            grade = "risky"
+            risky += 1
+        elif (
+            (xera is not None and xera <= 4.50)
+            and (whip is None or whip <= 1.40)
+        ):
+            grade = "average"
+            average += 1
+        else:
+            grade = "average"
+            average += 1
+
+        bad_enough = grade in {"risky", "disaster"}
+        good_enough = grade in {"shutdown", "good"}
+
+        if is_recent and bad_enough:
+            recent_bad += 1
+            bad_recent += 1
+        if is_recent and grade == "disaster":
+            disaster_recent += 1
+
+        # Good available means a quality arm exists and is not clearly taxed.
+        if good_enough and not is_taxed and not is_heavy_week:
+            good_available += 1
 
     out["bad_xera_count"] = int(bad_xera)
     out["bad_whip_count"] = int(bad_whip)
     out["recent_bad_arm_count"] = int(recent_bad)
 
-    if bad_xera >= 4 or bad_whip >= 4 or recent_bad >= 4:
+    out["reliever_total_count"] = int(total)
+    out["shutdown_arm_count"] = int(shutdown)
+    out["good_arm_count"] = int(good)
+    out["average_arm_count"] = int(average)
+    out["risky_arm_count"] = int(risky)
+    out["disaster_arm_count"] = int(disaster)
+    out["recent_used_count"] = int(recent_used)
+    out["taxed_arm_count"] = int(taxed)
+    out["heavy_week_count"] = int(heavy_week)
+    out["good_available_count"] = int(good_available)
+    out["bad_recent_count"] = int(bad_recent)
+    out["disaster_recent_count"] = int(disaster_recent)
+
+    if bad_xera >= 4 or bad_whip >= 4 or recent_bad >= 4 or disaster >= 3:
         out["depth_risk"] = "high"
-    elif bad_xera >= 2 or bad_whip >= 2 or recent_bad >= 2:
+    elif bad_xera >= 2 or bad_whip >= 2 or recent_bad >= 2 or disaster >= 1 or risky >= 4:
         out["depth_risk"] = "medium"
     else:
         out["depth_risk"] = "low"
+
+    quality_score = (
+        2.0 * shutdown
+        + 1.25 * good
+        + 0.25 * average
+        - 1.0 * risky
+        - 2.0 * disaster
+    )
+
+    # Availability score penalizes taxed/heavy usage and rewards fresh quality.
+    availability_score = (
+        1.25 * good_available
+        - 0.75 * taxed
+        - 1.00 * heavy_week
+        - 0.75 * bad_recent
+        - 1.25 * disaster_recent
+    )
+
+    if shutdown + good >= 4 and disaster == 0 and risky <= 2:
+        quality_tier = "strong"
+    elif shutdown + good >= 3 and disaster <= 1 and risky <= 3:
+        quality_tier = "solid"
+    elif disaster >= 3 or risky >= 6:
+        quality_tier = "danger"
+    elif disaster >= 1 or risky >= 4:
+        quality_tier = "risky"
+    else:
+        quality_tier = "average"
+
+    if good_available >= 3 and taxed <= 1 and heavy_week == 0:
+        availability_tier = "fresh"
+    elif good_available >= 2 and taxed <= 3:
+        availability_tier = "usable"
+    elif taxed >= 5 or heavy_week >= 3 or good_available <= 1:
+        availability_tier = "thin"
+    else:
+        availability_tier = "strained"
+
+    # Scores are intentionally bounded because they will be consumed by lane
+    # separation later. These are not direct run projections yet.
+    late_pressure = (
+        0.12 * risky
+        + 0.22 * disaster
+        + 0.08 * bad_recent
+        + 0.14 * disaster_recent
+        + 0.05 * taxed
+        + 0.05 * heavy_week
+        - 0.05 * good_available
+    )
+    late_suppression = (
+        0.12 * shutdown
+        + 0.08 * good_available
+        + 0.04 * good
+        - 0.05 * bad_recent
+        - 0.08 * disaster
+    )
+
+    late_pressure = max(0.0, min(1.25, late_pressure))
+    late_suppression = max(0.0, min(1.25, late_suppression))
+
+    out["bullpen_quality_tier"] = quality_tier
+    out["bullpen_availability_tier"] = availability_tier
+    out["bullpen_clarity_score"] = round(float(quality_score + availability_score), 3)
+    out["late_run_pressure_score"] = round(float(late_pressure), 3)
+    out["late_run_suppression_score"] = round(float(late_suppression), 3)
 
     return out
 
@@ -5018,6 +5177,29 @@ def run_predictions():
             game_data["Home_Reliever_Depth_Risk"] = home_reliever_metrics.get(
                 "depth_risk", "unknown"
             )
+
+            # Bullpen clarity v1: exact arm-quality + availability snapshot.
+            for _side, _metrics in [
+                ("Away", away_reliever_metrics),
+                ("Home", home_reliever_metrics),
+            ]:
+                game_data[f"{_side}_Reliever_Total_Count"] = _metrics.get("reliever_total_count", 0)
+                game_data[f"{_side}_Reliever_Shutdown_Arm_Count"] = _metrics.get("shutdown_arm_count", 0)
+                game_data[f"{_side}_Reliever_Good_Arm_Count"] = _metrics.get("good_arm_count", 0)
+                game_data[f"{_side}_Reliever_Average_Arm_Count"] = _metrics.get("average_arm_count", 0)
+                game_data[f"{_side}_Reliever_Risky_Arm_Count"] = _metrics.get("risky_arm_count", 0)
+                game_data[f"{_side}_Reliever_Disaster_Arm_Count"] = _metrics.get("disaster_arm_count", 0)
+                game_data[f"{_side}_Reliever_Recent_Used_Count"] = _metrics.get("recent_used_count", 0)
+                game_data[f"{_side}_Reliever_Taxed_Arm_Count"] = _metrics.get("taxed_arm_count", 0)
+                game_data[f"{_side}_Reliever_Heavy_Week_Count"] = _metrics.get("heavy_week_count", 0)
+                game_data[f"{_side}_Reliever_Good_Available_Count"] = _metrics.get("good_available_count", 0)
+                game_data[f"{_side}_Reliever_Bad_Recent_Count"] = _metrics.get("bad_recent_count", 0)
+                game_data[f"{_side}_Reliever_Disaster_Recent_Count"] = _metrics.get("disaster_recent_count", 0)
+                game_data[f"{_side}_Bullpen_Quality_Tier"] = _metrics.get("bullpen_quality_tier", "unknown")
+                game_data[f"{_side}_Bullpen_Availability_Tier"] = _metrics.get("bullpen_availability_tier", "unknown")
+                game_data[f"{_side}_Bullpen_Clarity_Score"] = _metrics.get("bullpen_clarity_score", 0.0)
+                game_data[f"{_side}_Late_Run_Pressure_Score"] = _metrics.get("late_run_pressure_score", 0.0)
+                game_data[f"{_side}_Late_Run_Suppression_Score"] = _metrics.get("late_run_suppression_score", 0.0)
             game_data["Away_Bullpen_Fatigue_Ratio"] = _tel.get("away_bullpen_fatigue_ratio", "")
             game_data["Home_Bullpen_Fatigue_Ratio"] = _tel.get("home_bullpen_fatigue_ratio", "")
             game_data["Away_Bullpen_Fatigue_Mult"] = _tel.get("away_bullpen_fatigue_mult", "")
@@ -5304,6 +5486,23 @@ def run_predictions():
         "Away_Reliever_Bad_WHIP_Count", "Home_Reliever_Bad_WHIP_Count",
         "Away_Reliever_Recent_Bad_Arm_Count", "Home_Reliever_Recent_Bad_Arm_Count",
         "Away_Reliever_Depth_Risk", "Home_Reliever_Depth_Risk",
+        "Away_Reliever_Total_Count", "Home_Reliever_Total_Count",
+        "Away_Reliever_Shutdown_Arm_Count", "Home_Reliever_Shutdown_Arm_Count",
+        "Away_Reliever_Good_Arm_Count", "Home_Reliever_Good_Arm_Count",
+        "Away_Reliever_Average_Arm_Count", "Home_Reliever_Average_Arm_Count",
+        "Away_Reliever_Risky_Arm_Count", "Home_Reliever_Risky_Arm_Count",
+        "Away_Reliever_Disaster_Arm_Count", "Home_Reliever_Disaster_Arm_Count",
+        "Away_Reliever_Recent_Used_Count", "Home_Reliever_Recent_Used_Count",
+        "Away_Reliever_Taxed_Arm_Count", "Home_Reliever_Taxed_Arm_Count",
+        "Away_Reliever_Heavy_Week_Count", "Home_Reliever_Heavy_Week_Count",
+        "Away_Reliever_Good_Available_Count", "Home_Reliever_Good_Available_Count",
+        "Away_Reliever_Bad_Recent_Count", "Home_Reliever_Bad_Recent_Count",
+        "Away_Reliever_Disaster_Recent_Count", "Home_Reliever_Disaster_Recent_Count",
+        "Away_Bullpen_Quality_Tier", "Home_Bullpen_Quality_Tier",
+        "Away_Bullpen_Availability_Tier", "Home_Bullpen_Availability_Tier",
+        "Away_Bullpen_Clarity_Score", "Home_Bullpen_Clarity_Score",
+        "Away_Late_Run_Pressure_Score", "Home_Late_Run_Pressure_Score",
+        "Away_Late_Run_Suppression_Score", "Home_Late_Run_Suppression_Score",
         "Away_Bullpen_Fatigue_Ratio", "Home_Bullpen_Fatigue_Ratio",
         "Away_Bullpen_Fatigue_Mult", "Home_Bullpen_Fatigue_Mult",
         "Away_Effective_ERA", "Home_Effective_ERA",
