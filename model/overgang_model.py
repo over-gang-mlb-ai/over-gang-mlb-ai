@@ -4998,6 +4998,123 @@ def run_predictions():
             home_reliever_depth_risk = str(
                 home_reliever_metrics.get("depth_risk", "")
             ).strip().lower()
+
+            def _ou_lane_float(key, default=0.0):
+                try:
+                    v = game_data.get(key, default)
+                    if v in ("", None):
+                        return default
+                    f = float(v)
+                    if f != f:
+                        return default
+                    return f
+                except (TypeError, ValueError):
+                    return default
+
+            # Lane Separation v1:
+            # Use the already-computed early/late run path to decide whether the
+            # current full-game O/U pick is actually the right market.
+            _away_early_pressure = _ou_lane_float("Away_Early_Run_Pressure")
+            _away_early_suppression = _ou_lane_float("Away_Early_Run_Suppression")
+            _home_early_pressure = _ou_lane_float("Home_Early_Run_Pressure")
+            _home_early_suppression = _ou_lane_float("Home_Early_Run_Suppression")
+            _away_late_pressure = _ou_lane_float("Away_Late_Run_Pressure")
+            _away_late_suppression = _ou_lane_float("Away_Late_Run_Suppression")
+            _home_late_pressure = _ou_lane_float("Home_Late_Run_Pressure")
+            _home_late_suppression = _ou_lane_float("Home_Late_Run_Suppression")
+
+            ou_early_net_run_environment = round(
+                _away_early_pressure
+                - _away_early_suppression
+                + _home_early_pressure
+                - _home_early_suppression,
+                3,
+            )
+            ou_late_net_run_environment = round(
+                _away_late_pressure
+                - _away_late_suppression
+                + _home_late_pressure
+                - _home_late_suppression,
+                3,
+            )
+
+            ou_early_over_path = ou_early_net_run_environment >= 0.45
+            ou_early_under_path = ou_early_net_run_environment <= -0.45
+            ou_late_over_path = ou_late_net_run_environment >= 0.55
+            ou_late_under_path = ou_late_net_run_environment <= -0.55
+
+            ou_late_over_strong = bool(
+                ou_late_net_run_environment >= 0.75
+                or _away_late_pressure >= 1.00
+                or _home_late_pressure >= 1.00
+            )
+
+            if ou_early_over_path and ou_late_over_path:
+                ou_run_path = "full_game_over_path"
+            elif ou_early_under_path and ou_late_under_path:
+                ou_run_path = "full_game_under_path"
+            elif ou_early_over_path and ou_late_under_path:
+                ou_run_path = "f5_over_path"
+            elif ou_early_under_path and ou_late_over_path:
+                ou_run_path = "f5_under_late_over_conflict"
+            elif ou_late_over_path:
+                ou_run_path = "late_over_path"
+            elif ou_late_under_path:
+                ou_run_path = "late_under_path"
+            else:
+                ou_run_path = "mixed_watch"
+
+            # Controlled lane-supported OVER carveout.
+            # This is intentionally not a broad threshold drop. It only helps full-game
+            # OVER when the current model is already close and late-game scoring risk
+            # is clearly supported.
+            ou_lane_supported_over_fire = bool(
+                (not ou_fire_candidate)
+                and _ou_pick == "OVER"
+                and has_real_total
+                and (not projection_cap_hit)
+                and (float(edge) >= 0.50)
+                and (confidence >= 0.67)
+                and ou_late_over_path
+                and (ou_early_net_run_environment >= -0.20)
+                and ("League Avg" not in (away_pitcher or ""))
+                and ("League Avg" not in (home_pitcher or ""))
+                and (not away_low)
+                and (not home_low)
+                and (not _fallback_used_from_path(away_path))
+                and (not _fallback_used_from_path(home_path))
+            )
+
+            ou_fire_candidate = bool(ou_fire_candidate or ou_lane_supported_over_fire)
+
+            # Full-game UNDER is unsafe when late pressure is strong.
+            # If early suppression exists, this is usually F5 UNDER / full-game pass.
+            # If early is neutral/positive, this can become a late-over review path.
+            ou_lane_late_risk_under_block = bool(
+                ou_fire_candidate
+                and _ou_pick == "UNDER"
+                and has_real_total
+                and (
+                    ou_late_over_strong
+                    or ou_run_path in {"f5_under_late_over_conflict", "late_over_path"}
+                )
+            )
+
+            # Early OVER but late suppression means this is often F5 OVER rather than
+            # full-game OVER. Block only when the full-game edge is not very strong.
+            ou_lane_f5_over_full_game_block = bool(
+                ou_fire_candidate
+                and _ou_pick == "OVER"
+                and has_real_total
+                and ou_run_path == "f5_over_path"
+                and (float(edge) < 1.50)
+            )
+
+            ou_lane_full_game_block = bool(
+                ou_lane_late_risk_under_block
+                or ou_lane_f5_over_full_game_block
+            )
+
             ou_full_game_under_reliever_depth_risk = bool(
                 ou_fire_candidate
                 and has_real_total
@@ -5021,7 +5138,11 @@ def run_predictions():
                     )
                 )
             )
-            ou_fired = bool(ou_fire_candidate and not under_reliever_depth_block)
+            ou_fired = bool(
+                ou_fire_candidate
+                and not under_reliever_depth_block
+                and not ou_lane_full_game_block
+            )
             trigger_tags = "|".join(filter(None, [
                 "ou_high_confidence" if ou_fired else None,
                 "ou_clean_strong_carveout" if (clean_strong_ou and not standard_ou_fire) else None,
@@ -5037,6 +5158,15 @@ def run_predictions():
                 "ou_under_reliever_depth_block"
                 if under_reliever_depth_block
                 else None,
+                "ou_lane_supported_over_fire"
+                if ou_lane_supported_over_fire
+                else None,
+                "ou_lane_late_risk_under_block"
+                if ou_lane_late_risk_under_block
+                else None,
+                "ou_lane_f5_over_full_game_block"
+                if ou_lane_f5_over_full_game_block
+                else None,
             ]))
             game_data["Fired_Play"] = ou_fired
             game_data["OU_Fired"] = ou_fired
@@ -5047,10 +5177,21 @@ def run_predictions():
                 ou_full_game_under_reliever_depth_risk
             )
             game_data["OU_Under_Reliever_Depth_Block"] = under_reliever_depth_block
+            game_data["OU_Early_Net_Run_Environment"] = ou_early_net_run_environment
+            game_data["OU_Late_Net_Run_Environment"] = ou_late_net_run_environment
+            game_data["OU_Run_Path"] = ou_run_path
+            game_data["OU_Lane_Supported_Over_Fire"] = ou_lane_supported_over_fire
+            game_data["OU_Lane_Late_Risk_Under_Block"] = ou_lane_late_risk_under_block
+            game_data["OU_Lane_F5_Over_Full_Game_Block"] = ou_lane_f5_over_full_game_block
+            game_data["OU_Lane_Full_Game_Block"] = ou_lane_full_game_block
             if ou_fired:
                 no_fire_ou = ""
             else:
-                if (
+                if ou_lane_late_risk_under_block:
+                    no_fire_ou = "lane_late_risk_under_block"
+                elif ou_lane_f5_over_full_game_block:
+                    no_fire_ou = "lane_f5_over_full_game_block"
+                elif (
                     projection_cap_hit
                     and has_real_total
                     and (confidence >= fire_threshold)
