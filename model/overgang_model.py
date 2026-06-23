@@ -1333,9 +1333,32 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
         except (TypeError, ValueError):
             return 0
 
+    def _as_timestamp(v):
+        try:
+            ts = pd.to_datetime(v, errors="coerce")
+            if pd.isna(ts):
+                return None
+            return ts
+        except Exception:
+            return None
+
+    # Availability should be judged against the freshest reliever activity in
+    # the file, not the wall-clock date. This keeps zero-API validation stable
+    # and avoids penalizing off-days, while preventing April/May stale arms from
+    # being counted as today's available bullpen support.
+    ref_last_game_date = None
+    if "Last_Game_Date" in df.columns:
+        _all_dates = pd.to_datetime(df["Last_Game_Date"], errors="coerce")
+        if _all_dates.notna().any():
+            ref_last_game_date = _all_dates.max()
+
+    active_recent_window_days = 21
+
     bad_xera = bad_whip = recent_bad = 0
+    active_bad_xera = active_bad_whip = 0
 
     total = shutdown = good = average = risky = disaster = 0
+    active_shutdown = active_good = active_average = active_risky = active_disaster = 0
     recent_used = taxed = heavy_week = 0
     good_available = bad_recent = disaster_recent = 0
 
@@ -1344,23 +1367,35 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
         whip = _as_float(row.get("WHIP"))
         ip_week = _as_float(row.get("IP_Week"))
         a3 = _as_int_nonneg(row.get("Appearances_3D"))
+        last_game_date = _as_timestamp(row.get("Last_Game_Date"))
 
         total += 1
 
+        if ref_last_game_date is None or last_game_date is None:
+            active_recent = True
+        else:
+            active_recent = (
+                0 <= int((ref_last_game_date - last_game_date).days) <= active_recent_window_days
+            )
+
         if xera is not None and xera >= 4.50:
             bad_xera += 1
+            if active_recent:
+                active_bad_xera += 1
         if whip is not None and whip >= 1.50:
             bad_whip += 1
+            if active_recent:
+                active_bad_whip += 1
 
         is_recent = a3 > 0
         is_taxed = a3 >= 2 or (ip_week is not None and ip_week >= 3.0)
         is_heavy_week = ip_week is not None and ip_week >= 4.0
 
-        if is_recent:
+        if active_recent and is_recent:
             recent_used += 1
-        if is_taxed:
+        if active_recent and is_taxed:
             taxed += 1
-        if is_heavy_week:
+        if active_recent and is_heavy_week:
             heavy_week += 1
 
         # Arm grade v1.
@@ -1400,17 +1435,30 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
             grade = "average"
             average += 1
 
+        if active_recent:
+            if grade == "shutdown":
+                active_shutdown += 1
+            elif grade == "good":
+                active_good += 1
+            elif grade == "average":
+                active_average += 1
+            elif grade == "risky":
+                active_risky += 1
+            elif grade == "disaster":
+                active_disaster += 1
+
         bad_enough = grade in {"risky", "disaster"}
         good_enough = grade in {"shutdown", "good"}
 
-        if is_recent and bad_enough:
+        if active_recent and is_recent and bad_enough:
             recent_bad += 1
             bad_recent += 1
-        if is_recent and grade == "disaster":
+        if active_recent and is_recent and grade == "disaster":
             disaster_recent += 1
 
-        # Good available means a quality arm exists and is not clearly taxed.
-        if good_enough and not is_taxed and not is_heavy_week:
+        # Good available means a quality arm exists, is recently active, and
+        # is not clearly taxed. Stale April/May arms do not count as available.
+        if active_recent and good_enough and not is_taxed and not is_heavy_week:
             good_available += 1
 
     out["bad_xera_count"] = int(bad_xera)
@@ -1430,19 +1478,25 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
     out["bad_recent_count"] = int(bad_recent)
     out["disaster_recent_count"] = int(disaster_recent)
 
-    if bad_xera >= 4 or bad_whip >= 4 or recent_bad >= 4 or disaster >= 3:
+    if active_bad_xera >= 4 or active_bad_whip >= 4 or recent_bad >= 4 or active_disaster >= 3:
         out["depth_risk"] = "high"
-    elif bad_xera >= 2 or bad_whip >= 2 or recent_bad >= 2 or disaster >= 1 or risky >= 4:
+    elif (
+        active_bad_xera >= 2
+        or active_bad_whip >= 2
+        or recent_bad >= 2
+        or active_disaster >= 1
+        or active_risky >= 4
+    ):
         out["depth_risk"] = "medium"
     else:
         out["depth_risk"] = "low"
 
     quality_score = (
-        2.0 * shutdown
-        + 1.25 * good
-        + 0.25 * average
-        - 1.0 * risky
-        - 2.0 * disaster
+        2.0 * active_shutdown
+        + 1.25 * active_good
+        + 0.25 * active_average
+        - 1.0 * active_risky
+        - 2.0 * active_disaster
     )
 
     # Availability score penalizes taxed/heavy usage and rewards fresh quality.
@@ -1454,13 +1508,13 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
         - 1.25 * disaster_recent
     )
 
-    if shutdown + good >= 4 and disaster == 0 and risky <= 2:
+    if active_shutdown + active_good >= 4 and active_disaster == 0 and active_risky <= 2:
         quality_tier = "strong"
-    elif shutdown + good >= 3 and disaster <= 1 and risky <= 3:
+    elif active_shutdown + active_good >= 3 and active_disaster <= 1 and active_risky <= 3:
         quality_tier = "solid"
-    elif disaster >= 3 or risky >= 6:
+    elif active_disaster >= 3 or active_risky >= 6:
         quality_tier = "danger"
-    elif disaster >= 1 or risky >= 4:
+    elif active_disaster >= 1 or active_risky >= 4:
         quality_tier = "risky"
     else:
         quality_tier = "average"
@@ -1477,8 +1531,8 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
     # Scores are intentionally bounded because they will be consumed by lane
     # separation later. These are not direct run projections yet.
     late_pressure = (
-        0.12 * risky
-        + 0.22 * disaster
+        0.12 * active_risky
+        + 0.22 * active_disaster
         + 0.08 * bad_recent
         + 0.14 * disaster_recent
         + 0.05 * taxed
@@ -1486,11 +1540,11 @@ def get_reliever_depth_metrics(team_name: str, reliever_df: pd.DataFrame) -> dic
         - 0.05 * good_available
     )
     late_suppression = (
-        0.12 * shutdown
+        0.12 * active_shutdown
         + 0.08 * good_available
-        + 0.04 * good
+        + 0.04 * active_good
         - 0.05 * bad_recent
-        - 0.08 * disaster
+        - 0.08 * active_disaster
     )
 
     late_pressure = max(0.0, min(1.25, late_pressure))
@@ -2034,6 +2088,77 @@ def _calculate_full_picture_run_pressure(
         lineup_impact=home_lineup_impact,
         opposing_starter_stats=away_stats,
         opposing_reliever_metrics=away_reliever_metrics,
+    )
+
+    def _apply_bullpen_clarity_to_late_path(team_blob, team_prefix, opponent_reliever_metrics):
+        """
+        Bullpen clarity v1 -> real late-run math.
+
+        Mapping:
+        - Away offense late pressure/suppression is driven by HOME bullpen clarity.
+        - Home offense late pressure/suppression is driven by AWAY bullpen clarity.
+
+        This intentionally uses max(existing, clarity_score) instead of blindly adding,
+        because the old late path already includes bad-arm/depth signals. The clarity
+        score is the sharper per-arm/availability read and should upgrade weak old
+        late reads without double-counting the same bullpen risk.
+        """
+        if not isinstance(team_blob, dict):
+            return team_blob
+
+        pressure_key = f"{team_prefix}_Late_Run_Pressure"
+        suppression_key = f"{team_prefix}_Late_Run_Suppression"
+        reasons_key = f"{team_prefix}_Run_Pressure_Reasons"
+
+        old_pressure = _fp_safe_float(team_blob.get(pressure_key), 0.0)
+        old_suppression = _fp_safe_float(team_blob.get(suppression_key), 0.0)
+
+        clarity_pressure = _fp_metric(
+            opponent_reliever_metrics,
+            ["late_run_pressure_score"],
+            0.0,
+        )
+        clarity_suppression = _fp_metric(
+            opponent_reliever_metrics,
+            ["late_run_suppression_score"],
+            0.0,
+        )
+
+        new_pressure = max(old_pressure, clarity_pressure)
+        new_suppression = max(old_suppression, clarity_suppression)
+
+        new_pressure = max(0.0, min(1.25, float(new_pressure)))
+        new_suppression = max(0.0, min(1.25, float(new_suppression)))
+
+        tags = []
+        if new_pressure > old_pressure + 0.001:
+            tags.append(
+                f"{team_prefix.lower()}_late_bullpen_clarity_pressure_{new_pressure:.2f}"
+            )
+        if new_suppression > old_suppression + 0.001:
+            tags.append(
+                f"{team_prefix.lower()}_late_bullpen_clarity_suppression_{new_suppression:.2f}"
+            )
+
+        team_blob[pressure_key] = round(new_pressure, 3)
+        team_blob[suppression_key] = round(new_suppression, 3)
+
+        if tags:
+            existing = str(team_blob.get(reasons_key, "") or "").strip()
+            add = "|".join(tags)
+            team_blob[reasons_key] = f"{existing}|{add}" if existing else add
+
+        return team_blob
+
+    away = _apply_bullpen_clarity_to_late_path(
+        away,
+        "Away",
+        home_reliever_metrics,
+    )
+    home = _apply_bullpen_clarity_to_late_path(
+        home,
+        "Home",
+        away_reliever_metrics,
     )
 
     weather = _fp_safe_float(weather_runs_mult, 1.0)
