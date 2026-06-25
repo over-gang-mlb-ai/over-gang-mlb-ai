@@ -4359,10 +4359,11 @@ def run_predictions():
             home_stats = DataManager.match_pitcher_row(stats_df, home_pitcher, alias_log=alias_log)
             home_alias_used = len(alias_log) > _alias_len_before_home
 
-            # 🧠 Log fallback usage if LowIP
+            # 🧠 Log low-IP starter sample separately from true fallback.
+            # LowIP means real pitcher stats exist but sample size is thin.
             for name, stats in [(away_pitcher, away_stats), (home_pitcher, home_stats)]:
                 if isinstance(stats, dict) and stats.get("LowIP", False):
-                    print(f"⚠️ Using fallback stats for: {name}")
+                    print(f"⚠️ Low-IP pitcher sample for: {name}")
 
             # Runtime pitcher-resolution outcome logging (logging only)
             away_path = _runtime_pitcher_path(away_pitcher, away_stats, alias_used=away_alias_used)
@@ -4423,10 +4424,9 @@ def run_predictions():
             away_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(away_off.get("mult", 1.0))))
             home_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(home_off.get("mult", 1.0))))
 
-            if isinstance(away_stats, dict) and away_stats.get('LowIP', False):
-                unmatched_pitchers.add(away_pitcher)
-            if isinstance(home_stats, dict) and home_stats.get('LowIP', False):
-                unmatched_pitchers.add(home_pitcher)
+            # Low-IP pitchers are real matched pitchers, not unmatched pitchers.
+            # Keep them out of unmatched alerts; they remain tracked via Starter_LowIP
+            # and Data_Quality_Flag=low_ip.
 
             print(f"🧠 Pitcher Check: {away_pitcher} → {away_stats if away_stats is not None else 'None'}")
             print(f"🧠 Pitcher Check: {home_pitcher} → {home_stats if home_stats is not None else 'None'}")
@@ -5233,11 +5233,12 @@ def run_predictions():
                 dq_parts.append("fallback_line")
             _away_low = bool(safe_get(away_stats, "LowIP", False))
             _home_low = bool(safe_get(home_stats, "LowIP", False))
+            # Separate true missing-starter fallback from real low-IP starters.
+            # League Avg means no usable real starter stats. LowIP means real stats
+            # exist but sample size is thin; it should not be labeled fallback_pitcher.
             if (
                 "League Avg" in (away_pitcher or "")
                 or "League Avg" in (home_pitcher or "")
-                or _away_low
-                or _home_low
             ):
                 dq_parts.append("fallback_pitcher")
             if _away_low or _home_low:
