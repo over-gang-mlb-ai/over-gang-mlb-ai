@@ -782,7 +782,38 @@ EDGE_THRESHOLD = 0.25        # min |edge| to recommend OVER/UNDER (runs); tune u
 EDGE_FOR_FULL_UNIT = 0.5     # edge >= this gets 1.0 unit; scale below; tune up (e.g. 0.6) for conservative sizing
 # O/U confidence (generate_prediction only): multiplicative trims on pitcher primitives — not derived CSV labels.
 LEAGUE_AVG_OU_CONFIDENCE_MULT = 0.75  # "League Avg" pitcher name shell
-LOW_IP_OU_CONFIDENCE_MULT = 0.78      # LowIP on either starter stats row
+LOW_IP_OU_CONFIDENCE_MULT = 0.78      # severe LowIP tier for very small real starter samples
+
+
+def _ou_low_ip_confidence_multiplier(starter_ip, is_low_ip) -> float:
+    """
+    Confidence trim for real matched low-IP starters.
+
+    Do not use this for League Avg fallback shells. League Avg has its own
+    fallback penalty and should not stack with the real-starter LowIP penalty.
+
+    Sportsbook-clarity principle:
+    3 IP and 45 IP are not the same uncertainty.
+    """
+    if not bool(is_low_ip):
+        return 1.0
+
+    try:
+        ip = float(starter_ip)
+        if ip != ip:
+            ip = 0.0
+    except (TypeError, ValueError):
+        ip = 0.0
+
+    if ip < 10.0:
+        return LOW_IP_OU_CONFIDENCE_MULT
+    if ip < 25.0:
+        return 0.84
+    if ip < 45.0:
+        return 0.90
+    if ip < 60.0:
+        return 0.95
+    return 1.0
 # Unified bullpen workload fatigue (single run multiplier — do not stack with a second IP rule):
 # expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
 # fatigue_ratio = IP_Week / expected_weekly_ip — symmetric around neutral: tired pen (+runs),
@@ -2515,11 +2546,27 @@ def generate_prediction(
     league_avg_penalty = 1.0
     low_ip_penalty = 1.0
 
-    if "League Avg" in away_pitcher or "League Avg" in home_pitcher:
+    has_league_avg_starter = (
+        "League Avg" in away_pitcher
+        or "League Avg" in home_pitcher
+    )
+
+    if has_league_avg_starter:
         league_avg_penalty = LEAGUE_AVG_OU_CONFIDENCE_MULT
 
-    if safe_get(away_stats, "LowIP", False) or safe_get(home_stats, "LowIP", False):
-        low_ip_penalty = LOW_IP_OU_CONFIDENCE_MULT
+    # Real low-IP starters get a tiered confidence trim by actual IP.
+    # League Avg fallback shells may carry LowIP=True internally, but they should
+    # be handled by the league-average penalty, not double-stacked as real LowIP.
+    if not has_league_avg_starter:
+        away_low_ip_mult = _ou_low_ip_confidence_multiplier(
+            safe_get(away_stats, "IP", 0.0),
+            safe_get(away_stats, "LowIP", False),
+        )
+        home_low_ip_mult = _ou_low_ip_confidence_multiplier(
+            safe_get(home_stats, "IP", 0.0),
+            safe_get(home_stats, "LowIP", False),
+        )
+        low_ip_penalty = min(float(away_low_ip_mult), float(home_low_ip_mult))
 
     data_quality_factor = _velo_trust * reliever_mult
     data_quality_factor *= league_avg_penalty * low_ip_penalty
