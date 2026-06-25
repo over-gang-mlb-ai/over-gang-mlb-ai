@@ -471,6 +471,117 @@ def _is_mlb_pitcher_person(p: dict) -> bool:
     return pos.get("code") == "1" or pos.get("abbreviation") == "P"
 
 
+_MISSING_PROBABLE_RECOVERY_CACHE = {}
+
+
+def _recover_missing_probable_pitcher_from_game_feed(game: dict, side: str) -> str:
+    """
+    Best-effort recovery for blank/TBD probable starters before falling back to
+    League Avg Away/Home.
+
+    Uses MLB StatsAPI live game feed only when a probable starter is missing.
+    This is not an odds/paid-credit API call.
+
+    Expected side: "away" or "home".
+    """
+    side = str(side or "").strip().lower()
+    if side not in {"away", "home"}:
+        return ""
+
+    try:
+        game_pk = (
+            game.get("game_id")
+            or game.get("gamePk")
+            or game.get("game_pk")
+            or game.get("Game_ID")
+        )
+    except Exception:
+        game_pk = None
+
+    if not game_pk:
+        return ""
+
+    cache_key = (str(game_pk), side)
+    try:
+        if cache_key in _MISSING_PROBABLE_RECOVERY_CACHE:
+            return _MISSING_PROBABLE_RECOVERY_CACHE[cache_key]
+    except Exception:
+        pass
+
+    recovered = ""
+    try:
+        url = f"https://statsapi.mlb.com/api/v1.1/game/{int(game_pk)}/feed/live"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+        if resp.status_code != 200:
+            recovered = ""
+        else:
+            data = resp.json() or {}
+
+            candidates = []
+
+            # Pregame/daily feed path when MLB publishes probable pitchers.
+            try:
+                pp = data.get("gameData", {}).get("probablePitchers", {}) or {}
+                node = pp.get(side) or {}
+                if isinstance(node, dict):
+                    candidates.extend([
+                        node.get("fullName"),
+                        node.get("name"),
+                        node.get("boxscoreName"),
+                    ])
+            except Exception:
+                pass
+
+            # Some feeds expose probable info under gameData.teams side nodes.
+            try:
+                team_node = data.get("gameData", {}).get("teams", {}).get(side, {}) or {}
+                node = team_node.get("probablePitcher") or {}
+                if isinstance(node, dict):
+                    candidates.extend([
+                        node.get("fullName"),
+                        node.get("name"),
+                        node.get("boxscoreName"),
+                    ])
+                elif isinstance(node, str):
+                    candidates.append(node)
+            except Exception:
+                pass
+
+            # Post-lineup/live fallback: if the first listed pitcher is available
+            # pregame/near-start, use its person name. Safe best-effort only.
+            try:
+                box_team = data.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(side, {}) or {}
+                pitchers = box_team.get("pitchers") or []
+                players = box_team.get("players") or {}
+                if pitchers:
+                    pid = str(pitchers[0])
+                    pnode = players.get(f"ID{pid}") or players.get(pid) or {}
+                    person = pnode.get("person") or {}
+                    candidates.extend([
+                        person.get("fullName"),
+                        pnode.get("fullName"),
+                    ])
+            except Exception:
+                pass
+
+            for cand in candidates:
+                s = str(cand or "").strip()
+                if s and s.upper() != "TBD" and "league avg" not in s.lower():
+                    recovered = s
+                    break
+
+    except Exception as e:
+        print(f"⚠️ Missing probable recovery failed for gamePk={game_pk} side={side}: {e}")
+        recovered = ""
+
+    try:
+        _MISSING_PROBABLE_RECOVERY_CACHE[cache_key] = recovered
+    except Exception:
+        pass
+
+    return recovered
+
+
 def _mlb_targeted_resolve_pitcher_id(probable_name: str):
     """
     Resolve probable display name → (mlb_id, full_name) via MLB StatsAPI people/search?names=...
@@ -4033,15 +4144,32 @@ def run_predictions():
         away_missing = _is_missing_probable_pitcher(away_raw)
         home_missing = _is_missing_probable_pitcher(home_raw)
 
-        away_used = "League Avg Away" if away_missing else str(away_raw).strip()
-        home_used = "League Avg Home" if home_missing else str(home_raw).strip()
+        away_recovered = (
+            _recover_missing_probable_pitcher_from_game_feed(game, "away")
+            if away_missing
+            else ""
+        )
+        home_recovered = (
+            _recover_missing_probable_pitcher_from_game_feed(game, "home")
+            if home_missing
+            else ""
+        )
+
+        away_used = away_recovered or ("League Avg Away" if away_missing else str(away_raw).strip())
+        home_used = home_recovered or ("League Avg Home" if home_missing else str(home_raw).strip())
 
         if away_missing or home_missing:
-            opening_games_missing_probable_pitchers += 1
-            if away_missing:
-                opening_missing_pitchers_by_name.add("League Avg Away")
-            if home_missing:
-                opening_missing_pitchers_by_name.add("League Avg Home")
+            if away_recovered:
+                print(f"✅ Opening audit recovered away probable: {away_team} → {away_recovered}")
+            if home_recovered:
+                print(f"✅ Opening audit recovered home probable: {home_team} → {home_recovered}")
+
+            if (away_missing and not away_recovered) or (home_missing and not home_recovered):
+                opening_games_missing_probable_pitchers += 1
+                if away_missing and not away_recovered:
+                    opening_missing_pitchers_by_name.add("League Avg Away")
+                if home_missing and not home_recovered:
+                    opening_missing_pitchers_by_name.add("League Avg Home")
 
         away_type = _classify_pitcher_used(away_used)
         home_type = _classify_pitcher_used(home_used)
@@ -4320,13 +4448,29 @@ def run_predictions():
             away_pitcher = safe_get(game, 'away_probable_pitcher', 'TBD')
             home_pitcher = safe_get(game, 'home_probable_pitcher', 'TBD')
 
-            # ✅ Use fallback league average pitchers instead of skipping
+            # ✅ Recover blank/TBD probable starters before using League Avg shells.
             if not away_pitcher.strip() or away_pitcher == "TBD":
-                print(f"⚠️ Missing away pitcher for {away_team} — using League Avg Away")
-                away_pitcher = "League Avg Away"
+                _recovered_away_pitcher = _recover_missing_probable_pitcher_from_game_feed(game, "away")
+                if _recovered_away_pitcher:
+                    print(
+                        f"✅ Recovered missing away pitcher for {away_team}: "
+                        f"{_recovered_away_pitcher}"
+                    )
+                    away_pitcher = _recovered_away_pitcher
+                else:
+                    print(f"⚠️ Missing away pitcher for {away_team} — using League Avg Away")
+                    away_pitcher = "League Avg Away"
             if not home_pitcher.strip() or home_pitcher == "TBD":
-                print(f"⚠️ Missing home pitcher for {home_team} — using League Avg Home")
-                home_pitcher = "League Avg Home"
+                _recovered_home_pitcher = _recover_missing_probable_pitcher_from_game_feed(game, "home")
+                if _recovered_home_pitcher:
+                    print(
+                        f"✅ Recovered missing home pitcher for {home_team}: "
+                        f"{_recovered_home_pitcher}"
+                    )
+                    home_pitcher = _recovered_home_pitcher
+                else:
+                    print(f"⚠️ Missing home pitcher for {home_team} — using League Avg Home")
+                    home_pitcher = "League Avg Home"
 
             print(f"🎯 Matchup: {away_team} ({away_pitcher}) vs {home_team} ({home_pitcher})")
 
