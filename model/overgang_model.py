@@ -6046,28 +6046,61 @@ def run_predictions():
             k_stats_by_name = {}
 
         k_prop_rows = []
-        try:
-            props_url = "https://api.parlay-api.com/v1/sports/baseball_mlb/props"
-            props_params = {
-                "regions": "us",
-                "markets": "player_strikeouts",
-                "oddsFormat": "american",
-                "limit": 1000,
-            }
-            odds_api_key = os.getenv("ODDS_API_KEY", "")
-            if not odds_api_key:
-                print("⚠️ ODDS_API_KEY missing; skipping pitcher K props fetch.")
-            else:
-                props_headers = {"X-API-Key": odds_api_key, "Accept": "application/json"}
-                props_resp = requests.get(props_url, params=props_params, headers=props_headers, timeout=25)
-                props_resp.raise_for_status()
-                props_payload = props_resp.json()
-                if isinstance(props_payload, dict) and isinstance(props_payload.get("data"), list):
-                    k_prop_rows = props_payload.get("data") or []
-                elif isinstance(props_payload, list):
-                    k_prop_rows = props_payload
-        except Exception as _e_k_props:
-            print(f"⚠️ Parlay pitcher K props unavailable: {_e_k_props}")
+        k_prop_source = "none"
+        parlay_k_props_last_error = ""
+
+        props_url = "https://api.parlay-api.com/v1/sports/baseball_mlb/props"
+        props_params = {
+            "regions": "us",
+            "markets": "player_strikeouts",
+            "oddsFormat": "american",
+            "limit": 1000,
+        }
+        odds_api_key = os.getenv("ODDS_API_KEY", "")
+        if not odds_api_key:
+            print("⚠️ ODDS_API_KEY missing; skipping Parlay pitcher K props fetch.")
+        else:
+            props_headers = {"X-API-Key": odds_api_key, "Accept": "application/json"}
+            for _attempt in range(1, 4):
+                try:
+                    props_resp = requests.get(
+                        props_url,
+                        params=props_params,
+                        headers=props_headers,
+                        timeout=25,
+                    )
+                    props_resp.raise_for_status()
+                    props_payload = props_resp.json()
+
+                    if isinstance(props_payload, dict) and isinstance(props_payload.get("data"), list):
+                        k_prop_rows = props_payload.get("data") or []
+                    elif isinstance(props_payload, list):
+                        k_prop_rows = props_payload
+                    else:
+                        k_prop_rows = []
+
+                    if k_prop_rows:
+                        k_prop_source = "parlay_api"
+                        print(
+                            f"🎯 Parlay pitcher K props loaded: {len(k_prop_rows)} raw row(s) "
+                            f"on attempt {_attempt}/3"
+                        )
+                        break
+
+                    parlay_k_props_last_error = "empty_or_unexpected_payload"
+                    print(
+                        f"⚠️ Parlay pitcher K props attempt {_attempt}/3 returned "
+                        "no usable raw rows."
+                    )
+                except Exception as _e_k_props:
+                    parlay_k_props_last_error = str(_e_k_props)
+                    print(
+                        f"⚠️ Parlay pitcher K props attempt {_attempt}/3 unavailable: "
+                        f"{_e_k_props}"
+                    )
+
+                if _attempt < 3:
+                    time.sleep(2)
 
         starter_norms = set()
         for _r in eligible_export:
@@ -6077,47 +6110,102 @@ def run_predictions():
                 if _pn:
                     starter_norms.add(_pn)
 
-        valid_k_props_by_pitcher = {}
         book_order = [
             "pinnacle", "draftkings", "fanduel", "bet365", "betmgm",
             "betrivers", "fanatics", "caesars", "parx", "hardrock",
         ]
         book_rank = {book: i for i, book in enumerate(book_order)}
-        valid_k_market_keys = {"player_strikeouts", "player_pitcher_strikeouts"}
-        for prop in k_prop_rows:
-            if not isinstance(prop, dict):
-                continue
-            player = str(prop.get("player") or "").strip()
-            market_key = str(prop.get("market_key") or "").strip().lower()
-            market_name = str(prop.get("market") or "").strip().lower()
-            if (
-                market_key not in valid_k_market_keys
-                or (market_name and market_name != "pitcher strikeouts")
-                or "combo" in market_key
-                or "combo" in market_name
-                or prop.get("line") is None
-                or prop.get("over_price") is None
-                or prop.get("under_price") is None
-                or not player
-                or "+" in player
-                or "{" in player
-                or "}" in player
-            ):
-                continue
-            pnorm = DataManager.normalize_name(player)
-            if pnorm not in starter_norms:
-                continue
-            valid_k_props_by_pitcher.setdefault(pnorm, []).append(prop)
+        valid_k_market_keys = {"player_strikeouts", "player_pitcher_strikeouts", "pitcher_strikeouts"}
 
-        selected_k_props = {}
-        for pnorm, rows_for_pitcher in valid_k_props_by_pitcher.items():
-            selected_k_props[pnorm] = sorted(
-                rows_for_pitcher,
-                key=lambda x: (
-                    book_rank.get(str(x.get("bookmaker") or "").lower(), len(book_order)),
-                    str(x.get("bookmaker") or "").lower(),
-                ),
-            )[0]
+        def _select_k_props_from_rows(rows, source_label):
+            valid_k_props_by_pitcher = {}
+            reject_counts = {}
+            raw_count = 0
+
+            def _reject(reason):
+                reject_counts[reason] = reject_counts.get(reason, 0) + 1
+
+            for prop in rows or []:
+                raw_count += 1
+                if not isinstance(prop, dict):
+                    _reject("not_dict")
+                    continue
+
+                player = str(prop.get("player") or "").strip()
+                market_key = str(prop.get("market_key") or "").strip().lower()
+                market_name = str(prop.get("market") or "").strip().lower()
+
+                if market_key not in valid_k_market_keys:
+                    _reject("market_key")
+                    continue
+                if market_name and market_name != "pitcher strikeouts":
+                    _reject("market_name")
+                    continue
+                if "combo" in market_key or "combo" in market_name:
+                    _reject("combo")
+                    continue
+                if prop.get("line") is None:
+                    _reject("line")
+                    continue
+                if prop.get("over_price") is None:
+                    _reject("over_price")
+                    continue
+                if prop.get("under_price") is None:
+                    _reject("under_price")
+                    continue
+                if not player:
+                    _reject("player")
+                    continue
+                if "+" in player or "{" in player or "}" in player:
+                    _reject("compound_player")
+                    continue
+
+                pnorm = DataManager.normalize_name(player)
+                if pnorm not in starter_norms:
+                    _reject("not_slate_starter")
+                    continue
+
+                valid_k_props_by_pitcher.setdefault(pnorm, []).append(prop)
+
+            selected = {}
+            for pnorm, rows_for_pitcher in valid_k_props_by_pitcher.items():
+                selected[pnorm] = sorted(
+                    rows_for_pitcher,
+                    key=lambda x: (
+                        book_rank.get(str(x.get("bookmaker") or "").lower(), len(book_order)),
+                        str(x.get("bookmaker") or "").lower(),
+                    ),
+                )[0]
+
+            print(
+                f"🎯 Pitcher K prop attach [{source_label}]: "
+                f"raw={raw_count}, matched_pitchers={len(valid_k_props_by_pitcher)}, "
+                f"selected={len(selected)}, rejects={reject_counts}"
+            )
+            return selected
+
+        selected_k_props = _select_k_props_from_rows(k_prop_rows, k_prop_source)
+
+        if not selected_k_props:
+            try:
+                from core.the_odds_api import fetch_pitcher_strikeout_props
+
+                print(
+                    "⚠️ Parlay pitcher K props did not attach to slate starters "
+                    f"(last_error={parlay_k_props_last_error or 'none'}). "
+                    "Trying The Odds API pitcher_strikeouts fallback."
+                )
+                toa_k_prop_rows = fetch_pitcher_strikeout_props()
+                toa_selected_k_props = _select_k_props_from_rows(
+                    toa_k_prop_rows,
+                    "the_odds_api_fallback",
+                )
+                if toa_selected_k_props:
+                    selected_k_props = toa_selected_k_props
+                    k_prop_rows = toa_k_prop_rows
+                    k_prop_source = "the_odds_api_fallback"
+            except Exception as _e_toa_k_props:
+                print(f"⚠️ The Odds API pitcher K props fallback unavailable: {_e_toa_k_props}")
 
         def _k_float(v):
             try:
@@ -6386,10 +6474,25 @@ def run_predictions():
         pitcher_k_board_df = pd.DataFrame(k_board_rows, columns=pitcher_k_board_cols)
         pitcher_k_board_df.to_csv(pitcher_k_board_path, index=False)
         print(f"💾 Saved {len(k_board_rows)} pitcher-K row(s) → {pitcher_k_board_path}")
-        send_telegram_file(
-            pitcher_k_board_path,
-            caption=f"🎯 Over Gang pitcher K board — {datetime.now().strftime('%b %d')}",
-        )
+        try:
+            _k_market_line_count = int(
+                pd.to_numeric(pitcher_k_board_df.get("K_Line"), errors="coerce")
+                .notna()
+                .sum()
+            )
+        except Exception:
+            _k_market_line_count = 0
+
+        if _k_market_line_count > 0:
+            send_telegram_file(
+                pitcher_k_board_path,
+                caption=f"🎯 Over Gang pitcher K board — {datetime.now().strftime('%b %d')}",
+            )
+        else:
+            print(
+                "⚠️ Pitcher-K board archived but NOT sent to Telegram: "
+                "0 usable K market line(s)."
+            )
 
         def _f5_board_float(v):
             try:

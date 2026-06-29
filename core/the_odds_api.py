@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
 F5_TOTALS_MARKET = "totals_1st_5_innings"
 OU_TOTALS_MARKET = "totals"
+PITCHER_STRIKEOUTS_MARKET = "pitcher_strikeouts"
 DEFAULT_REGIONS = "us"
 DEFAULT_ODDS_FORMAT = "american"
 
@@ -120,6 +121,172 @@ def fetch_event_f5_odds(event_id: str) -> Optional[Dict[str, Any]]:
     if not isinstance(body, dict):
         return None
     return body
+
+
+def fetch_event_pitcher_strikeout_odds(event_id: str) -> Optional[Dict[str, Any]]:
+    """GET /v4/sports/baseball_mlb/events/{event_id}/odds for pitcher_strikeouts.
+
+    Returns the parsed event dict with bookmakers/markets/outcomes, or None on failure.
+    """
+    if not event_id or not str(event_id).strip():
+        return None
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning(
+            "THE_ODDS_API_KEY not set; fetch_event_pitcher_strikeout_odds(%s) returning None.",
+            event_id,
+        )
+        return None
+
+    url = f"{THE_ODDS_API_BASE}/events/{str(event_id).strip()}/odds"
+    params = {
+        "apiKey": api_key,
+        "markets": PITCHER_STRIKEOUTS_MARKET,
+        "regions": DEFAULT_REGIONS,
+        "oddsFormat": DEFAULT_ODDS_FORMAT,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT_S)
+        r.raise_for_status()
+        body = r.json()
+    except Exception as e:
+        logger.warning("the_odds_api fetch_event_pitcher_strikeout_odds(%s) failed: %s", event_id, e)
+        return None
+
+    if not isinstance(body, dict):
+        return None
+    return body
+
+
+def _extract_pitcher_strikeout_props_from_event_odds(event_odds: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalize The Odds API pitcher_strikeouts event odds into existing K prop rows.
+
+    The Odds API player prop outcomes use:
+      name = Over/Under
+      description = pitcher name
+      point = strikeout line
+      price = American odds
+
+    Returned rows intentionally match the existing Parlay-shaped fields consumed by
+    model/overgang_model.py. Final attachment remains gated by slate starter name.
+    """
+    if not isinstance(event_odds, dict):
+        return []
+
+    event_id = str(event_odds.get("id") or event_odds.get("event_id") or "").strip()
+    rows: List[Dict[str, Any]] = []
+
+    bookmakers = event_odds.get("bookmakers") or []
+    if not isinstance(bookmakers, list):
+        return rows
+
+    for bm in bookmakers:
+        if not isinstance(bm, dict):
+            continue
+        book_key = str(bm.get("key") or "").strip().lower()
+        if not book_key:
+            continue
+
+        markets = bm.get("markets") or []
+        if not isinstance(markets, list):
+            continue
+
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            if str(market.get("key") or "").strip().lower() != PITCHER_STRIKEOUTS_MARKET:
+                continue
+
+            grouped: Dict[tuple, Dict[str, Any]] = {}
+            last_update = (
+                market.get("last_update")
+                or bm.get("last_update")
+                or event_odds.get("last_update")
+                or ""
+            )
+
+            for outcome in market.get("outcomes") or []:
+                if not isinstance(outcome, dict):
+                    continue
+
+                side = str(outcome.get("name") or "").strip().lower()
+                if side not in {"over", "under"}:
+                    continue
+
+                player = (
+                    str(outcome.get("description") or "").strip()
+                    or str(outcome.get("player") or "").strip()
+                    or str(outcome.get("participant") or "").strip()
+                )
+                line = _parse_point(outcome.get("point"))
+                price = _parse_american_price(outcome.get("price"))
+
+                if not player or line is None or price is None:
+                    continue
+
+                key = (player.lower(), float(line))
+                grouped.setdefault(
+                    key,
+                    {
+                        "player": player,
+                        "line": float(line),
+                        "over_price": None,
+                        "under_price": None,
+                    },
+                )
+                grouped[key][f"{side}_price"] = price
+
+            for item in grouped.values():
+                if item.get("over_price") is None or item.get("under_price") is None:
+                    continue
+                rows.append(
+                    {
+                        "source": SOURCE_LABEL,
+                        "player": item["player"],
+                        "market_key": "player_strikeouts",
+                        "market": "pitcher strikeouts",
+                        "line": item["line"],
+                        "over_price": item["over_price"],
+                        "under_price": item["under_price"],
+                        "bookmaker": book_key,
+                        "last_update": last_update,
+                        "canonical_event_id": event_id,
+                    }
+                )
+
+    return rows
+
+
+def fetch_pitcher_strikeout_props() -> List[Dict[str, Any]]:
+    """Fallback fetch for MLB pitcher strikeout props from The Odds API.
+
+    Uses /events to get event IDs, then /events/{event_id}/odds with market
+    pitcher_strikeouts. Call only as fallback because event-level prop odds can
+    consume quota.
+    """
+    events = fetch_mlb_events()
+    if not events:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    checked = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("id") or "").strip()
+        if not event_id:
+            continue
+
+        checked += 1
+        event_odds = fetch_event_pitcher_strikeout_odds(event_id)
+        rows.extend(_extract_pitcher_strikeout_props_from_event_odds(event_odds))
+
+    logger.info(
+        "the_odds_api pitcher_strikeouts fallback checked %s event(s), parsed %s prop row(s).",
+        checked,
+        len(rows),
+    )
+    return rows
 
 
 def _parse_price(value: Any) -> Optional[float]:
