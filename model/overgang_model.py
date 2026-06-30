@@ -925,6 +925,114 @@ def _ou_low_ip_confidence_multiplier(starter_ip, is_low_ip) -> float:
     if ip < 60.0:
         return 0.95
     return 1.0
+
+_OU_WORKLOAD_MAP_CACHE = None
+
+
+def _ou_safe_float(value):
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _ou_workload_shares_from_expected_ip(expected_starter_ip):
+    """Return starter/bullpen shares from proven Expected_Starter_IP, else fixed 55/45."""
+    ip = _ou_safe_float(expected_starter_ip)
+    if ip is None:
+        return float(STARTER_IP_SHARE), float(BULLPEN_IP_SHARE), ""
+
+    ip = max(4.0, min(6.5, ip))
+    starter_share = max(0.44, min(0.72, ip / 9.0))
+    bullpen_share = 1.0 - starter_share
+    return float(starter_share), float(bullpen_share), round(float(ip), 3)
+
+
+def _load_ou_workload_map():
+    """Load canonical pitcher workload fields from data/pitcher_k_stats.csv once."""
+    global _OU_WORKLOAD_MAP_CACHE
+    if _OU_WORKLOAD_MAP_CACHE is not None:
+        return _OU_WORKLOAD_MAP_CACHE
+
+    out = {}
+    path = os.path.join(DATA_DIR, "pitcher_k_stats.csv")
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"⚠️ O/U workload map unavailable: {e}")
+        _OU_WORKLOAD_MAP_CACHE = out
+        return out
+
+    required = {"Name", "Expected_Starter_IP", "Starter_Workload_Profile", "Workload_Eligible"}
+    if df.empty or not required.issubset(set(df.columns)):
+        print("⚠️ O/U workload map unavailable: pitcher_k_stats.csv missing workload columns")
+        _OU_WORKLOAD_MAP_CACHE = out
+        return out
+
+    for _, row in df.iterrows():
+        name = str(row.get("Name") or "").strip()
+        key = DataManager.normalize_name(name)
+        if not key or "league avg" in key:
+            continue
+
+        profile = str(row.get("Starter_Workload_Profile") or "").strip()
+        workload_eligible = str(row.get("Workload_Eligible")).strip().lower() in {"true", "1", "yes", "y"}
+        expected_ip = _ou_safe_float(row.get("Expected_Starter_IP"))
+
+        if workload_eligible and profile == "clean_starter" and expected_ip is not None:
+            starter_share, bullpen_share, expected_ip_used = _ou_workload_shares_from_expected_ip(expected_ip)
+            out[key] = {
+                "profile": profile,
+                "eligible": True,
+                "expected_ip": expected_ip_used,
+                "starter_share": starter_share,
+                "bullpen_share": bullpen_share,
+                "source": "expected_starter_ip",
+            }
+        else:
+            out[key] = {
+                "profile": profile or "workload_not_available",
+                "eligible": False,
+                "expected_ip": "",
+                "starter_share": float(STARTER_IP_SHARE),
+                "bullpen_share": float(BULLPEN_IP_SHARE),
+                "source": "fixed_55_45",
+            }
+
+    _OU_WORKLOAD_MAP_CACHE = out
+    print(f"✅ Loaded O/U workload map: {len(out)} pitcher(s)")
+    return out
+
+
+def _ou_workload_for_pitcher(pitcher_name):
+    """Return source-owned O/U workload context; unknown profiles preserve fixed 55/45."""
+    name = str(pitcher_name or "").strip()
+    if not name or "league avg" in name.lower():
+        return {
+            "profile": "league_avg_shell" if name else "missing_pitcher_name",
+            "eligible": False,
+            "expected_ip": "",
+            "starter_share": float(STARTER_IP_SHARE),
+            "bullpen_share": float(BULLPEN_IP_SHARE),
+            "source": "fixed_55_45",
+        }
+
+    key = DataManager.normalize_name(name)
+    row = _load_ou_workload_map().get(key)
+    if isinstance(row, dict):
+        return row
+
+    return {
+        "profile": "missing_k_stats",
+        "eligible": False,
+        "expected_ip": "",
+        "starter_share": float(STARTER_IP_SHARE),
+        "bullpen_share": float(BULLPEN_IP_SHARE),
+        "source": "fixed_55_45",
+    }
 # Unified bullpen workload fatigue (single run multiplier — do not stack with a second IP rule):
 # expected_weekly_ip ≈ reliever_count * BULLPEN_EXPECTED_IP_PER_RELIEVER_WEEK
 # fatigue_ratio = IP_Week / expected_weekly_ip — symmetric around neutral: tired pen (+runs),
@@ -1111,6 +1219,7 @@ def project_team_runs(
     opponent_low_ip: bool = False,
     offense_mult: float = 1.0,
     opponent_bullpen_xera: float = None,  # None -> falls back to ERA-only (current behavior)
+    opponent_expected_starter_ip: float = None,  # None -> preserves fixed 55/45 behavior
 ) -> tuple:
     """
     Project expected runs scored by one team in the game (they face opponent starter + bullpen).
@@ -1139,8 +1248,11 @@ def project_team_runs(
     else:
         bullpen_quality = 0.75 * _bp_era + 0.25 * _bp_xera
 
+    starter_ip_share, bullpen_ip_share, _expected_ip_used = _ou_workload_shares_from_expected_ip(
+        opponent_expected_starter_ip
+    )
     effective_era = (
-        STARTER_IP_SHARE * opponent_starter_xera + BULLPEN_IP_SHARE * bullpen_quality
+        starter_ip_share * opponent_starter_xera + bullpen_ip_share * bullpen_quality
     )
     effective_era = max(2.5, min(7.0, effective_era))
     base_era = 0.85 * effective_era + 0.15 * LEAGUE_ERA
@@ -2457,6 +2569,15 @@ def generate_prediction(
     _wm = max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, _wm))
     effective_park_runs_factor = over_boost * _wm
 
+    away_workload = _ou_workload_for_pitcher(away_pitcher_name)
+    home_workload = _ou_workload_for_pitcher(home_pitcher_name)
+    away_expected_starter_ip = away_workload.get("expected_ip", "")
+    home_expected_starter_ip = home_workload.get("expected_ip", "")
+    away_starter_ip_share = float(away_workload.get("starter_share", STARTER_IP_SHARE))
+    home_starter_ip_share = float(home_workload.get("starter_share", STARTER_IP_SHARE))
+    away_bullpen_ip_share = float(away_workload.get("bullpen_share", BULLPEN_IP_SHARE))
+    home_bullpen_ip_share = float(home_workload.get("bullpen_share", BULLPEN_IP_SHARE))
+
     # ---------- Project runs for each team ----------
     # Away offense faces home pitcher + home bullpen; away_offense_mult from Batters.offense_vs_hand_dict(away_team vs home_hand)
     away_runs, away_runs_safety = project_team_runs(
@@ -2471,6 +2592,7 @@ def generate_prediction(
         opponent_low_ip=safe_get(home_stats, "LowIP", False),
         offense_mult=away_offense_mult,
         opponent_bullpen_xera=bullpen_home_xera,
+        opponent_expected_starter_ip=home_expected_starter_ip,
     )
     # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
     home_runs, home_runs_safety = project_team_runs(
@@ -2485,6 +2607,7 @@ def generate_prediction(
         opponent_low_ip=safe_get(away_stats, "LowIP", False),
         offense_mult=home_offense_mult,
         opponent_bullpen_xera=bullpen_away_xera,
+        opponent_expected_starter_ip=away_expected_starter_ip,
     )
 
     # ---------- F5 telemetry projection (export-only, no market line) ----------
@@ -2800,16 +2923,16 @@ def generate_prediction(
     # Home offense runs projection faces away starter + away bullpen
     if _tel_opp_starter_for_away is not None and _tel_bq_home is not None:
         _tel_away_eff_era = round(
-            STARTER_IP_SHARE * _tel_opp_starter_for_away
-            + BULLPEN_IP_SHARE * _tel_bq_home,
+            home_starter_ip_share * _tel_opp_starter_for_away
+            + home_bullpen_ip_share * _tel_bq_home,
             4,
         )
     else:
         _tel_away_eff_era = ""
     if _tel_opp_starter_for_home is not None and _tel_bq_away is not None:
         _tel_home_eff_era = round(
-            STARTER_IP_SHARE * _tel_opp_starter_for_home
-            + BULLPEN_IP_SHARE * _tel_bq_away,
+            away_starter_ip_share * _tel_opp_starter_for_home
+            + away_bullpen_ip_share * _tel_bq_away,
             4,
         )
     else:
@@ -2875,6 +2998,16 @@ def generate_prediction(
             "home_bullpen_fatigue_mult": _tel_home_bp_fmult,
             "away_effective_era": _tel_away_eff_era,
             "home_effective_era": _tel_home_eff_era,
+            "away_expected_starter_ip": away_expected_starter_ip,
+            "home_expected_starter_ip": home_expected_starter_ip,
+            "away_starter_ip_share": round(float(away_starter_ip_share), 4),
+            "home_starter_ip_share": round(float(home_starter_ip_share), 4),
+            "away_bullpen_ip_share": round(float(away_bullpen_ip_share), 4),
+            "home_bullpen_ip_share": round(float(home_bullpen_ip_share), 4),
+            "away_workload_profile": away_workload.get("profile", ""),
+            "home_workload_profile": home_workload.get("profile", ""),
+            "away_workload_source": away_workload.get("source", ""),
+            "home_workload_source": home_workload.get("source", ""),
             # Starter xERA after days-rest adjustment — same floats passed to project_team_runs.
             "away_starter_xera": round(float(away_xera), 4),
             "home_starter_xera": round(float(home_xera), 4),
@@ -4857,6 +4990,16 @@ def run_predictions():
                 "Run_Pressure_Adjustment": proj.get("run_pressure_adjustment", ""),
                 "Run_Pressure_Mode": proj.get("run_pressure_mode", ""),
                 "Run_Pressure_Reasons": proj.get("run_pressure_reasons", ""),
+                "Away_Expected_Starter_IP": proj.get("telemetry", {}).get("away_expected_starter_ip", ""),
+                "Home_Expected_Starter_IP": proj.get("telemetry", {}).get("home_expected_starter_ip", ""),
+                "Away_Starter_IP_Share": proj.get("telemetry", {}).get("away_starter_ip_share", ""),
+                "Home_Starter_IP_Share": proj.get("telemetry", {}).get("home_starter_ip_share", ""),
+                "Away_Bullpen_IP_Share": proj.get("telemetry", {}).get("away_bullpen_ip_share", ""),
+                "Home_Bullpen_IP_Share": proj.get("telemetry", {}).get("home_bullpen_ip_share", ""),
+                "Away_Workload_Profile": proj.get("telemetry", {}).get("away_workload_profile", ""),
+                "Home_Workload_Profile": proj.get("telemetry", {}).get("home_workload_profile", ""),
+                "Away_Workload_Source": proj.get("telemetry", {}).get("away_workload_source", ""),
+                "Home_Workload_Source": proj.get("telemetry", {}).get("home_workload_source", ""),
                 "Away_Runs": away_runs,
                 "Home_Runs": home_runs,
                 "Away_Runs_Raw": away_runs_raw,
