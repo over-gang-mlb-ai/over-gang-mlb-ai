@@ -44,10 +44,59 @@ def _float_or_none(val) -> float | None:
     if val in (None, ""):
         return None
     try:
-        return float(val)
+        out = float(val)
     except (TypeError, ValueError):
         return None
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
 
+
+def derive_starter_workload_fields(ip, games_started, games_pitched) -> dict:
+    """
+    Canonical starter-workload classification for pitcher_k_stats.csv.
+
+    Raw MLB StatsAPI fields are total season stats. IP / Games_Started is only
+    a valid starter-workload proxy for clean starter profiles where every
+    appearance is a start. Mixed-role pitchers keep raw fields but do not receive
+    Expected_Starter_IP, preventing downstream consumers from deriving impossible
+    workload values.
+    """
+    ip_f = _float_or_none(ip)
+    gs_f = _float_or_none(games_started)
+    gp_f = _float_or_none(games_pitched)
+
+    out = {
+        "Raw_IP_Per_Start": pd.NA,
+        "Expected_Starter_IP": pd.NA,
+        "Expected_Starter_IP_Source": "",
+        "Starter_Workload_Profile": "invalid_workload",
+        "Workload_Eligible": False,
+    }
+
+    if ip_f is None or gs_f is None or gp_f is None or ip_f <= 0 or gs_f < 0 or gp_f <= 0:
+        return out
+
+    if gs_f <= 0:
+        out["Starter_Workload_Profile"] = "relief_only"
+        return out
+
+    raw_ip_per_start = ip_f / gs_f
+    out["Raw_IP_Per_Start"] = round(float(raw_ip_per_start), 3)
+
+    if abs(gp_f - gs_f) > 0.001:
+        out["Starter_Workload_Profile"] = "mixed_role"
+        return out
+
+    if raw_ip_per_start < 4.0 or raw_ip_per_start > 7.5:
+        out["Starter_Workload_Profile"] = "clean_starter_raw_out_of_range"
+        return out
+
+    out["Starter_Workload_Profile"] = "clean_starter"
+    out["Expected_Starter_IP"] = round(float(max(4.0, min(6.5, raw_ip_per_start))), 3)
+    out["Expected_Starter_IP_Source"] = "mlb_statsapi_ip_per_start_clean_starter"
+    out["Workload_Eligible"] = True
+    return out
 
 def fetch_pitching_splits(season: int = DEFAULT_SEASON) -> list:
     params = {
@@ -96,6 +145,10 @@ def build_pitcher_k_stats(outfile: str = OUTFILE, season: int = DEFAULT_SEASON) 
         if k9 is None:
             continue
 
+        games_started = _float_or_none(stat.get("gamesStarted"))
+        games_pitched = _float_or_none(stat.get("gamesPitched"))
+        workload = derive_starter_workload_fields(ip, games_started, games_pitched)
+
         rows.append({
             "mlb_id": mlb_id,
             "Name": name,
@@ -103,8 +156,13 @@ def build_pitcher_k_stats(outfile: str = OUTFILE, season: int = DEFAULT_SEASON) 
             "SO": int(so) if so is not None else pd.NA,
             "K9": round(float(k9), 2),
             "Batters_Faced": _float_or_none(stat.get("battersFaced")),
-            "Games_Started": _float_or_none(stat.get("gamesStarted")),
-            "Games_Pitched": _float_or_none(stat.get("gamesPitched")),
+            "Games_Started": games_started,
+            "Games_Pitched": games_pitched,
+            "Raw_IP_Per_Start": workload["Raw_IP_Per_Start"],
+            "Expected_Starter_IP": workload["Expected_Starter_IP"],
+            "Expected_Starter_IP_Source": workload["Expected_Starter_IP_Source"],
+            "Starter_Workload_Profile": workload["Starter_Workload_Profile"],
+            "Workload_Eligible": workload["Workload_Eligible"],
             "ERA": _float_or_none(stat.get("era")),
             "WHIP": _float_or_none(stat.get("whip")),
             "Source": SOURCE_LABEL,
