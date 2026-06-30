@@ -6305,6 +6305,10 @@ def run_predictions():
                 no_fire_k_reason = ""
 
                 ip = so = k9 = games_started = games_pitched = None
+                raw_ip_per_start = expected_starter_ip = None
+                expected_starter_ip_source = ""
+                starter_workload_profile = ""
+                workload_eligible = False
                 projected_ip = projected_ks = k_edge = None
                 if krow is None:
                     no_fire_k_reason = "missing_k_stats"
@@ -6314,6 +6318,12 @@ def run_predictions():
                     k9 = _k_float(krow.get("K9"))
                     games_started = _k_float(krow.get("Games_Started"))
                     games_pitched = _k_float(krow.get("Games_Pitched"))
+                    raw_ip_per_start = _k_float(krow.get("Raw_IP_Per_Start"))
+                    expected_starter_ip = _k_float(krow.get("Expected_Starter_IP"))
+                    expected_starter_ip_source = str(krow.get("Expected_Starter_IP_Source") or "").strip()
+                    starter_workload_profile = str(krow.get("Starter_Workload_Profile") or "").strip()
+                    _workload_eligible_raw = krow.get("Workload_Eligible")
+                    workload_eligible = str(_workload_eligible_raw).strip().lower() in {"true", "1", "yes", "y"}
 
                 k_line = _k_float(prop.get("line")) if prop else None
                 over_price = _k_float(prop.get("over_price")) if prop else None
@@ -6334,26 +6344,29 @@ def run_predictions():
                     no_fire_k_reason = "not_starter_sample"
                 if not no_fire_k_reason and k_line < 2.5:
                     no_fire_k_reason = "low_k_line"
-                if not no_fire_k_reason and (
-                    games_pitched is None
-                    or games_pitched <= 0
-                    or (games_started / games_pitched) < 0.50
-                ):
-                    no_fire_k_reason = "mixed_role_sample"
 
-                raw_projected_ip = None
-                if not no_fire_k_reason:
-                    raw_projected_ip = ip / games_started if ip is not None else None
-                    if raw_projected_ip is None:
-                        no_fire_k_reason = "low_ip_k_sample"
-                    elif raw_projected_ip > 7.5:
+                if not no_fire_k_reason and not starter_workload_profile:
+                    no_fire_k_reason = "workload_source_missing"
+                elif not no_fire_k_reason and not workload_eligible:
+                    if starter_workload_profile == "mixed_role":
+                        no_fire_k_reason = "mixed_role_workload"
+                    elif starter_workload_profile == "relief_only":
+                        no_fire_k_reason = "relief_only_workload"
+                    elif starter_workload_profile == "clean_starter_raw_out_of_range":
                         no_fire_k_reason = "inflated_ip_per_start"
+                    elif starter_workload_profile == "invalid_workload":
+                        no_fire_k_reason = "invalid_workload_sample"
+                    else:
+                        no_fire_k_reason = "workload_not_eligible"
+
+                if not no_fire_k_reason and expected_starter_ip is None:
+                    no_fire_k_reason = "missing_expected_starter_ip"
 
                 if not no_fire_k_reason and (ip is None or ip < 20):
                     no_fire_k_reason = "low_ip_k_sample"
 
-                if not no_fire_k_reason and k9 is not None and raw_projected_ip is not None:
-                    projected_ip = max(4.0, min(6.5, raw_projected_ip))
+                if not no_fire_k_reason and k9 is not None and expected_starter_ip is not None:
+                    projected_ip = max(4.0, min(6.5, expected_starter_ip))
                     projected_ks = (k9 / 9.0) * projected_ip
                     k_edge = projected_ks - k_line
                     if abs(k_edge) < 0.75:
@@ -6376,11 +6389,11 @@ def run_predictions():
                     and games_started >= 3
                     and games_pitched is not None
                     and games_pitched > 0
-                    and (games_started / games_pitched) >= 0.50
+                    and workload_eligible
+                    and starter_workload_profile == "clean_starter"
+                    and expected_starter_ip is not None
                     and ip is not None
                     and ip >= 20
-                    and raw_projected_ip is not None
-                    and raw_projected_ip <= 7.5
                     and k_line is not None
                     and k_line >= 2.5
                     and over_price is not None
@@ -6443,6 +6456,11 @@ def run_predictions():
                     "SO": so if so is not None else "",
                     "Games_Started": games_started if games_started is not None else "",
                     "Games_Pitched": games_pitched if games_pitched is not None else "",
+                    "Raw_IP_Per_Start": raw_ip_per_start if raw_ip_per_start is not None else "",
+                    "Expected_Starter_IP": expected_starter_ip if expected_starter_ip is not None else "",
+                    "Expected_Starter_IP_Source": expected_starter_ip_source,
+                    "Starter_Workload_Profile": starter_workload_profile,
+                    "Workload_Eligible": workload_eligible,
                     "Projected_IP": round(projected_ip, 2) if projected_ip is not None else "",
                     "Projected_Ks": round(projected_ks, 2) if projected_ks is not None else "",
                     "K_Edge": round(k_edge, 2) if k_edge is not None else "",
@@ -6458,7 +6476,10 @@ def run_predictions():
             "Opponent_K_Pct", "Opponent_K_Index", "Opponent_K_Profile",
             "K_Matchup_Support", "K_Matchup_Tag",
             "Bookmaker", "K_Line", "Over_Price", "Under_Price", "K9", "IP", "SO",
-            "Games_Started", "Games_Pitched", "Projected_IP", "Projected_Ks",
+            "Games_Started", "Games_Pitched",
+            "Raw_IP_Per_Start", "Expected_Starter_IP", "Expected_Starter_IP_Source",
+            "Starter_Workload_Profile", "Workload_Eligible",
+            "Projected_IP", "Projected_Ks",
             "K_Edge", "K_Pick", "K_Fired", "No_Fire_K_Reason", "Prop_Last_Update",
             "Canonical_Event_ID",
         ]
