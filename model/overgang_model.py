@@ -2327,28 +2327,20 @@ def _calculate_full_picture_run_pressure(
         + weather_adj
     )
 
-    # SIDE_TARGETED v1 from offline sim:
-    # - true UNDER side can receive positive run-pressure correction up to +0.60
-    # - true OVER side can receive only light suppression, avoiding double-counted positive pressure
-    # - neutral / lean-only edges are not adjusted so tiny base edges do not flip sides artificially
-    # - no-real-total rows are not adjusted because side targeting depends on market line
-    try:
-        ou_edge_threshold = float(EDGE_THRESHOLD)
-    except Exception:
-        ou_edge_threshold = 0.25
-
+    # NET_RUN_ENVIRONMENT v2 from production-mirrored archive sim:
+    # - convert full-picture raw pressure/suppression into a small calibrated
+    #   runs adjustment before O/U edge calibration
+    # - allow positive and negative pressure to move the projection naturally
+    # - keep a tight cap so pressure improves the core total without turning the
+    #   model into an unbounded OVER machine
+    # Result-backed June 2026 sim: coef=0.10, cap=0.15 improved broad side
+    # accuracy while preserving existing fire/confidence gates.
     if not has_real_total:
         adj = 0.0
         mode = "no_real_total_no_adjust"
-    elif base_edge <= -ou_edge_threshold:
-        adj = max(0.0, min(0.60, raw))
-        mode = "side_targeted_under_positive_cap_0_60"
-    elif base_edge >= ou_edge_threshold:
-        adj = min(0.0, max(-0.40, raw))
-        mode = "side_targeted_over_suppression_only"
     else:
-        adj = 0.0
-        mode = "side_targeted_neutral_no_adjust"
+        adj = max(-0.15, min(0.15, raw * 0.10))
+        mode = "net_run_environment_coef_0_10_cap_0_15"
 
     reasons = []
     if away["Away_Run_Pressure_Reasons"]:
