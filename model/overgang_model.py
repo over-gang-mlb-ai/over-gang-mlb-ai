@@ -6472,6 +6472,20 @@ def run_predictions():
                 over_price = _k_float(prop.get("over_price")) if prop else None
                 under_price = _k_float(prop.get("under_price")) if prop else None
 
+                if not no_fire_k_reason and not starter_workload_profile:
+                    no_fire_k_reason = "workload_source_missing"
+                elif not no_fire_k_reason and not workload_eligible:
+                    if starter_workload_profile == "mixed_role":
+                        no_fire_k_reason = "mixed_role_workload"
+                    elif starter_workload_profile == "relief_only":
+                        no_fire_k_reason = "relief_only_workload"
+                    elif starter_workload_profile == "clean_starter_raw_out_of_range":
+                        no_fire_k_reason = "inflated_ip_per_start"
+                    elif starter_workload_profile == "invalid_workload":
+                        no_fire_k_reason = "invalid_workload_sample"
+                    else:
+                        no_fire_k_reason = "workload_not_eligible"
+
                 if (
                     not no_fire_k_reason
                     and (
@@ -6487,20 +6501,6 @@ def run_predictions():
                     no_fire_k_reason = "not_starter_sample"
                 if not no_fire_k_reason and k_line < 2.5:
                     no_fire_k_reason = "low_k_line"
-
-                if not no_fire_k_reason and not starter_workload_profile:
-                    no_fire_k_reason = "workload_source_missing"
-                elif not no_fire_k_reason and not workload_eligible:
-                    if starter_workload_profile == "mixed_role":
-                        no_fire_k_reason = "mixed_role_workload"
-                    elif starter_workload_profile == "relief_only":
-                        no_fire_k_reason = "relief_only_workload"
-                    elif starter_workload_profile == "clean_starter_raw_out_of_range":
-                        no_fire_k_reason = "inflated_ip_per_start"
-                    elif starter_workload_profile == "invalid_workload":
-                        no_fire_k_reason = "invalid_workload_sample"
-                    else:
-                        no_fire_k_reason = "workload_not_eligible"
 
                 if not no_fire_k_reason and expected_starter_ip is None:
                     no_fire_k_reason = "missing_expected_starter_ip"
