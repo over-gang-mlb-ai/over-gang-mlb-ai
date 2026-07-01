@@ -416,14 +416,13 @@ class Batters:
         if not team_name or pitcher_hand not in ("R", "L"):
             return {"mult": 1.0, "pop": "none"}
 
-        # Prefer the clean MLB StatsAPI team-vs-hand split source when available.
-        # This keeps the existing model call chain intact while replacing the weak
-        # batter_stats fallback multiplier with a complete 30-team source.
-        team_split = _team_offense_split_dict(team_name, pitcher_hand)
-        if team_split is not None:
-            return team_split
-
+        # Prefer current active-roster batter_stats.csv for IL/trade correctness.
+        # Fall back to team_offense_splits.csv only when the active-roster table is
+        # unavailable or cannot produce a usable vs-hand split.
         if batter_df is None or batter_df.empty:
+            team_split = _team_offense_split_dict(team_name, pitcher_hand)
+            if team_split is not None:
+                return team_split
             return {"mult": 1.0, "pop": "none"}
 
         team_key = _norm(team_name)
@@ -452,6 +451,9 @@ class Batters:
         # OPS/OBP/SLG fallback splits are used when wRC+/wOBA are unavailable.
         rel = _platoon_split_relative(team_df, pitcher_hand)
         if rel is None:
+            team_split = _team_offense_split_dict(team_name, pitcher_hand)
+            if team_split is not None:
+                return team_split
             return {"mult": 1.0, "pop": "none"}
 
         mult, _source = rel
