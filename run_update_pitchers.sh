@@ -20,3 +20,12 @@ if python -u scripts/build_pitcher_k_stats.py >> logs/update_pitchers_$(date +%F
 else
   echo "$(date -Is) ⚠️ pitcher_k_stats.csv refresh failed; keeping previous file" >> logs/update_pitchers_$(date +%F).log
 fi
+
+# Refresh pitcher handedness from current MLB IDs so offense-vs-hand pressure
+# does not default to neutral for new call-ups, IL returns, or newly surfaced arms.
+# Best-effort: keep prior handedness file if the source refresh fails.
+if python -u scripts/update_pitcher_handedness.py >> logs/update_pitchers_$(date +%F).log 2>&1; then
+  echo "$(date -Is) ✅ Refreshed data/pitcher_handedness.csv" >> logs/update_pitchers_$(date +%F).log
+else
+  echo "$(date -Is) ⚠️ pitcher_handedness.csv refresh failed; keeping previous file" >> logs/update_pitchers_$(date +%F).log
+fi
