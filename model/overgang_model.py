@@ -1219,6 +1219,12 @@ def project_team_runs(
     opponent_low_ip: bool = False,
     offense_mult: float = 1.0,
     opponent_bullpen_xera: float = None,  # None -> falls back to ERA-only (current behavior)
+    opponent_late_run_pressure_score: float = 0.0,
+    opponent_late_run_suppression_score: float = 0.0,
+    opponent_bullpen_clarity_score: float = 0.0,
+    opponent_reliever_depth_risk: str = "",
+    opponent_bullpen_quality_tier: str = "",
+    weather_runs_mult: float = 1.0,
     opponent_expected_starter_ip: float = None,  # None -> preserves fixed 55/45 behavior
 ) -> tuple:
     """
@@ -1251,8 +1257,147 @@ def project_team_runs(
     starter_ip_share, bullpen_ip_share, _expected_ip_used = _ou_workload_shares_from_expected_ip(
         opponent_expected_starter_ip
     )
+
+    def _ptr_float(v, default=0.0):
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else default
+        except (TypeError, ValueError):
+            return default
+
+    # Whole-picture run pressure belongs inside the run projection, not only as a
+    # tiny post-total overlay. Early pressure reprices the starter component;
+    # late pressure reprices only the bullpen component. This keeps the model
+    # baseball-structured instead of forcing blanket OVER flips.
+    _offense_for_pressure = max(
+        OFFENSE_MULT_MIN,
+        min(OFFENSE_MULT_MAX, _ptr_float(offense_mult, 1.0)),
+    )
+    _park_for_pressure = _ptr_float(park_runs_factor, 1.0)
+    _weather_for_pressure = max(
+        WEATHER_RUNS_MULT_MIN,
+        min(WEATHER_RUNS_MULT_MAX, _ptr_float(weather_runs_mult, 1.0)),
+    )
+    _starter_xera_for_pressure = _ptr_float(opponent_starter_xera, LEAGUE_ERA)
+    _starter_whip_for_pressure = _ptr_float(opponent_starter_whip, WHIP_LEAGUE)
+
+    _early_mult = 1.0
+    if _starter_xera_for_pressure >= 5.00:
+        _early_mult += 0.050
+    elif _starter_xera_for_pressure >= 4.40:
+        _early_mult += 0.030
+
+    if _starter_whip_for_pressure >= 1.35:
+        _early_mult += 0.025
+    elif _starter_whip_for_pressure >= 1.25:
+        _early_mult += 0.010
+
+    if _offense_for_pressure >= 1.05:
+        _early_mult += 0.025
+    elif _offense_for_pressure >= 1.03:
+        _early_mult += 0.015
+    elif _offense_for_pressure <= 0.95:
+        _early_mult -= 0.015
+
+    if _weather_for_pressure >= 1.016:
+        _early_mult += 0.015
+    elif _weather_for_pressure >= 1.010:
+        _early_mult += 0.010
+    elif _weather_for_pressure <= 0.990:
+        _early_mult -= 0.010
+
+    if _park_for_pressure >= 1.040:
+        _early_mult += 0.015
+    elif _park_for_pressure >= 1.015:
+        _early_mult += 0.008
+    elif _park_for_pressure <= 0.985:
+        _early_mult -= 0.015
+
+    _early_mult = max(0.96, min(1.12, _early_mult))
+    adjusted_starter_xera = opponent_starter_xera * _early_mult
+
+    _late_pressure = max(0.0, min(1.25, _ptr_float(opponent_late_run_pressure_score, 0.0)))
+    _late_suppression = max(0.0, min(1.25, _ptr_float(opponent_late_run_suppression_score, 0.0)))
+    _late_net = max(0.0, _late_pressure - _late_suppression)
+    _late_supp_net = max(0.0, _late_suppression - _late_pressure)
+    _clarity = _ptr_float(opponent_bullpen_clarity_score, 0.0)
+    _depth = str(opponent_reliever_depth_risk or "").strip().lower()
+    _tier = str(opponent_bullpen_quality_tier or "").strip().lower()
+
+    _late_mult = 1.0
+    _late_mult += min(0.100, _late_net * 0.075)
+    _late_mult -= min(0.070, _late_supp_net * 0.050)
+
+    if _depth == "high":
+        _late_mult += 0.045
+    elif _depth == "medium":
+        _late_mult += 0.018
+    elif _depth == "low":
+        _late_mult -= 0.012
+
+    if _tier == "danger":
+        _late_mult += 0.040
+    elif _tier == "risky":
+        _late_mult += 0.030
+    elif _tier in {"strong", "elite"}:
+        _late_mult -= 0.020
+
+    if _clarity <= -15.0:
+        _late_mult += 0.050
+    elif _clarity <= -8.0:
+        _late_mult += 0.035
+    elif _clarity <= -5.0:
+        _late_mult += 0.020
+    elif _clarity >= 10.0:
+        _late_mult -= 0.030
+    elif _clarity >= 5.0:
+        _late_mult -= 0.018
+
+    if _offense_for_pressure >= 1.05:
+        _late_mult += 0.035
+    elif _offense_for_pressure >= 1.03:
+        _late_mult += 0.025
+    elif _offense_for_pressure >= 0.98:
+        _late_mult += 0.012
+    elif _offense_for_pressure <= 0.94:
+        _late_mult -= 0.020
+
+    if _weather_for_pressure >= 1.016:
+        _late_mult += 0.025
+    elif _weather_for_pressure >= 1.010:
+        _late_mult += 0.015
+    elif _weather_for_pressure <= 0.990:
+        _late_mult -= 0.012
+
+    if _park_for_pressure >= 1.040:
+        _late_mult += 0.020
+    elif _park_for_pressure >= 1.015:
+        _late_mult += 0.010
+    elif _park_for_pressure <= 0.985:
+        _late_mult -= 0.020
+
+    # Normal late-pressure games stay tightly bounded. Truly extreme late-run
+    # profiles get a wider ceiling because the prior 1.22 cap still underpriced
+    # High/High + late_over_path bullpen-chaos games.
+    _late_cap = 1.22
+    _extreme_late_profile = (
+        _late_pressure >= 1.15
+        and _late_net >= 0.90
+        and _depth == "high"
+        and _clarity <= -5.0
+        and _tier in {"risky", "danger"}
+        and _offense_for_pressure >= 0.98
+    )
+    if _extreme_late_profile:
+        _late_cap = 1.34
+        _late_mult += 0.080
+
+    _late_mult = max(0.94, min(_late_cap, _late_mult))
+    adjusted_bullpen_quality = bullpen_quality * _late_mult
+
     effective_era = (
-        starter_ip_share * opponent_starter_xera + bullpen_ip_share * bullpen_quality
+        starter_ip_share * adjusted_starter_xera
+        + bullpen_ip_share * adjusted_bullpen_quality
     )
     effective_era = max(2.5, min(7.0, effective_era))
     base_era = 0.85 * effective_era + 0.15 * LEAGUE_ERA
@@ -2592,6 +2737,12 @@ def generate_prediction(
         opponent_low_ip=safe_get(home_stats, "LowIP", False),
         offense_mult=away_offense_mult,
         opponent_bullpen_xera=bullpen_home_xera,
+        opponent_late_run_pressure_score=_fp_metric(home_reliever_metrics, ["late_run_pressure_score"], 0.0),
+        opponent_late_run_suppression_score=_fp_metric(home_reliever_metrics, ["late_run_suppression_score"], 0.0),
+        opponent_bullpen_clarity_score=_fp_metric(home_reliever_metrics, ["bullpen_clarity_score"], 0.0),
+        opponent_reliever_depth_risk=(home_reliever_metrics or {}).get("depth_risk", ""),
+        opponent_bullpen_quality_tier=(home_reliever_metrics or {}).get("bullpen_quality_tier", ""),
+        weather_runs_mult=_wm,
         opponent_expected_starter_ip=home_expected_starter_ip,
     )
     # Home offense faces away pitcher + away bullpen; home_offense_mult from Batters.offense_vs_hand_dict(home_team vs away_hand)
@@ -2607,6 +2758,12 @@ def generate_prediction(
         opponent_low_ip=safe_get(away_stats, "LowIP", False),
         offense_mult=home_offense_mult,
         opponent_bullpen_xera=bullpen_away_xera,
+        opponent_late_run_pressure_score=_fp_metric(away_reliever_metrics, ["late_run_pressure_score"], 0.0),
+        opponent_late_run_suppression_score=_fp_metric(away_reliever_metrics, ["late_run_suppression_score"], 0.0),
+        opponent_bullpen_clarity_score=_fp_metric(away_reliever_metrics, ["bullpen_clarity_score"], 0.0),
+        opponent_reliever_depth_risk=(away_reliever_metrics or {}).get("depth_risk", ""),
+        opponent_bullpen_quality_tier=(away_reliever_metrics or {}).get("bullpen_quality_tier", ""),
+        weather_runs_mult=_wm,
         opponent_expected_starter_ip=away_expected_starter_ip,
     )
 
