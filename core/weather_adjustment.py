@@ -19,9 +19,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Total weather effect clamp (combined temp + wind deltas); keep modest vs park table.
+# Total weather effect clamp (combined temp + wind deltas).
+# Normal weather remains modest, but extreme outdoor heat needs enough room to
+# move run environment when stacked with park/offense/pitching pressure.
 WEATHER_RUNS_MULT_MIN = 0.97
-WEATHER_RUNS_MULT_MAX = 1.03
+WEATHER_RUNS_MULT_MAX = 1.055
 
 # Neutral anchors (conservative linear tweaks, then capped per-component).
 _NEUTRAL_TEMP_C = 21.0  # ~70°F
@@ -29,6 +31,14 @@ _NEUTRAL_WIND_MS = 4.0
 _TEMP_COEFF = 0.0006  # delta in mult per °C from neutral (then capped)
 _WIND_COEFF = 0.002  # delta in mult per m/s from neutral (then capped)
 _COMPONENT_CAP = 0.012  # max |contribution| from temp or wind before final clamp
+
+# Nonlinear heat add-on. The base temp coefficient was intentionally mild and
+# underweighted 95–105°F games. This adds only positive heat pressure above
+# ~90°F; roof/dome suppression still happens before this helper is called.
+_EXTREME_HEAT_START_C = 32.2  # ~90°F
+_EXTREME_HEAT_FULL_C = 40.6   # ~105°F
+_EXTREME_HEAT_EXTRA_MAX = 0.045
+_EXTREME_HEAT_CURVE_POWER = 1.35
 
 # Lat/lon for PARK_FACTORS venue names in model/overgang_model.py (approximate stadium centers).
 VENUE_LAT_LON: dict[str, Tuple[float, float]] = {
@@ -252,6 +262,14 @@ def _mult_from_temp_wind(
     t_comp = _TEMP_COEFF * (temp_c - _NEUTRAL_TEMP_C)
     t_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, t_comp))
 
+    heat_extra = 0.0
+    if temp_c >= _EXTREME_HEAT_START_C:
+        heat_span = max(0.001, _EXTREME_HEAT_FULL_C - _EXTREME_HEAT_START_C)
+        heat_intensity = min(1.0, (temp_c - _EXTREME_HEAT_START_C) / heat_span)
+        heat_extra = _EXTREME_HEAT_EXTRA_MAX * (
+            heat_intensity ** _EXTREME_HEAT_CURVE_POWER
+        )
+
     directional_component = None
     if venue_name:
         directional_component = _directional_wind_component(
@@ -267,7 +285,7 @@ def _mult_from_temp_wind(
         w_comp = _WIND_COEFF * directional_component
 
     w_comp = max(-_COMPONENT_CAP, min(_COMPONENT_CAP, w_comp))
-    m = 1.0 + t_comp + w_comp
+    m = 1.0 + t_comp + heat_extra + w_comp
     return max(WEATHER_RUNS_MULT_MIN, min(WEATHER_RUNS_MULT_MAX, m))
 
 
