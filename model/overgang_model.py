@@ -290,6 +290,46 @@ def _clamp_unit_interval(x, lo=0.0, hi=1.0):
 
 
 ARCHIVE_DIR = "archive"
+
+
+def archive_output_path(stem: str, archive_date: str) -> str:
+    """
+    Build archive CSV path.
+
+    Normal runs keep existing canonical names:
+      archive/predictions_YYYYMMDD_HHMM.csv
+
+    Targeted refresh runs can set:
+      OVERGANG_ARCHIVE_PREFIX=starter_refresh
+
+    which produces:
+      archive/starter_refresh_predictions_YYYYMMDD_HHMM.csv
+
+    This prevents partial targeted refresh output from being selected as the
+    latest full-slate predictions file by downstream scripts.
+    """
+    prefix = str(os.environ.get("OVERGANG_ARCHIVE_PREFIX") or "").strip()
+    safe_prefix = "".join(
+        ch if (ch.isalnum() or ch in "_-") else "_"
+        for ch in prefix
+    ).strip("_")
+    filename = (
+        f"{stem}_{archive_date}.csv"
+        if not safe_prefix
+        else f"{safe_prefix}_{stem}_{archive_date}.csv"
+    )
+    return f"{ARCHIVE_DIR}/{filename}"
+
+
+def model_telegram_suppressed() -> bool:
+    return str(os.environ.get("OVERGANG_SUPPRESS_MODEL_TELEGRAM") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
 STATS_FILE = os.path.join(DATA_DIR, "pitcher_stats.csv")
 AUTO_UPDATE_DATA = True
 
@@ -3180,6 +3220,9 @@ def generate_prediction(
 # 💬 TELEGRAM UTILS
 # ================================
 def send_telegram_alert(message):
+    if model_telegram_suppressed():
+        print("📵 Telegram alert suppressed by OVERGANG_SUPPRESS_MODEL_TELEGRAM=1")
+        return False
     for attempt in range(3):
         try:
             response = requests.post(
@@ -3515,6 +3558,9 @@ def format_f5_alert(game_data: dict) -> str:
 
 
 def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
+    if model_telegram_suppressed():
+        print(f"📵 Telegram file suppressed by OVERGANG_SUPPRESS_MODEL_TELEGRAM=1: {file_path}")
+        return False
     try:
         with open(file_path, 'rb') as doc:
             response = requests.post(
@@ -4398,6 +4444,34 @@ def run_predictions():
             return "exact"
 
         return "league_average"
+
+    target_game_ids_raw = str(os.environ.get("OVERGANG_TARGET_GAME_IDS") or "").strip()
+    if target_game_ids_raw:
+        target_game_ids = {
+            part.strip()
+            for part in target_game_ids_raw.split(",")
+            if part.strip()
+        }
+
+        def _game_id_for_target_filter(_game):
+            if not isinstance(_game, dict):
+                return ""
+            for _key in ("game_id", "gamePk", "game_pk", "Game_ID"):
+                _value = _game.get(_key)
+                if _value is not None and str(_value).strip():
+                    return str(_value).strip()
+            return ""
+
+        before_target_filter = len(games) if games is not None else 0
+        games = [
+            game
+            for game in (games or [])
+            if _game_id_for_target_filter(game) in target_game_ids
+        ]
+        print(
+            f"[TARGETED_RUN] Filtering games by OVERGANG_TARGET_GAME_IDS={target_game_ids_raw} "
+            f"kept {len(games)}/{before_target_filter}"
+        )
 
     opening_total_games = len(games) if games is not None else 0
     opening_games_missing_probable_pitchers = 0
@@ -6296,11 +6370,11 @@ def run_predictions():
         # archive prefix to "tomorrow". HHMM suffix remains wall-clock for ordering.
         archive_date = f"{today_mt.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M')}"
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
-        combined_path = f"{ARCHIVE_DIR}/predictions_{archive_date}.csv"
+        combined_path = archive_output_path("predictions", archive_date)
         combined_df = pd.DataFrame(eligible_export, columns=export_cols)
         combined_df.to_csv(combined_path, index=False)
         print(f"\n💾 Saved {len(eligible_export)} combined row(s) → {combined_path}")
-        diagnostics_path = f"{ARCHIVE_DIR}/diagnostics_{archive_date}.csv"
+        diagnostics_path = archive_output_path("diagnostics", archive_date)
         diagnostics_cols = list(export_cols)
         for _row in eligible_export:
             for _col in _row.keys():
@@ -6783,7 +6857,7 @@ def run_predictions():
             "K_Edge", "K_Pick", "K_Fired", "No_Fire_K_Reason", "Prop_Last_Update",
             "Canonical_Event_ID",
         ]
-        pitcher_k_board_path = f"{ARCHIVE_DIR}/pitcher_k_board_{archive_date}.csv"
+        pitcher_k_board_path = archive_output_path("pitcher_k_board", archive_date)
         pitcher_k_board_df = pd.DataFrame(k_board_rows, columns=pitcher_k_board_cols)
         pitcher_k_board_df.to_csv(pitcher_k_board_path, index=False)
         print(f"💾 Saved {len(k_board_rows)} pitcher-K row(s) → {pitcher_k_board_path}")
@@ -6871,7 +6945,7 @@ def run_predictions():
                 "Data_Quality_Flag": _r.get("Data_Quality_Flag", ""),
                 "Model_Notes": _r.get("Model_Notes", ""),
             })
-        f5_board_path = f"{ARCHIVE_DIR}/f5_board_{archive_date}.csv"
+        f5_board_path = archive_output_path("f5_board", archive_date)
         f5_board_df = pd.DataFrame(f5_board_rows, columns=f5_board_cols)
         f5_board_df.to_csv(f5_board_path, index=False)
         print(f"💾 Saved {len(f5_board_rows)} F5 row(s) → {f5_board_path}")
@@ -7002,7 +7076,7 @@ def run_predictions():
                 "OU_Prob_Support_Bucket": _ou_prob_support_bucket(_prob_edge),
                 "OU_Prob_Support_Reason": _support_reason,
             })
-        ou_prob_edge_board_path = f"{ARCHIVE_DIR}/ou_prob_edge_board_{archive_date}.csv"
+        ou_prob_edge_board_path = archive_output_path("ou_prob_edge_board", archive_date)
         ou_prob_edge_board_df = pd.DataFrame(
             ou_prob_edge_board_rows,
             columns=ou_prob_edge_board_cols,
@@ -7460,7 +7534,7 @@ def run_predictions():
                 "F5_Over_Profile_Reason": "|".join(_f5_reason_tags),
                 "F5_Over_Profile_Grade": _f5_profile_grade,
             })
-        ou_over_profile_board_path = f"{ARCHIVE_DIR}/ou_over_profile_board_{archive_date}.csv"
+        ou_over_profile_board_path = archive_output_path("ou_over_profile_board", archive_date)
         ou_over_profile_board_df = pd.DataFrame(
             ou_over_profile_board_rows,
             columns=ou_over_profile_board_cols,
@@ -7802,7 +7876,7 @@ def run_predictions():
                 "F5_Under_Profile_Reason": "|".join(_f5_reason_tags),
                 "F5_Under_Profile_Grade": _f5_profile_grade,
             })
-        ou_under_profile_board_path = f"{ARCHIVE_DIR}/ou_under_profile_board_{archive_date}.csv"
+        ou_under_profile_board_path = archive_output_path("ou_under_profile_board", archive_date)
         ou_under_profile_board_df = pd.DataFrame(
             ou_under_profile_board_rows,
             columns=ou_under_profile_board_cols,
@@ -8361,7 +8435,7 @@ def run_predictions():
             ou_f5_decision_board_rows,
             columns=ou_f5_decision_board_cols,
         )
-        ou_f5_decision_board_path = f"{ARCHIVE_DIR}/ou_f5_decision_board_{archive_date}.csv"
+        ou_f5_decision_board_path = archive_output_path("ou_f5_decision_board", archive_date)
         ou_f5_decision_board_df.to_csv(ou_f5_decision_board_path, index=False)
         print(
             f"💾 Saved {len(ou_f5_decision_board_rows)} OU/F5 decision-board row(s) "
@@ -8517,7 +8591,7 @@ def run_predictions():
             ml_decision_board_rows,
             columns=ml_decision_board_cols,
         )
-        ml_decision_board_path = f"{ARCHIVE_DIR}/ml_decision_board_{archive_date}.csv"
+        ml_decision_board_path = archive_output_path("ml_decision_board", archive_date)
         ml_decision_board_df.to_csv(ml_decision_board_path, index=False)
         print(
             f"💾 Saved {len(ml_decision_board_rows)} ML decision-board row(s) "
@@ -8530,7 +8604,7 @@ def run_predictions():
             )
 
         picks_board_df = pd.DataFrame(picks_board_rows, columns=picks_board_cols)
-        picks_board_path = f"{ARCHIVE_DIR}/picks_board_{archive_date}.csv"
+        picks_board_path = archive_output_path("picks_board", archive_date)
         picks_board_df.to_csv(picks_board_path, index=False)
         print(f"💾 Saved {len(picks_board_rows)} picks-board row(s) → {picks_board_path}")
         # Legacy picks_board is still generated temporarily for compatibility,
