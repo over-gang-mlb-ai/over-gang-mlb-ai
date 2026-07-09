@@ -61,6 +61,11 @@ OUTPUT_COLUMNS = [
     "Sharp_Over_Implied", "Sharp_Under_Implied",
     "PM_vs_Sharp_Over_Gap", "PM_vs_Sharp_Under_Gap",
     "PM_Signal_Direction", "PM_Signal_Strength", "PM_Signal_Reason",
+    "PM_Public_Side", "PM_Sharp_Gap_Side", "PM_Sharp_Gap_Strength",
+    "PM_Is_F5_Market", "PM_Event_Date_OK", "PM_Exact_Line_OK",
+    "PM_Sharp_Source_OK", "PM_Validation_Eligible",
+    "PM_Validation_Block_Reason", "PM_Model_vs_Public_Read",
+    "PM_Model_vs_Sharp_Gap_Read", "PM_Model_Market_Read",
     "PM_Query", "PM_Candidate_Count", "PM_Eligible_Candidate_Count",
     "PM_All_Total_Lines_Found", "PM_Error",
 ]
@@ -951,6 +956,140 @@ def build_row(
 
     out["PM_Signal_Direction"] = pm_signal_direction
     out["PM_Signal_Strength"] = pm_signal_strength
+
+    # Validation-only PM market interpretation fields.
+    # These do not alter model confidence, OU_Fired, projections, Telegram, or
+    # any downstream betting logic. They make the PM board usable for
+    # fade-public / sharp-gap audits before any future integration decision.
+    _pm_public_side = str(out.get("PM_Crowd_Side") or "").strip().upper()
+    if _pm_public_side not in {"OVER", "UNDER"}:
+        _pm_public_side = ""
+
+    _pm_sharp_gap_side = str(pm_signal_direction or "").strip().upper()
+    if _pm_sharp_gap_side not in {"OVER", "UNDER"}:
+        _pm_sharp_gap_side = ""
+
+    _model_side = str(out.get("OU_Side") or "").strip().upper()
+    if _model_side not in {"OVER", "UNDER"}:
+        _pred_txt = str(out.get("Prediction") or "").upper()
+        if "OVER" in _pred_txt:
+            _model_side = "OVER"
+        elif "UNDER" in _pred_txt:
+            _model_side = "UNDER"
+        else:
+            _model_side = ""
+
+    _pm_title_blob = " ".join([
+        str(out.get("PM_Title") or ""),
+        str(out.get("PM_Event_Title") or ""),
+    ]).lower()
+    pm_is_f5_market = bool(
+        re.search(r"\b(1st\s*5|first\s*5|first\s*five|f5)\b", _pm_title_blob)
+    )
+
+    _game_date = str(out.get("Game_Date") or "").strip()[:10]
+    _game_datetime = str(out.get("Datetime") or "").strip()
+    _game_datetime_date = _game_datetime[:10] if len(_game_datetime) >= 10 else ""
+    _close_time = str(out.get("PM_Close_Time") or "").strip()
+    _close_date = _close_time[:10] if len(_close_time) >= 10 else ""
+    _expected_event_dates = {
+        d for d in (_game_datetime_date, _game_date)
+        if d
+    }
+    pm_event_date_ok = bool(
+        out["PM_Match_Status"] == "matched"
+        and _close_date
+        and _close_date in _expected_event_dates
+    )
+
+    pm_exact_line_ok = bool(pm_line_match_type == "exact")
+    pm_sharp_source_ok = bool(sharp_source in {"pinnacle", "the_odds_api_pinnacle"})
+
+    _validation_blocks: List[str] = []
+    if out["PM_Match_Status"] != "matched":
+        _validation_blocks.append("no_pm_match")
+    if pm_is_f5_market:
+        _validation_blocks.append("f5_market")
+    if not pm_event_date_ok:
+        _validation_blocks.append("event_date_mismatch")
+    if not pm_exact_line_ok:
+        _validation_blocks.append("non_exact_total_line")
+    if not pm_sharp_source_ok:
+        _validation_blocks.append("sharp_source_not_primary")
+    if sharp_total_mismatch_rejected:
+        _validation_blocks.append("sharp_total_mismatch")
+    if pm_liquidity is None:
+        _validation_blocks.append("missing_liquidity")
+    elif pm_liquidity < MIN_PM_LIQUIDITY:
+        _validation_blocks.append("low_liquidity")
+    if pm_spread is None:
+        _validation_blocks.append("missing_pm_spread")
+    elif pm_spread > MAX_PM_SPREAD:
+        _validation_blocks.append("wide_pm_spread")
+
+    pm_validation_eligible = len(_validation_blocks) == 0
+
+    if not pm_validation_eligible:
+        pm_model_vs_public_read = "pm_validation_blocked"
+        pm_model_vs_sharp_gap_read = "pm_validation_blocked"
+        pm_model_market_read = "pm_validation_blocked"
+    else:
+        if _model_side and _pm_public_side:
+            if _model_side == _pm_public_side:
+                pm_model_vs_public_read = "model_agrees_pm_public"
+            else:
+                pm_model_vs_public_read = "model_fades_pm_public"
+        else:
+            pm_model_vs_public_read = "no_pm_public_side"
+
+        if _model_side and _pm_sharp_gap_side:
+            if _model_side == _pm_sharp_gap_side:
+                pm_model_vs_sharp_gap_read = "model_aligns_sharp_gap"
+            else:
+                pm_model_vs_sharp_gap_read = "model_conflicts_sharp_gap"
+        else:
+            pm_model_vs_sharp_gap_read = "no_sharp_gap_signal"
+
+        if (
+            pm_model_vs_public_read == "model_fades_pm_public"
+            and pm_model_vs_sharp_gap_read == "model_aligns_sharp_gap"
+        ):
+            pm_model_market_read = "model_fades_public_aligns_sharp_gap"
+        elif (
+            pm_model_vs_public_read == "model_fades_pm_public"
+            and pm_model_vs_sharp_gap_read == "no_sharp_gap_signal"
+        ):
+            pm_model_market_read = "model_fades_public_no_sharp_gap"
+        elif (
+            pm_model_vs_public_read == "model_fades_pm_public"
+            and pm_model_vs_sharp_gap_read == "model_conflicts_sharp_gap"
+        ):
+            pm_model_market_read = "model_fades_public_conflicts_sharp_gap"
+        elif (
+            pm_model_vs_public_read == "model_agrees_pm_public"
+            and pm_model_vs_sharp_gap_read == "model_aligns_sharp_gap"
+        ):
+            pm_model_market_read = "model_public_and_sharp_gap_align"
+        elif (
+            pm_model_vs_public_read == "model_agrees_pm_public"
+            and pm_model_vs_sharp_gap_read == "model_conflicts_sharp_gap"
+        ):
+            pm_model_market_read = "model_agrees_public_conflicts_sharp_gap"
+        else:
+            pm_model_market_read = "mixed_or_no_pm_read"
+
+    out["PM_Public_Side"] = _pm_public_side
+    out["PM_Sharp_Gap_Side"] = _pm_sharp_gap_side
+    out["PM_Sharp_Gap_Strength"] = pm_signal_strength
+    out["PM_Is_F5_Market"] = pm_is_f5_market
+    out["PM_Event_Date_OK"] = pm_event_date_ok
+    out["PM_Exact_Line_OK"] = pm_exact_line_ok
+    out["PM_Sharp_Source_OK"] = pm_sharp_source_ok
+    out["PM_Validation_Eligible"] = pm_validation_eligible
+    out["PM_Validation_Block_Reason"] = "|".join(_validation_blocks)
+    out["PM_Model_vs_Public_Read"] = pm_model_vs_public_read
+    out["PM_Model_vs_Sharp_Gap_Read"] = pm_model_vs_sharp_gap_read
+    out["PM_Model_Market_Read"] = pm_model_market_read
 
     signal_parts: List[str] = []
     if out["PM_Match_Status"] == "matched":
