@@ -2612,32 +2612,80 @@ def _calculate_full_picture_run_pressure(
         weather_adj = -0.08
         weather_reason = "weather_suppression_0.990-"
 
-    raw = (
+    away_raw = (
         away["Away_Early_Run_Pressure"]
         - away["Away_Early_Run_Suppression"]
         + away["Away_Late_Run_Pressure"]
         - away["Away_Late_Run_Suppression"]
-        + home["Home_Early_Run_Pressure"]
+    )
+    home_raw = (
+        home["Home_Early_Run_Pressure"]
         - home["Home_Early_Run_Suppression"]
         + home["Home_Late_Run_Pressure"]
         - home["Home_Late_Run_Suppression"]
-        + weather_adj
     )
+    raw = away_raw + home_raw + weather_adj
 
-    # NET_RUN_ENVIRONMENT v2 from production-mirrored archive sim:
-    # - convert full-picture raw pressure/suppression into a small calibrated
-    #   runs adjustment before O/U edge calibration
-    # - allow positive and negative pressure to move the projection naturally
-    # - keep a tight cap so pressure improves the core total without turning the
-    #   model into an unbounded OVER machine
-    # Result-backed June 2026 sim: coef=0.10, cap=0.15 improved broad side
-    # accuracy while preserving existing fire/confidence gates.
+    # TEAM_RUN_ENVIRONMENT v3:
+    # The prior v2 compressed all pressure into one total-only overlay. That hid
+    # which team owned the scoring path. Keep normal profiles conservative, but
+    # price extreme late-over paths on the side facing the bad bullpen.
+    def _side_run_pressure_adjust(side_raw, late_pressure, late_suppression, reason_text, weather_half):
+        try:
+            sr = float(side_raw) + float(weather_half)
+            lp = float(late_pressure)
+            ls = float(late_suppression)
+        except (TypeError, ValueError):
+            return 0.0, False
+
+        if not np.isfinite(sr) or not np.isfinite(lp) or not np.isfinite(ls):
+            return 0.0, False
+
+        reasons_l = str(reason_text or "").lower()
+        extreme_late = (
+            sr >= 1.00
+            and lp >= 1.15
+            and ls <= 0.10
+            and "late_reliever_depth_high" in reasons_l
+            and "late_bullpen_clarity_pressure" in reasons_l
+            and (
+                "late_recent_bad_arms_" in reasons_l
+                or "late_pen_bad_arms_" in reasons_l
+            )
+        )
+
+        if extreme_late:
+            return max(-0.45, min(0.45, sr * 0.25)), True
+
+        return max(-0.15, min(0.15, sr * 0.10)), False
+
     if not has_real_total:
+        away_adj = 0.0
+        home_adj = 0.0
         adj = 0.0
         mode = "no_real_total_no_adjust"
     else:
-        adj = max(-0.15, min(0.15, raw * 0.10))
-        mode = "net_run_environment_coef_0_10_cap_0_15"
+        weather_half = weather_adj / 2.0
+        away_adj, away_extreme = _side_run_pressure_adjust(
+            away_raw,
+            away["Away_Late_Run_Pressure"],
+            away["Away_Late_Run_Suppression"],
+            away["Away_Run_Pressure_Reasons"],
+            weather_half,
+        )
+        home_adj, home_extreme = _side_run_pressure_adjust(
+            home_raw,
+            home["Home_Late_Run_Pressure"],
+            home["Home_Late_Run_Suppression"],
+            home["Home_Run_Pressure_Reasons"],
+            weather_half,
+        )
+        adj = away_adj + home_adj
+        mode = (
+            "team_run_environment_extreme_late_coef_0_25_sidecap_0_45"
+            if away_extreme or home_extreme
+            else "team_run_environment_coef_0_10_sidecap_0_15"
+        )
 
     reasons = []
     if away["Away_Run_Pressure_Reasons"]:
@@ -2653,6 +2701,8 @@ def _calculate_full_picture_run_pressure(
     out.update(home)
     out["Weather_Interaction_Adjustment"] = round(weather_adj, 3)
     out["Full_Picture_Adjustment_Raw"] = round(raw, 3)
+    out["Away_Run_Pressure_Adjustment"] = round(away_adj, 3)
+    out["Home_Run_Pressure_Adjustment"] = round(home_adj, 3)
     out["Run_Pressure_Adjustment"] = round(adj, 3)
     out["Run_Pressure_Mode"] = mode
     out["Run_Pressure_Reasons"] = "|".join(reasons)
@@ -2905,12 +2955,31 @@ def generate_prediction(
         away_reliever_metrics=away_reliever_metrics,
         home_reliever_metrics=home_reliever_metrics,
     )
-    run_pressure_adjustment = _fp_safe_float(
-        run_pressure.get("Run_Pressure_Adjustment"),
+    away_run_pressure_adjustment = _fp_safe_float(
+        run_pressure.get("Away_Run_Pressure_Adjustment"),
         0.0,
     )
+    home_run_pressure_adjustment = _fp_safe_float(
+        run_pressure.get("Home_Run_Pressure_Adjustment"),
+        0.0,
+    )
+    run_pressure_adjustment = round(
+        float(away_run_pressure_adjustment) + float(home_run_pressure_adjustment),
+        3,
+    )
 
-    raw_projected_total = round(base_projected_total + run_pressure_adjustment, 2)
+    # Apply run pressure to the team that owns the scoring path. This preserves
+    # Base_Projected_Total as the pre-pressure baseline and makes Away_Runs /
+    # Home_Runs match the adjusted total path.
+    if bool(odds_info.get("_has_real_total")):
+        away_runs = round(max(0.0, float(away_runs) + float(away_run_pressure_adjustment)), 2)
+        home_runs = round(max(0.0, float(home_runs) + float(home_run_pressure_adjustment)), 2)
+        away_runs_safety = round(max(0.0, float(away_runs_safety) + float(away_run_pressure_adjustment)), 2)
+        home_runs_safety = round(max(0.0, float(home_runs_safety) + float(home_run_pressure_adjustment)), 2)
+        away_runs_raw = away_runs
+        home_runs_raw = home_runs
+
+    raw_projected_total = round(float(away_runs) + float(home_runs), 2)
     raw_edge = round(raw_projected_total - vegas_line, 2)
 
     # Only calibrate against a real/trusted total. Do not pull projection toward
@@ -3154,6 +3223,8 @@ def generate_prediction(
         "home_late_run_suppression": run_pressure.get("Home_Late_Run_Suppression", ""),
         "weather_interaction_adjustment": run_pressure.get("Weather_Interaction_Adjustment", ""),
         "full_picture_adjustment_raw": run_pressure.get("Full_Picture_Adjustment_Raw", ""),
+        "away_run_pressure_adjustment": run_pressure.get("Away_Run_Pressure_Adjustment", ""),
+        "home_run_pressure_adjustment": run_pressure.get("Home_Run_Pressure_Adjustment", ""),
         "run_pressure_adjustment": run_pressure.get("Run_Pressure_Adjustment", ""),
         "run_pressure_mode": run_pressure.get("Run_Pressure_Mode", ""),
         "run_pressure_reasons": run_pressure.get("Run_Pressure_Reasons", ""),
@@ -4971,6 +5042,51 @@ def run_predictions():
             away_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(away_off.get("mult", 1.0))))
             home_offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(home_off.get("mult", 1.0))))
 
+            def _projection_lineup_delta_vs_team(lineup_impact, offense_mult, scope):
+                """
+                Convert the best9/lineup split signal into a team-relative delta
+                before project_team_runs applies it.
+
+                Previous stack was:
+                    team_offense_mult * (1 + absolute_lineup_impact)
+
+                That double-counted or muted lineups because lineup_impact is
+                already an absolute strength vs hand. The projection path should
+                land on the lineup/best9 strength when a lineup proxy is matched,
+                while preserving the team-scope fallback when no lineup exists.
+                """
+                try:
+                    raw_impact = float(lineup_impact)
+                    team_mult = float(offense_mult)
+                except (TypeError, ValueError):
+                    return 0.0
+
+                if not np.isfinite(raw_impact) or not np.isfinite(team_mult) or team_mult <= 0:
+                    return 0.0
+
+                if str(scope or "").strip().lower() != "lineup":
+                    return max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, raw_impact))
+
+                lineup_strength = 1.0 + raw_impact
+                if lineup_strength <= 0 or not np.isfinite(lineup_strength):
+                    return 0.0
+
+                delta = (lineup_strength / team_mult) - 1.0
+                return max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, delta))
+
+            away_projection_lineup_impact = _projection_lineup_delta_vs_team(
+                away_impact, away_offense_mult, away_scope
+            )
+            home_projection_lineup_impact = _projection_lineup_delta_vs_team(
+                home_impact, home_offense_mult, home_scope
+            )
+
+            print(
+                f"🧮 Projection lineup delta vs team → AWAY {away_team}: "
+                f"raw={float(away_impact):+.3f} → proj={away_projection_lineup_impact:+.3f}; "
+                f"HOME {home_team}: raw={float(home_impact):+.3f} → proj={home_projection_lineup_impact:+.3f}"
+            )
+
             # Low-IP pitchers are real matched pitchers, not unmatched pitchers.
             # Keep them out of unmatched alerts; they remain tracked via Starter_LowIP
             # and Data_Quality_Flag=low_ip.
@@ -5081,8 +5197,8 @@ def run_predictions():
                 park_factors=park_factors,
                 vegas_data=vegas_line,
                 public_data=public,
-                away_lineup_impact=float(away_impact),
-                home_lineup_impact=float(home_impact),
+                away_lineup_impact=float(away_projection_lineup_impact),
+                home_lineup_impact=float(home_projection_lineup_impact),
                 away_offense_mult=away_offense_mult,
                 home_offense_mult=home_offense_mult,
                 has_real_total=bool(odds_info.get("_has_real_total", False)),
@@ -5218,6 +5334,8 @@ def run_predictions():
                 "Home_Late_Run_Suppression": proj.get("home_late_run_suppression", ""),
                 "Weather_Interaction_Adjustment": proj.get("weather_interaction_adjustment", ""),
                 "Full_Picture_Adjustment_Raw": proj.get("full_picture_adjustment_raw", ""),
+                "Away_Run_Pressure_Adjustment": proj.get("away_run_pressure_adjustment", ""),
+                "Home_Run_Pressure_Adjustment": proj.get("home_run_pressure_adjustment", ""),
                 "Run_Pressure_Adjustment": proj.get("run_pressure_adjustment", ""),
                 "Run_Pressure_Mode": proj.get("run_pressure_mode", ""),
                 "Run_Pressure_Reasons": proj.get("run_pressure_reasons", ""),
@@ -6268,6 +6386,7 @@ def run_predictions():
         "Home_Early_Run_Pressure", "Home_Early_Run_Suppression",
         "Home_Late_Run_Pressure", "Home_Late_Run_Suppression",
         "Weather_Interaction_Adjustment", "Full_Picture_Adjustment_Raw",
+        "Away_Run_Pressure_Adjustment", "Home_Run_Pressure_Adjustment",
         "Run_Pressure_Adjustment", "Run_Pressure_Mode", "Run_Pressure_Reasons",
         "Away_Runs", "Home_Runs",
         "Away_Runs_Raw", "Home_Runs_Raw", "Away_Runs_Safety", "Home_Runs_Safety",
