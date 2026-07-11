@@ -52,6 +52,7 @@ from core.the_odds_api import (
     fetch_ou_totals_by_game,
 )
 from core.batters import Batters, LineupImpact, BATTER_DF
+from core.lineups import fetch_confirmed_lineups
 from core.weather_adjustment import (
     WEATHER_RUNS_MULT_MAX,
     WEATHER_RUNS_MULT_MIN,
@@ -4923,52 +4924,231 @@ def run_predictions():
             lineup_delta = 0.0
             effective_lineup_delta = 0.0
 
-            # --- score lineups vs the real opposing starter hand (safe) ---
+            # --- score lineups vs the real opposing starter hand ---
+            # Morning/default path remains the team-specific top-PA proxy.
+            # Confirmed MLB lineups replace it only when BOTH teams have
+            # complete 1-9 orders and BOTH score successfully at 9/9.
+            lineup_game_pk = (
+                game.get("game_id")
+                or game.get("gamePk")
+                or game.get("game_pk")
+                or game.get("Game_ID")
+            )
+
+            lineup_source_away = "top_pa_proxy"
+            lineup_source_home = "top_pa_proxy"
+            lineup_confirmed_away = False
+            lineup_confirmed_home = False
+            lineup_player_count_away = 0
+            lineup_player_count_home = 0
+            lineup_matched_count_away = ""
+            lineup_matched_count_home = ""
+            lineup_order_away = ""
+            lineup_order_home = ""
+            lineup_signature_away = ""
+            lineup_signature_home = ""
+            lineup_fetched_at = ""
+            lineup_feed_status = ""
+            lineup_fetch_error = ""
+
+            # Determine the hand each offense will face.
             try:
-                # teams must be full, lowercase names to match the CSV
-                away_best9 = lineups.get_team_best9(away_team.lower())
-                home_best9 = lineups.get_team_best9(home_team.lower())
+                home_starter_hand = Batters.get_pitcher_hand(
+                    home_pitcher
+                )
+            except Exception:
+                home_starter_hand = None
 
-                # Determine the hand each offense will face
-                try:
-                    home_starter_hand = Batters.get_pitcher_hand(home_pitcher)  # away lineup faces HOME starter
-                except Exception:
-                    home_starter_hand = None
-                try:
-                    away_starter_hand = Batters.get_pitcher_hand(away_pitcher)  # home lineup faces AWAY starter
-                except Exception:
-                    away_starter_hand = None
+            try:
+                away_starter_hand = Batters.get_pitcher_hand(
+                    away_pitcher
+                )
+            except Exception:
+                away_starter_hand = None
 
-                away_impact, home_impact, away_scope, home_scope = safe_lineup_impacts(
+            # Canonical safe fallback: existing team-specific top-PA proxy.
+            try:
+                away_best9 = lineups.get_team_best9(
+                    away_team.lower()
+                )
+                home_best9 = lineups.get_team_best9(
+                    home_team.lower()
+                )
+
+                lineup_player_count_away = len(away_best9)
+                lineup_player_count_home = len(home_best9)
+
+                (
+                    away_impact,
+                    home_impact,
+                    away_scope,
+                    home_scope,
+                ) = safe_lineup_impacts(
                     lineup_obj=lineups,
                     away_lineup=away_best9,
                     home_lineup=home_best9,
                     away_pitcher_hand=away_starter_hand,
                     home_pitcher_hand=home_starter_hand,
-                    logger=None
-                )
-
-                # positive means home lineup projects stronger than away
-                lineup_delta = float(home_impact) - float(away_impact)
-                _eh = max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, float(home_impact)))
-                _ea = max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, float(away_impact)))
-                effective_lineup_delta = _eh - _ea
-
-                # small, controlled nudge to the total (tune 0.1–0.5 after backtests)
-                vegas_line_adj = float(vegas_line) + 0.3 * lineup_delta
-
-                print(
-                    f"🧮 Lineup impacts → AWAY {away_team}: {away_impact:.3f} ({away_scope}) | "
-                    f"HOME {home_team}: {home_impact:.3f} ({home_scope}) | Δ={lineup_delta:+.3f}"
-                )
-                print(
-                    f"   sizing Δ (±{LINEUP_IMPACT_CAP} cap, same scale as project_team_runs): {effective_lineup_delta:+.3f}"
+                    logger=None,
                 )
             except Exception as e:
-                print(f"⚠️ Lineup impact error: {e}")
-                lineup_delta = 0.0
-                effective_lineup_delta = 0.0
-                vegas_line_adj = float(vegas_line)
+                print(f"⚠️ Proxy lineup impact error: {e}")
+                away_impact = 0.0
+                home_impact = 0.0
+                away_scope = "none"
+                home_scope = "none"
+
+            # Upgrade both sides together only when the MLB feed and the
+            # ordered player-ID scorer both pass completely.
+            try:
+                confirmed = fetch_confirmed_lineups(
+                    lineup_game_pk
+                )
+
+                lineup_fetched_at = str(
+                    confirmed.get("fetched_at_utc") or ""
+                )
+                lineup_feed_status = str(
+                    confirmed.get("status") or ""
+                )
+                lineup_fetch_error = str(
+                    confirmed.get("error") or ""
+                )
+
+                if bool(confirmed.get("both_confirmed")):
+                    away_ordered = (
+                        lineups.score_ordered_lineup_dict(
+                            confirmed.get("away_lineup") or [],
+                            pitcher_hand=(
+                                home_starter_hand or "R"
+                            ),
+                        )
+                    )
+                    home_ordered = (
+                        lineups.score_ordered_lineup_dict(
+                            confirmed.get("home_lineup") or [],
+                            pitcher_hand=(
+                                away_starter_hand or "R"
+                            ),
+                        )
+                    )
+
+                    ordered_scoring_ok = (
+                        away_ordered.get("scope")
+                        == "mlb_confirmed_ordered"
+                        and home_ordered.get("scope")
+                        == "mlb_confirmed_ordered"
+                        and away_ordered.get("matched_count") == 9
+                        and home_ordered.get("matched_count") == 9
+                    )
+
+                    if ordered_scoring_ok:
+                        away_impact = float(
+                            away_ordered["lineup_impact"]
+                        )
+                        home_impact = float(
+                            home_ordered["lineup_impact"]
+                        )
+                        away_scope = str(
+                            away_ordered["scope"]
+                        )
+                        home_scope = str(
+                            home_ordered["scope"]
+                        )
+
+                        lineup_source_away = "mlb_confirmed"
+                        lineup_source_home = "mlb_confirmed"
+                        lineup_confirmed_away = True
+                        lineup_confirmed_home = True
+
+                        lineup_player_count_away = 9
+                        lineup_player_count_home = 9
+                        lineup_matched_count_away = 9
+                        lineup_matched_count_home = 9
+
+                        away_records = (
+                            confirmed.get("away_lineup") or []
+                        )
+                        home_records = (
+                            confirmed.get("home_lineup") or []
+                        )
+
+                        lineup_order_away = "|".join(
+                            f"{p['slot']}:{p['name']}"
+                            for p in away_records
+                        )
+                        lineup_order_home = "|".join(
+                            f"{p['slot']}:{p['name']}"
+                            for p in home_records
+                        )
+
+                        lineup_signature_away = str(
+                            confirmed.get(
+                                "away_signature"
+                            ) or ""
+                        )
+                        lineup_signature_home = str(
+                            confirmed.get(
+                                "home_signature"
+                            ) or ""
+                        )
+                    else:
+                        print(
+                            "⚠️ Confirmed MLB lineups were posted, "
+                            "but ordered scoring did not pass 9/9 "
+                            f"for {away_team} @ {home_team}; "
+                            "using top-PA proxies for both teams"
+                        )
+            except Exception as e:
+                lineup_fetch_error = (
+                    f"integration_failed:{type(e).__name__}"
+                )
+                print(
+                    "⚠️ Confirmed lineup integration error for "
+                    f"{away_team} @ {home_team}: {e}; "
+                    "using top-PA proxies"
+                )
+
+            # Positive means home lineup projects stronger than away.
+            lineup_delta = (
+                float(home_impact) - float(away_impact)
+            )
+            _eh = max(
+                -LINEUP_IMPACT_CAP,
+                min(
+                    LINEUP_IMPACT_CAP,
+                    float(home_impact),
+                ),
+            )
+            _ea = max(
+                -LINEUP_IMPACT_CAP,
+                min(
+                    LINEUP_IMPACT_CAP,
+                    float(away_impact),
+                ),
+            )
+            effective_lineup_delta = _eh - _ea
+
+            # Existing controlled total adjustment remains unchanged.
+            vegas_line_adj = (
+                float(vegas_line)
+                + 0.3 * lineup_delta
+            )
+
+            print(
+                f"🧮 Lineup impacts → AWAY {away_team}: "
+                f"{away_impact:.3f} ({away_scope}; "
+                f"source={lineup_source_away}) | "
+                f"HOME {home_team}: "
+                f"{home_impact:.3f} ({home_scope}; "
+                f"source={lineup_source_home}) | "
+                f"Δ={lineup_delta:+.3f}"
+            )
+            print(
+                f"   sizing Δ (±{LINEUP_IMPACT_CAP} cap, "
+                "same scale as project_team_runs): "
+                f"{effective_lineup_delta:+.3f}"
+            )
 
             # Runtime game key for pitcher-resolution logging (no logic change)
             away_norm_rt = normalize_team_name(away_team)
@@ -5383,6 +5563,21 @@ def run_predictions():
                 "Lineup_Delta_Effective": round(float(effective_lineup_delta), 4),
                 "Lineup_Mode_Away": (away_scope if away_scope and str(away_scope).lower() != "none" else ""),
                 "Lineup_Mode_Home": (home_scope if home_scope and str(home_scope).lower() != "none" else ""),
+                "Lineup_Source_Away": lineup_source_away,
+                "Lineup_Source_Home": lineup_source_home,
+                "Lineup_Confirmed_Away": lineup_confirmed_away,
+                "Lineup_Confirmed_Home": lineup_confirmed_home,
+                "Lineup_Player_Count_Away": lineup_player_count_away,
+                "Lineup_Player_Count_Home": lineup_player_count_home,
+                "Lineup_Matched_Count_Away": lineup_matched_count_away,
+                "Lineup_Matched_Count_Home": lineup_matched_count_home,
+                "Lineup_Order_Away": lineup_order_away,
+                "Lineup_Order_Home": lineup_order_home,
+                "Lineup_Signature_Away": lineup_signature_away,
+                "Lineup_Signature_Home": lineup_signature_home,
+                "Lineup_Fetched_At": lineup_fetched_at,
+                "Lineup_Feed_Status": lineup_feed_status,
+                "Lineup_Fetch_Error": lineup_fetch_error,
                 "Lineup_Cap_Hit_Away": bool(abs(float(away_impact)) >= 0.20),
                 "Lineup_Cap_Hit_Home": bool(abs(float(home_impact)) >= 0.20),
                 "Vegas_Line": vegas_line,
@@ -6402,7 +6597,14 @@ def run_predictions():
         "F5_Over_Juice", "F5_Under_Juice", "F5_Source", "F5_Book", "F5_Market_OK",
         "F5_No_Line_Reason",
         "Lineup_Impact_Away", "Lineup_Impact_Home", "Lineup_Delta_Raw", "Lineup_Delta_Effective",
-        "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
+        "Lineup_Mode_Away", "Lineup_Mode_Home", "Lineup_Source_Away", "Lineup_Source_Home",
+        "Lineup_Confirmed_Away", "Lineup_Confirmed_Home",
+        "Lineup_Player_Count_Away", "Lineup_Player_Count_Home",
+        "Lineup_Matched_Count_Away", "Lineup_Matched_Count_Home",
+        "Lineup_Order_Away", "Lineup_Order_Home",
+        "Lineup_Signature_Away", "Lineup_Signature_Home",
+        "Lineup_Fetched_At", "Lineup_Feed_Status", "Lineup_Fetch_Error",
+        "Lineup_Cap_Hit_Away", "Lineup_Cap_Hit_Home",
         "Vegas_Line", "Edge",
         "OU_Edge", "OU_Confidence", "OU_Side", "OU_Bet_Type",
         "ML_Edge", "ML_Side", "ML_Bet_Type", "ML_Market_OK", "ML_Market_Status",
