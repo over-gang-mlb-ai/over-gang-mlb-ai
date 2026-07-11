@@ -2654,10 +2654,12 @@ def _calculate_full_picture_run_pressure(
             )
         )
 
-        if extreme_late:
-            return max(-0.45, min(0.45, sr * 0.25)), True
-
-        return max(-0.15, min(0.15, sr * 0.10)), False
+        # Extreme late-run pressure is already priced inside project_team_runs()
+        # through the expanded bullpen-quality multiplier. Return the normal
+        # side adjustment here only for classification; the caller suppresses
+        # the entire second overlay when either side is extreme.
+        normal_adj = max(-0.15, min(0.15, sr * 0.10))
+        return normal_adj, extreme_late
 
     if not has_real_total:
         away_adj = 0.0
@@ -2680,12 +2682,16 @@ def _calculate_full_picture_run_pressure(
             home["Home_Run_Pressure_Reasons"],
             weather_half,
         )
-        adj = away_adj + home_adj
-        mode = (
-            "team_run_environment_extreme_late_coef_0_25_sidecap_0_45"
-            if away_extreme or home_extreme
-            else "team_run_environment_coef_0_10_sidecap_0_15"
-        )
+        if away_extreme or home_extreme:
+            # Core team-run math has already expanded the affected bullpen
+            # exposure. Do not apply a second game-level pressure overlay.
+            away_adj = 0.0
+            home_adj = 0.0
+            adj = 0.0
+            mode = "team_run_environment_extreme_core_only_no_overlay"
+        else:
+            adj = away_adj + home_adj
+            mode = "team_run_environment_coef_0_10_sidecap_0_15"
 
     reasons = []
     if away["Away_Run_Pressure_Reasons"]:
