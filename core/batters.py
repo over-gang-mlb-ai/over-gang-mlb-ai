@@ -509,12 +509,26 @@ class LineupImpact:
         if tkey in self._best9_map and self._best9_map[tkey]:
             return self._best9_map[tkey][:9]
 
-        # fall back to top-PA by team if the Team column exists
+        # Fall back to top-PA hitters for the requested team only.
+        # Normalize both the requested team and CSV team values through the
+        # same canonical function so punctuation differences such as
+        # "St. Louis" vs "St Louis" cannot break the match.
         df = self.batter_df
         if df is not None and not df.empty and "Team" in df.columns and df["Team"].notna().any():
-            subset = df[df["Team"].astype(str).str.lower() == tkey]
+            team_keys = df["Team"].astype(str).map(_norm)
+            subset = df.loc[team_keys == tkey]
+
+            # Fail closed. Never replace an unmatched team with the league-wide
+            # batter table, because that can score unrelated hitters as one team.
             if subset.empty:
-                subset = df.copy()
+                logging.warning(
+                    "⚠️ No batter rows matched team %r (normalized=%r); "
+                    "returning no best9 proxy",
+                    team_name,
+                    tkey,
+                )
+                return []
+
             subset = subset.sort_values(by="PA", ascending=False)
             names_series = subset["Name"] if "Name" in subset.columns else subset.index.to_series()
             return names_series.astype(str).tolist()[:9]
