@@ -212,6 +212,202 @@ _FALLBACK_RUN_PRESSURE_WEIGHTS = {
 # as aggressively as wRC+/wOBA.
 _FALLBACK_DAMP = 0.5
 
+# Empirical expected plate-appearance weights by batting slot.
+# Derived from 596 completed MLB team lineups across 300 archived games.
+# Mean weight is 1.0, so this changes within-lineup opportunity allocation
+# without creating an additional overall lineup-strength boost.
+_LINEUP_SLOT_PA_WEIGHTS = {
+    1: 1.1013,
+    2: 1.0764,
+    3: 1.0547,
+    4: 1.0311,
+    5: 1.0066,
+    6: 0.9745,
+    7: 0.9428,
+    8: 0.9207,
+    9: 0.8919,
+}
+
+
+def _weighted_numeric_mean(
+    values: pd.Series,
+    weights: List[float],
+) -> Optional[float]:
+    """Weighted mean over finite numeric values only."""
+    numeric = pd.to_numeric(
+        values,
+        errors="coerce",
+    ).to_numpy(dtype=float)
+
+    weight_array = np.asarray(
+        weights,
+        dtype=float,
+    )
+
+    if len(numeric) != len(weight_array):
+        return None
+
+    valid = (
+        np.isfinite(numeric)
+        & np.isfinite(weight_array)
+        & (weight_array > 0.0)
+    )
+
+    if not valid.any():
+        return None
+
+    weight_sum = float(weight_array[valid].sum())
+
+    if weight_sum <= 0.0:
+        return None
+
+    return float(
+        np.average(
+            numeric[valid],
+            weights=weight_array[valid],
+        )
+    )
+
+
+def _ordered_platoon_split_relative(
+    df: pd.DataFrame,
+    pitcher_hand: Optional[str],
+    slot_weights: List[float],
+) -> Optional[Tuple[float, str]]:
+    """
+    Order-aware equivalent of _platoon_split_relative.
+
+    Uses the same metric hierarchy and fallback damping, but each hitter is
+    weighted by the expected plate-appearance opportunity for their posted
+    batting slot.
+    """
+    if df is None or df.empty:
+        return None
+
+    if len(df) != len(slot_weights):
+        return None
+
+    prefix = "vsL" if pitcher_hand == "L" else "vsR"
+
+    col_wrc = (
+        f"{prefix}_wRC+"
+        if f"{prefix}_wRC+" in df.columns
+        else None
+    )
+    col_woba = (
+        f"{prefix}_wOBA"
+        if f"{prefix}_wOBA" in df.columns
+        else None
+    )
+    col_ops = (
+        f"{prefix}_OPS"
+        if f"{prefix}_OPS" in df.columns
+        else None
+    )
+    col_obp = (
+        f"{prefix}_OBP"
+        if f"{prefix}_OBP" in df.columns
+        else None
+    )
+    col_slg = (
+        f"{prefix}_SLG"
+        if f"{prefix}_SLG" in df.columns
+        else None
+    )
+    col_iso = (
+        f"{prefix}_ISO"
+        if f"{prefix}_ISO" in df.columns
+        else None
+    )
+
+    advanced: List[float] = []
+
+    if col_wrc:
+        weighted = _weighted_numeric_mean(
+            df[col_wrc],
+            slot_weights,
+        )
+        if weighted is not None:
+            advanced.append(
+                weighted / _LEAGUE_WRC_SCALE
+            )
+
+    if col_woba:
+        weighted = _weighted_numeric_mean(
+            df[col_woba],
+            slot_weights,
+        )
+        if weighted is not None:
+            advanced.append(
+                weighted / _LEAGUE_WOBA
+            )
+
+    if advanced:
+        return float(np.nanmean(advanced)), "advanced"
+
+    parts: List[Tuple[float, float]] = []
+
+    for column, anchor, metric_weight in [
+        (
+            col_ops,
+            _LEAGUE_OPS,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["OPS"],
+        ),
+        (
+            col_obp,
+            _LEAGUE_OBP,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["OBP"],
+        ),
+        (
+            col_slg,
+            _LEAGUE_SLG,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["SLG"],
+        ),
+        (
+            col_iso,
+            _LEAGUE_ISO,
+            _FALLBACK_RUN_PRESSURE_WEIGHTS["ISO"],
+        ),
+    ]:
+        if not column:
+            continue
+
+        weighted = _weighted_numeric_mean(
+            df[column],
+            slot_weights,
+        )
+
+        if weighted is None:
+            continue
+
+        parts.append((
+            weighted / anchor,
+            metric_weight,
+        ))
+
+    if not parts:
+        return None
+
+    weight_sum = sum(
+        metric_weight
+        for _, metric_weight in parts
+    )
+
+    if weight_sum <= 0.0:
+        return None
+
+    relative = sum(
+        value * metric_weight
+        for value, metric_weight in parts
+    ) / weight_sum
+
+    relative = (
+        1.0
+        + (relative - 1.0) * _FALLBACK_DAMP
+    )
+
+    return relative, "fallback_run_pressure"
+
 
 def _platoon_split_relative(
     df: pd.DataFrame,
@@ -536,6 +732,203 @@ class LineupImpact:
         return []
 
     # --------- Scoring ----------
+    def score_ordered_lineup_dict(
+        self,
+        lineup: List[Dict[str, Any]],
+        pitcher_hand: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Score a confirmed MLB lineup while preserving batting order.
+
+        Expected input records:
+            {
+                "slot": 1..9,
+                "player_id": MLB player ID,
+                "name": player name,
+            }
+
+        The scorer fails closed unless:
+          - all nine unique batting slots are present,
+          - all nine unique player IDs are present,
+          - all nine hitters match batter_stats.csv.
+
+        Existing unordered top-PA scoring is intentionally unchanged.
+        """
+        base = {
+            "lineup_impact": 0.0,
+            "scope": "none",
+            "ordered": False,
+            "player_count": 0,
+            "matched_count": 0,
+            "match_method": "none",
+            "split_mode": "none",
+        }
+
+        df = self.batter_df
+
+        if df is None or df.empty:
+            return base
+
+        if not isinstance(lineup, (list, tuple)):
+            return base
+
+        parsed: List[Dict[str, Any]] = []
+
+        for record in lineup:
+            if not isinstance(record, dict):
+                return base
+
+            try:
+                slot = int(record.get("slot"))
+                player_id = int(record.get("player_id"))
+            except (TypeError, ValueError):
+                return base
+
+            name = str(record.get("name") or "").strip()
+
+            if not 1 <= slot <= 9:
+                return base
+
+            if player_id <= 0:
+                return base
+
+            parsed.append({
+                "slot": slot,
+                "player_id": player_id,
+                "name": name,
+            })
+
+        parsed.sort(
+            key=lambda record: record["slot"],
+        )
+
+        base["player_count"] = len(parsed)
+
+        slots = [
+            record["slot"]
+            for record in parsed
+        ]
+        player_ids = [
+            record["player_id"]
+            for record in parsed
+        ]
+
+        if (
+            len(parsed) != 9
+            or slots != list(range(1, 10))
+            or len(set(player_ids)) != 9
+        ):
+            return base
+
+        numeric_player_ids = (
+            pd.to_numeric(
+                df["player_id"],
+                errors="coerce",
+            )
+            if "player_id" in df.columns
+            else pd.Series(
+                np.nan,
+                index=df.index,
+            )
+        )
+
+        matched_rows: List[Dict[str, Any]] = []
+        slot_weights: List[float] = []
+        methods: List[str] = []
+
+        for record in parsed:
+            player_id = record["player_id"]
+            name = record["name"]
+
+            matched = df.loc[
+                numeric_player_ids == float(player_id)
+            ]
+
+            method = "player_id"
+
+            if matched.empty and name:
+                normalized_name = _norm(name)
+
+                if normalized_name in df.index:
+                    matched = df.loc[[normalized_name]]
+                    method = "name"
+
+            if matched.empty:
+                continue
+
+            row = matched.iloc[0].copy()
+            matched_rows.append(row.to_dict())
+            slot_weights.append(
+                _LINEUP_SLOT_PA_WEIGHTS[
+                    record["slot"]
+                ]
+            )
+            methods.append(method)
+
+        base["matched_count"] = len(matched_rows)
+
+        if methods:
+            base["match_method"] = (
+                methods[0]
+                if len(set(methods)) == 1
+                else "mixed"
+            )
+
+        # Confirmed source remains fail-closed if even one posted hitter
+        # cannot be linked to the current batter table.
+        if len(matched_rows) != 9:
+            return base
+
+        lineup_df = pd.DataFrame(
+            matched_rows
+        ).reset_index(drop=True)
+
+        relative_result = (
+            _ordered_platoon_split_relative(
+                lineup_df,
+                pitcher_hand,
+                slot_weights,
+            )
+        )
+
+        if relative_result is None:
+            return {
+                **base,
+                "ordered": True,
+                "scope": "none",
+            }
+
+        relative, mode = relative_result
+        impact = relative - 1.0
+
+        # Basic split fallback is intentionally held to the narrower
+        # ±0.20 rail; advanced wRC+/wOBA scoring retains the ±0.30 rail.
+        if mode in {"fallback", "fallback_run_pressure"}:
+            impact = max(
+                -0.20,
+                min(0.20, impact),
+            )
+        else:
+            impact = max(
+                -0.30,
+                min(0.30, impact),
+            )
+
+        return {
+            **base,
+            "lineup_impact": float(impact),
+            "scope": "mlb_confirmed_ordered",
+            "ordered": True,
+            "player_count": 9,
+            "matched_count": 9,
+            "match_method": (
+                methods[0]
+                if len(set(methods)) == 1
+                else "mixed"
+            ),
+            "split_mode": mode,
+        }
+
     def score_lineup_dict(
         self,
         lineup: Union[List[str], pd.DataFrame, pd.Series],
