@@ -1475,33 +1475,113 @@ def project_team_f5_runs(
     opponent_velo_drop: float,
     opponent_low_ip: bool = False,
     offense_mult: float = 1.0,
+    opponent_bullpen_era: float = None,
+    opponent_bullpen_xera: float = None,
+    opponent_expected_starter_ip: float = None,
 ) -> float:
     """
-    Project expected runs scored by one team in the FIRST 5 INNINGS only.
-    F5 telemetry helper. Starter-driven. Drops bullpen blend, bullpen workload
-    fatigue, lineup x bullpen interaction, and dynamic safety cap.
-    Used ONLY for archive export telemetry. Never called from any fire, edge,
-    Kelly, confidence, or Telegram path.
+    Project expected runs scored by one team in the first five innings.
+
+    The starter component owns only the innings the starter is expected to
+    cover within the first five. Any remaining innings use the opponent's
+    neutral bullpen ERA/xERA quality blend.
+
+    Full-game bullpen fatigue, reliever depth, clarity, late-run pressure,
+    late-run suppression, and lineup x bullpen interaction are intentionally
+    excluded from the F5 projection.
     """
     if opponent_low_ip:
-        opponent_starter_xera = min(opponent_starter_xera + LOW_IP_XERA_PENALTY, 6.0)
+        opponent_starter_xera = min(
+            opponent_starter_xera + LOW_IP_XERA_PENALTY,
+            6.0,
+        )
 
-    f5_effective_era = max(2.5, min(7.0, opponent_starter_xera))
-    f5_base_era = 0.85 * f5_effective_era + 0.15 * LEAGUE_ERA
-    f5_runs = LEAGUE_RUNS_PER_TEAM * (f5_base_era / LEAGUE_ERA) * (5.0 / 9.0)
+    # Missing workload preserves the prior starter-only five-inning behavior.
+    expected_ip = _ou_safe_float(opponent_expected_starter_ip)
+    if expected_ip is None:
+        starter_f5_ip = 5.0
+    else:
+        starter_f5_ip = max(0.0, min(5.0, expected_ip))
 
+    relief_f5_ip = 5.0 - starter_f5_ip
+
+    # Starter run quality.
+    starter_effective_era = max(
+        2.5,
+        min(7.0, float(opponent_starter_xera)),
+    )
+    starter_base_era = (
+        0.85 * starter_effective_era
+        + 0.15 * LEAGUE_ERA
+    )
+
+    starter_runs = (
+        LEAGUE_RUNS_PER_TEAM
+        * (starter_base_era / LEAGUE_ERA)
+        * (starter_f5_ip / 9.0)
+    )
+
+    # Starter-only context: handedness split, WHIP and velocity should not
+    # reprice relief innings.
+    offense_mult = max(
+        OFFENSE_MULT_MIN,
+        min(OFFENSE_MULT_MAX, float(offense_mult)),
+    )
+    starter_runs *= offense_mult
+
+    try:
+        starter_whip = float(opponent_starter_whip)
+    except (TypeError, ValueError):
+        starter_whip = WHIP_LEAGUE
+
+    if not np.isfinite(starter_whip):
+        starter_whip = WHIP_LEAGUE
+
+    whip_mult = max(
+        0.92,
+        min(1.15, starter_whip / WHIP_LEAGUE),
+    )
+    starter_runs *= whip_mult
+    starter_runs *= _opponent_velocity_run_multiplier(
+        opponent_velo_drop
+    )
+
+    # Early-relief quality uses the existing neutral bullpen ERA/xERA blend.
+    bullpen_era = _ou_safe_float(opponent_bullpen_era)
+    if bullpen_era is None:
+        bullpen_era = LEAGUE_ERA
+
+    bullpen_xera = _ou_safe_float(opponent_bullpen_xera)
+    if bullpen_xera is None:
+        bullpen_xera = bullpen_era
+
+    bullpen_quality = (
+        0.75 * bullpen_era
+        + 0.25 * bullpen_xera
+    )
+    bullpen_quality = max(2.5, min(7.0, bullpen_quality))
+
+    bullpen_base_era = (
+        0.85 * bullpen_quality
+        + 0.15 * LEAGUE_ERA
+    )
+
+    relief_runs = (
+        LEAGUE_RUNS_PER_TEAM
+        * (bullpen_base_era / LEAGUE_ERA)
+        * (relief_f5_ip / 9.0)
+    )
+
+    f5_runs = starter_runs + relief_runs
+
+    # Shared first-five environment applies once to both components.
     f5_runs *= park_runs_factor
 
-    offense_mult = max(OFFENSE_MULT_MIN, min(OFFENSE_MULT_MAX, float(offense_mult)))
-    f5_runs *= offense_mult
-
-    lineup_mult = 1.0 + max(-LINEUP_IMPACT_CAP, min(LINEUP_IMPACT_CAP, lineup_impact))
+    lineup_mult = 1.0 + max(
+        -LINEUP_IMPACT_CAP,
+        min(LINEUP_IMPACT_CAP, lineup_impact),
+    )
     f5_runs *= lineup_mult
-
-    whip_mult = max(0.92, min(1.15, opponent_starter_whip / WHIP_LEAGUE))
-    f5_runs *= whip_mult
-
-    f5_runs *= _opponent_velocity_run_multiplier(opponent_velo_drop)
 
     return round(f5_runs, 2)
 
@@ -2831,6 +2911,9 @@ def generate_prediction(
         opponent_velo_drop=velo_drop_home,
         opponent_low_ip=safe_get(home_stats, "LowIP", False),
         offense_mult=away_offense_mult,
+        opponent_bullpen_era=bullpen_home_era,
+        opponent_bullpen_xera=bullpen_home_xera,
+        opponent_expected_starter_ip=home_expected_starter_ip,
     )
     f5_home_runs = project_team_f5_runs(
         opponent_starter_xera=away_xera,
@@ -2840,6 +2923,9 @@ def generate_prediction(
         opponent_velo_drop=velo_drop_away,
         opponent_low_ip=safe_get(away_stats, "LowIP", False),
         offense_mult=home_offense_mult,
+        opponent_bullpen_era=bullpen_away_era,
+        opponent_bullpen_xera=bullpen_away_xera,
+        opponent_expected_starter_ip=away_expected_starter_ip,
     )
     f5_projected_total = round(f5_away_runs + f5_home_runs, 2)
 
