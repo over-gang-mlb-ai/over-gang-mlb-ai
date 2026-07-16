@@ -421,12 +421,14 @@ def _f5_probability_value_snapshot(
     over_price,
     under_price,
     market_ok,
+    data_quality_flag=None,
 ):
     """
-    Return price-aware F5 probability and expected-value fields.
+    Return the canonical price-aware F5 probability, EV and
+    independent decision fields.
 
-    This is analysis/export-only. It does not control F5 firing,
-    confidence, Telegram alerts, full-game O/U, or ML.
+    The F5 decision does not depend on full-game O/U side,
+    historical raw-edge buckets, F5_Model_Side or ML.
     """
     output = {
         "F5_Model_Prob_Over": "",
@@ -446,6 +448,12 @@ def _f5_probability_value_snapshot(
         "F5_Selected_Prob_Edge": "",
         "F5_Prob_Method": "",
         "F5_Prob_Calibration_Flag": "",
+        "F5_Decision_Side": "",
+        "F5_Decision_Pick": "",
+        "F5_Confidence": "",
+        "F5_Confidence_Value": "",
+        "F5_Fired": False,
+        "No_Fire_F5_Reason": "",
     }
 
     probabilities = _f5_nb2_total_probabilities(
@@ -454,6 +462,9 @@ def _f5_probability_value_snapshot(
     )
 
     if probabilities is None:
+        output["No_Fire_F5_Reason"] = (
+            "missing_projection_or_line"
+        )
         return output
 
     output.update({
@@ -481,7 +492,7 @@ def _f5_probability_value_snapshot(
         ),
         "F5_Prob_Method": "nb2_alpha_0.30",
         "F5_Prob_Calibration_Flag": (
-            "provisional_not_for_fire"
+            "nb2_alpha_0.30_decision_v1"
         ),
     })
 
@@ -493,6 +504,9 @@ def _f5_probability_value_snapshot(
     )
 
     if not market_ok_bool:
+        output["No_Fire_F5_Reason"] = (
+            "f5_market_unavailable"
+        )
         return output
 
     implied_over, implied_under, devig_status = (
@@ -503,6 +517,9 @@ def _f5_probability_value_snapshot(
     )
 
     if devig_status != "ok":
+        output["No_Fire_F5_Reason"] = (
+            "invalid_f5_prices"
+        )
         return output
 
     output["F5_Implied_Prob_Over"] = round(
@@ -537,6 +554,9 @@ def _f5_probability_value_snapshot(
     )
 
     if over_profit is None or under_profit is None:
+        output["No_Fire_F5_Reason"] = (
+            "invalid_f5_prices"
+        )
         return output
 
     # Pushes return the stake, contributing zero net EV.
@@ -567,6 +587,21 @@ def _f5_probability_value_snapshot(
             "F5_Prob_Edge_Under"
         ]
 
+    selected_model_probability = (
+        probabilities["over_no_push"]
+        if selected_side == "OVER"
+        else probabilities["under_no_push"]
+    )
+
+    if selected_model_probability is not None:
+        output["F5_Confidence_Value"] = round(
+            selected_model_probability,
+            4,
+        )
+        output["F5_Confidence"] = (
+            f"{selected_model_probability:.0%}"
+        )
+
     if selected_ev > 0:
         output["F5_Value_Side"] = selected_side
         output["F5_Selected_Price"] = selected_price
@@ -577,8 +612,67 @@ def _f5_probability_value_snapshot(
         output["F5_Selected_Prob_Edge"] = (
             selected_prob_edge
         )
+        output["F5_Decision_Side"] = selected_side
     else:
         output["F5_Value_Side"] = "NO_VALUE"
+        output["No_Fire_F5_Reason"] = (
+            "no_positive_f5_ev"
+        )
+        return output
+
+    try:
+        selected_prob_edge_float = float(
+            selected_prob_edge
+        )
+    except (TypeError, ValueError):
+        selected_prob_edge_float = None
+
+    if (
+        selected_prob_edge_float is None
+        or not math.isfinite(selected_prob_edge_float)
+        or selected_prob_edge_float <= 0
+    ):
+        output["No_Fire_F5_Reason"] = (
+            "nonpositive_f5_probability_edge"
+        )
+        return output
+
+    data_quality = str(
+        data_quality_flag or ""
+    ).strip().lower()
+
+    # Low-IP is not blocked here. Expected starter workload is
+    # already priced directly into the F5 projection.
+    if "fallback_pitcher" in data_quality:
+        output["No_Fire_F5_Reason"] = (
+            "fallback_pitcher"
+        )
+        return output
+
+    if (
+        _american_odds_profit_multiplier(
+            selected_price
+        )
+        is None
+    ):
+        output["No_Fire_F5_Reason"] = (
+            "invalid_selected_f5_price"
+        )
+        return output
+
+    try:
+        line_value = float(market_line)
+    except (TypeError, ValueError):
+        output["No_Fire_F5_Reason"] = (
+            "missing_f5_market_line"
+        )
+        return output
+
+    output["F5_Decision_Pick"] = (
+        f"{selected_side} {line_value:.1f}"
+    )
+    output["F5_Fired"] = True
+    output["No_Fire_F5_Reason"] = "fired"
 
     return output
 
@@ -3852,28 +3946,32 @@ def _alert_float_or_none(v):
 
 
 def _is_f5_telegram_candidate(row: dict) -> bool:
+    if not _alert_bool(row.get("F5_Fired")):
+        return False
+
     if not _alert_bool(row.get("F5_Market_OK")):
         return False
-    edge = _alert_float_or_none(row.get("F5_Edge"))
-    if edge is None:
-        return False
-    abs_edge = abs(edge)
-    in_tight_bucket = (
-        0.75 <= abs_edge <= 1.00
-        or abs_edge >= 1.50
+
+    pick = (
+        _alert_clean(
+            row.get("F5_Decision_Pick")
+        )
+        or _alert_clean(
+            row.get("Daily_F5_Profile_Pick")
+        )
     )
-    if not in_tight_bucket:
-        return False
-    pick = _alert_clean(row.get("Daily_F5_Profile_Pick")) or _alert_clean(row.get("F5_Pick"))
     if not pick:
         return False
-    if _alert_clean(row.get("F5_Market_Line")) == "":
-        return False
-    grade = _alert_clean(row.get("Daily_F5_Profile_Grade"))
-    if grade.lower() == "risk":
-        return False
-    return True
 
+    if (
+        _alert_float_or_none(
+            row.get("F5_Selected_Price")
+        )
+        is None
+    ):
+        return False
+
+    return True
 
 def format_ou_alert(game_data: dict) -> str:
     """Customer-facing O/U Telegram message (CSV remains full detail)."""
@@ -3915,71 +4013,138 @@ def format_ml_alert(game_data: dict) -> str:
 
 
 def format_f5_alert(game_data: dict) -> str:
-    """Customer-facing F5 Telegram message (CSV remains full detail)."""
+    """Customer-facing independent F5 Telegram message."""
     if game_data.get("Datetime"):
         t = _alert_formatted_time(game_data)
     else:
-        t = _alert_clean(game_data.get("Game_Time_MT")) or "TBD"
+        t = (
+            _alert_clean(
+                game_data.get("Game_Time_MT")
+            )
+            or "TBD"
+        )
+
     pitchers = game_data.get("Pitchers")
     if not pitchers:
-        away_p = game_data.get("Away_Pitcher") or "?"
-        home_p = game_data.get("Home_Pitcher") or "?"
+        away_p = (
+            game_data.get("Away_Pitcher")
+            or "?"
+        )
+        home_p = (
+            game_data.get("Home_Pitcher")
+            or "?"
+        )
         pitchers = f"{away_p} vs {home_p}"
-    away_xera = _alert_clean(game_data.get("Away_Starter_xERA"))
-    home_xera = _alert_clean(game_data.get("Home_Starter_xERA"))
-    away_whip = _alert_clean(game_data.get("Away_Starter_WHIP"))
-    home_whip = _alert_clean(game_data.get("Home_Starter_WHIP"))
-    xera_str = f"{away_xera or '-'}/{home_xera or '-'}"
-    whip_str = f"{away_whip or '-'}/{home_whip or '-'}"
+
+    away_xera = _alert_clean(
+        game_data.get("Away_Starter_xERA")
+    )
+    home_xera = _alert_clean(
+        game_data.get("Home_Starter_xERA")
+    )
+    away_whip = _alert_clean(
+        game_data.get("Away_Starter_WHIP")
+    )
+    home_whip = _alert_clean(
+        game_data.get("Home_Starter_WHIP")
+    )
+
+    xera_str = (
+        f"{away_xera or '-'}/"
+        f"{home_xera or '-'}"
+    )
+    whip_str = (
+        f"{away_whip or '-'}/"
+        f"{home_whip or '-'}"
+    )
+
     pick = (
-        _alert_clean(game_data.get("Daily_F5_Profile_Pick"))
-        or _alert_clean(game_data.get("F5_Pick"))
+        _alert_clean(
+            game_data.get("F5_Decision_Pick")
+        )
+        or _alert_clean(
+            game_data.get(
+                "Daily_F5_Profile_Pick"
+            )
+        )
         or "-"
     )
-    edge_f = _alert_float_or_none(game_data.get("F5_Edge"))
-    edge_str = f"{edge_f:+.1f}" if edge_f is not None else "?"
-    grade = _alert_clean(game_data.get("Daily_F5_Profile_Grade"))
-    analysis = _alert_clean(game_data.get("Daily_F5_Analysis_Read")) or _alert_clean(
-        game_data.get("Daily_F5_Profile_Reason")
+
+    price_value = _alert_float_or_none(
+        game_data.get("F5_Selected_Price")
     )
-    ou_context = _alert_clean(game_data.get("Daily_OU_Profile_Read"))
-    game_display = _telegram_markdown_escape(game_data.get("Game", "Unknown"))
-    venue_display = _telegram_markdown_escape(game_data.get("Venue", "Unknown"))
-    pitchers_display = _telegram_markdown_escape(pitchers)
-    pick_display = _telegram_markdown_escape(pick)
-    grade_display = _telegram_markdown_escape(grade)
+    price_str = (
+        f"{price_value:+.0f}"
+        if price_value is not None
+        else "-"
+    )
+
+    confidence = (
+        _alert_clean(
+            game_data.get("F5_Confidence")
+        )
+        or "-"
+    )
+
+    analysis = (
+        _alert_clean(
+            game_data.get(
+                "Daily_F5_Profile_Reason"
+            )
+        )
+        or "Independent price-aware F5 value"
+    )
+
+    game_display = _telegram_markdown_escape(
+        game_data.get("Game", "Unknown")
+    )
+    venue_display = _telegram_markdown_escape(
+        game_data.get("Venue", "Unknown")
+    )
+    pitchers_display = _telegram_markdown_escape(
+        pitchers
+    )
+    pick_display = _telegram_markdown_escape(
+        pick
+    )
+    price_display = _telegram_markdown_escape(
+        price_str
+    )
+    confidence_display = (
+        _telegram_markdown_escape(confidence)
+    )
     analysis_display = _telegram_markdown_escape(
-        analysis.replace("|", ", ") if analysis else ""
+        analysis.replace("|", ", ")
     )
-    ou_context_display = _telegram_markdown_escape(
-        ou_context.replace("|", ", ") if ou_context else ""
+    xera_display = _telegram_markdown_escape(
+        xera_str
     )
-    xera_display = _telegram_markdown_escape(xera_str)
-    whip_display = _telegram_markdown_escape(whip_str)
-    edge_display = _telegram_markdown_escape(edge_str)
+    whip_display = _telegram_markdown_escape(
+        whip_str
+    )
+
     lines = [
         "\u23f1\ufe0f *F5 \u00b7 Over Gang*",
         f"\U0001f3df\ufe0f *{game_display}*",
-        f"\U0001f4cd {venue_display} | \U0001f552 {t}",
+        f"\U0001f4cd {venue_display} | "
+        f"\U0001f552 {t}",
         "",
         f"\U0001f3af {pitchers_display}",
-        f"\U0001f4ca xERA {xera_display} \u00b7 WHIP {whip_display}",
+        f"\U0001f4ca xERA {xera_display} "
+        f"\u00b7 WHIP {whip_display}",
         "",
         f"\U0001f9e0 *Pick*: {pick_display}",
-        f"\U0001f4d0 *F5 Edge*: {edge_display}",
-    ]
-    if grade:
-        lines.append(f"\U0001f3f7\ufe0f *Profile Grade*: {grade_display}")
-    if analysis:
-        lines.append(f"\U0001f9fe {analysis_display}")
-    if ou_context:
-        lines.append(f"\U0001f3af Full-game context: {ou_context_display}")
-    lines.extend([
+        f"\U0001f4b0 *Price*: {price_display}",
+        f"\U0001f4ca *F5 Confidence*: "
+        f"{confidence_display}",
+        f"\U0001f9fe {analysis_display}",
         "",
-        "18+ only. For informational purposes only. Past performance does not guarantee future results. Bet responsibly.",
-    ])
-    return "\n".join(lines)
+        "18+ only. For informational purposes only. "
+        "Past performance does not guarantee future "
+        "results. Bet responsibly.",
+    ]
 
+    return "\n".join(lines)
 
 def send_telegram_file(file_path, caption="📊 Over Gang Predictions"):
     if model_telegram_suppressed():
@@ -7580,6 +7745,9 @@ def run_predictions():
             "F5_Value_Side", "F5_Selected_Price",
             "F5_Selected_EV", "F5_Selected_Prob_Edge",
             "F5_Prob_Method", "F5_Prob_Calibration_Flag",
+            "F5_Decision_Side", "F5_Decision_Pick",
+            "F5_Confidence", "F5_Confidence_Value",
+            "F5_Fired", "No_Fire_F5_Reason",
             "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible",
             "F5_Over_Juice", "F5_Under_Juice", "F5_Source", "F5_Book",
             "F5_Market_OK", "F5_No_Line_Reason",
@@ -7606,6 +7774,9 @@ def run_predictions():
                 over_price=_r.get("F5_Over_Juice"),
                 under_price=_r.get("F5_Under_Juice"),
                 market_ok=_r.get("F5_Market_OK"),
+                data_quality_flag=_r.get(
+                    "Data_Quality_Flag"
+                ),
             )
 
             f5_board_rows.append({
@@ -8700,6 +8871,29 @@ def run_predictions():
             "F5_Over_Juice",
             "F5_Under_Juice",
             "F5_No_Line_Reason",
+            "F5_Model_Prob_Over",
+            "F5_Model_Prob_Under",
+            "F5_Model_Prob_Push",
+            "F5_Model_Prob_Over_NoPush",
+            "F5_Model_Prob_Under_NoPush",
+            "F5_Implied_Prob_Over",
+            "F5_Implied_Prob_Under",
+            "F5_Prob_Edge_Over",
+            "F5_Prob_Edge_Under",
+            "F5_EV_Over",
+            "F5_EV_Under",
+            "F5_Value_Side",
+            "F5_Selected_Price",
+            "F5_Selected_EV",
+            "F5_Selected_Prob_Edge",
+            "F5_Prob_Method",
+            "F5_Prob_Calibration_Flag",
+            "F5_Decision_Side",
+            "F5_Decision_Pick",
+            "F5_Confidence",
+            "F5_Confidence_Value",
+            "F5_Fired",
+            "No_Fire_F5_Reason",
         ]
         picks_board_daily_analysis_cols = [
             "Daily_OU_Profile_Side",
@@ -8921,35 +9115,103 @@ def run_predictions():
                 _daily_ou_read_parts.append(f"Bucket: {_daily_ou_bucket}")
             _row["Daily_OU_Profile_Read"] = " | ".join(_daily_ou_read_parts)
 
-            _daily_f5_side = _daily_f5_profile_side(_row)
-            if _daily_f5_side == "OVER":
-                _daily_f5_grade = _daily_clean(_row.get("F5_Over_Profile_Grade"))
-                _daily_f5_reason = _daily_clean(_row.get("F5_Over_Profile_Reason"))
-                _derived_f5_pick = _format_f5_pick("OVER", _row.get("F5_Market_Line"))
-            elif _daily_f5_side == "UNDER":
-                _daily_f5_grade = _daily_clean(_row.get("F5_Under_Profile_Grade"))
-                _daily_f5_reason = _daily_clean(_row.get("F5_Under_Profile_Reason"))
-                _derived_f5_pick = _format_f5_pick("UNDER", _row.get("F5_Market_Line"))
-            else:
-                _daily_f5_grade = ""
-                _daily_f5_reason = ""
-                _derived_f5_pick = ""
-            _row["Daily_F5_Profile_Side"] = _daily_f5_side
-            _row["Daily_F5_Profile_Grade"] = _daily_f5_grade
-            _row["Daily_F5_Profile_Reason"] = _daily_f5_reason
-            if not _daily_blank(_derived_f5_pick):
-                _row["Daily_F5_Profile_Pick"] = _derived_f5_pick
-            else:
-                _existing_f5_pick_for_daily = _daily_clean(_row.get("F5_Pick"))
-                _row["Daily_F5_Profile_Pick"] = _existing_f5_pick_for_daily
+            _f5_prob_value = _f5_probability_value_snapshot(
+                projected_mean=_row.get(
+                    "F5_Projected_Total"
+                ),
+                market_line=_row.get(
+                    "F5_Market_Line"
+                ),
+                over_price=_row.get(
+                    "F5_Over_Juice"
+                ),
+                under_price=_row.get(
+                    "F5_Under_Juice"
+                ),
+                market_ok=_row.get(
+                    "F5_Market_OK"
+                ),
+                data_quality_flag=_row.get(
+                    "Data_Quality_Flag"
+                ),
+            )
+            _row.update(_f5_prob_value)
+
+            _f5_fired = _alert_bool(
+                _row.get("F5_Fired")
+            )
+            _daily_f5_side = (
+                _daily_clean(
+                    _row.get("F5_Decision_Side")
+                )
+                if _f5_fired
+                else ""
+            )
+            _daily_f5_grade = ""
+            _daily_f5_reason = (
+                "price_aware_nb2_positive_ev"
+                if _f5_fired
+                else _daily_clean(
+                    _row.get(
+                        "No_Fire_F5_Reason"
+                    )
+                )
+            )
+            _derived_f5_pick = (
+                _daily_clean(
+                    _row.get("F5_Decision_Pick")
+                )
+                if _f5_fired
+                else ""
+            )
+
+            _row["Daily_F5_Profile_Side"] = (
+                _daily_f5_side
+            )
+            _row["Daily_F5_Profile_Grade"] = (
+                _daily_f5_grade
+            )
+            _row["Daily_F5_Profile_Reason"] = (
+                _daily_f5_reason
+            )
+            _row["Daily_F5_Profile_Pick"] = (
+                _derived_f5_pick
+            )
+
             _daily_f5_read_parts = []
-            if not _daily_blank(_row.get("Daily_F5_Profile_Pick")):
-                _daily_f5_read_parts.append(str(_row.get("Daily_F5_Profile_Pick")))
-            if _daily_f5_grade:
-                _daily_f5_read_parts.append(f"Profile Grade: {_daily_f5_grade}")
+
+            if _derived_f5_pick:
+                _daily_f5_read_parts.append(
+                    _derived_f5_pick
+                )
+
+            _f5_selected_price = _daily_clean(
+                _row.get("F5_Selected_Price")
+            )
+            if _f5_selected_price:
+                _daily_f5_read_parts.append(
+                    f"Price: {_f5_selected_price}"
+                )
+
+            _f5_confidence = _daily_clean(
+                _row.get("F5_Confidence")
+            )
+            if _f5_confidence:
+                _daily_f5_read_parts.append(
+                    f"Confidence: {_f5_confidence}"
+                )
+
             if _daily_f5_reason:
-                _daily_f5_read_parts.append(_daily_f5_reason.replace("|", ", "))
-            _row["Daily_F5_Analysis_Read"] = " | ".join(_daily_f5_read_parts)
+                _daily_f5_read_parts.append(
+                    _daily_f5_reason.replace(
+                        "|",
+                        ", ",
+                    )
+                )
+
+            _row["Daily_F5_Analysis_Read"] = (
+                " | ".join(_daily_f5_read_parts)
+            )
 
             picks_board_rows.append(_row)
         _f5_candidate_n = len(picks_board_rows)
@@ -8967,9 +9229,8 @@ def run_predictions():
                 continue
             _seen_f5_telegram.add(_f5_key)
             telegram_f5_alerts.append(_f5_row)
-        # Export-only OU/F5 decision board.
-        # Purpose: one clean totals board for deciding full-game O/U vs F5.
-        # No model math, fire logic, Telegram, ML, or K behavior changes.
+        # OU/F5 decision board consumes the finalized independent
+        # price-aware F5 decision. Full-game O/U, ML and K math are unchanged.
         def _ou_f5_board_float(_v):
             try:
                 if _v is None or _v == "":
@@ -9016,17 +9277,40 @@ def run_predictions():
             return _s
 
         def _ou_f5_market_view(_row):
-            _ou_fired = _ou_f5_board_bool(_row.get("OU_Fired"))
-            _f5_pick = _clean_text(_row.get("Daily_F5_Profile_Pick") or _row.get("F5_Pick"))
-            _f5_grade = _clean_text(_row.get("Daily_F5_Profile_Grade"))
-            _f5_market_ok = _ou_f5_board_bool(_row.get("F5_Market_OK"))
-            _prob_watch = _ou_f5_board_bool(_row.get("OU_Prob_Over_Sweet_Spot_Watch"))
+            _ou_fired = _ou_f5_board_bool(
+                _row.get("OU_Fired")
+            )
+            _f5_fired = _ou_f5_board_bool(
+                _row.get("F5_Fired")
+            )
+            _f5_pick = _clean_text(
+                _row.get("F5_Decision_Pick")
+                or _row.get(
+                    "Daily_F5_Profile_Pick"
+                )
+            )
+            _f5_market_ok = _ou_f5_board_bool(
+                _row.get("F5_Market_OK")
+            )
+            _prob_watch = _ou_f5_board_bool(
+                _row.get(
+                    "OU_Prob_Over_Sweet_Spot_Watch"
+                )
+            )
+
             if _ou_fired:
                 return "FULL_GAME_OU"
+
             if _prob_watch:
                 return "WATCH_FULL_GAME_OVER"
-            if _f5_market_ok and _f5_pick and _f5_grade in ("A", "B"):
+
+            if (
+                _f5_fired
+                and _f5_market_ok
+                and _f5_pick
+            ):
                 return "F5"
+
             return "WATCH"
 
         def _ou_f5_decision_reason(_row):
@@ -9079,6 +9363,23 @@ def run_predictions():
             _row["OU_Prob_Over_Sweet_Spot_Watch"] = _prob_over_watch
             _row["Preferred_Market"] = _ou_f5_market_view(_row)
             _row["Decision_Reason"] = _ou_f5_decision_reason(_row)
+
+            if (
+                _ou_f5_board_bool(
+                    _row.get("F5_Fired")
+                )
+                and _row.get(
+                    "Preferred_Market"
+                )
+                == "F5"
+            ):
+                _row["Decision_Reason"] = (
+                    "price_aware_f5"
+                    f"|side={_clean_text(_row.get('F5_Decision_Side'))}"
+                    f"|price={_clean_text(_row.get('F5_Selected_Price'))}"
+                    f"|ev={_clean_text(_row.get('F5_Selected_EV'))}"
+                    f"|prob_edge={_clean_text(_row.get('F5_Selected_Prob_Edge'))}"
+                )
 
             ou_f5_decision_board_rows.append(_row)
 
@@ -9338,7 +9639,7 @@ def run_predictions():
                 time.sleep(1)
 
     if telegram_f5_alerts:
-        print(f"\n\U0001f6a8 Sending {len(telegram_f5_alerts)} F5 Telegram alert(s) (edge 0.75-1.00 or >= 1.50)...")
+        print(f"\n\U0001f6a8 Sending {len(telegram_f5_alerts)} independent price-aware F5 Telegram alert(s)...")
         for alert in telegram_f5_alerts:
             message = format_f5_alert(alert)
             if send_telegram_alert(message):
