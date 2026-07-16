@@ -34,6 +34,7 @@ from statsapi import schedule
 import numpy as np
 import subprocess
 import sys
+import math
 from pathlib import Path
 
 from scrapers.velocity_tracker import VelocityTracker
@@ -277,6 +278,309 @@ def _ml_pair_devig_implied(ml_home_am, ml_away_am) -> tuple:
     if s <= 0:
         return None, None, "invalid_odds"
     return ih / s, ia / s, "ok"
+
+
+
+F5_NB2_ALPHA = 0.30
+
+
+def _american_odds_profit_multiplier(american):
+    """Net profit per unit risked from American odds; None when invalid."""
+    try:
+        value = float(american)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(value) or value == 0:
+        return None
+
+    if value < 0:
+        return 100.0 / abs(value)
+
+    return value / 100.0
+
+
+def _f5_nb2_total_probabilities(
+    projected_mean,
+    market_line,
+    alpha=F5_NB2_ALPHA,
+):
+    """
+    Convert an F5 projected scoring mean into OVER, UNDER and PUSH
+    probabilities using an NB2 distribution.
+
+    NB2 parameterization:
+        variance = mean + alpha * mean^2
+
+    Integer totals can push. Non-integer totals cannot.
+    """
+    try:
+        mean_runs = float(projected_mean)
+        line = float(market_line)
+        dispersion = float(alpha)
+    except (TypeError, ValueError):
+        return None
+
+    if (
+        not math.isfinite(mean_runs)
+        or not math.isfinite(line)
+        or not math.isfinite(dispersion)
+        or mean_runs < 0
+        or line < 0
+        or dispersion <= 0
+    ):
+        return None
+
+    if mean_runs == 0:
+        def _pmf(k):
+            return 1.0 if k == 0 else 0.0
+    else:
+        shape = 1.0 / dispersion
+        success_prob = shape / (shape + mean_runs)
+        failure_prob = 1.0 - success_prob
+
+        def _pmf(k):
+            if k < 0:
+                return 0.0
+
+            log_probability = (
+                math.lgamma(k + shape)
+                - math.lgamma(shape)
+                - math.lgamma(k + 1)
+                + shape * math.log(success_prob)
+                + k * math.log(failure_prob)
+            )
+            return math.exp(log_probability)
+
+    integer_line = math.isclose(
+        line,
+        round(line),
+        abs_tol=1e-9,
+    )
+
+    if integer_line:
+        threshold = int(round(line))
+        under_probability = sum(
+            _pmf(k)
+            for k in range(threshold)
+        )
+        push_probability = _pmf(threshold)
+    else:
+        threshold = math.floor(line)
+        under_probability = sum(
+            _pmf(k)
+            for k in range(threshold + 1)
+        )
+        push_probability = 0.0
+
+    over_probability = max(
+        0.0,
+        1.0 - under_probability - push_probability,
+    )
+
+    under_probability = max(
+        0.0,
+        min(1.0, under_probability),
+    )
+    over_probability = max(
+        0.0,
+        min(1.0, over_probability),
+    )
+    push_probability = max(
+        0.0,
+        min(1.0, push_probability),
+    )
+
+    no_push_total = (
+        over_probability + under_probability
+    )
+
+    if no_push_total > 0:
+        over_no_push = (
+            over_probability / no_push_total
+        )
+        under_no_push = (
+            under_probability / no_push_total
+        )
+    else:
+        over_no_push = None
+        under_no_push = None
+
+    return {
+        "over": over_probability,
+        "under": under_probability,
+        "push": push_probability,
+        "over_no_push": over_no_push,
+        "under_no_push": under_no_push,
+    }
+
+
+def _f5_probability_value_snapshot(
+    projected_mean,
+    market_line,
+    over_price,
+    under_price,
+    market_ok,
+):
+    """
+    Return price-aware F5 probability and expected-value fields.
+
+    This is analysis/export-only. It does not control F5 firing,
+    confidence, Telegram alerts, full-game O/U, or ML.
+    """
+    output = {
+        "F5_Model_Prob_Over": "",
+        "F5_Model_Prob_Under": "",
+        "F5_Model_Prob_Push": "",
+        "F5_Model_Prob_Over_NoPush": "",
+        "F5_Model_Prob_Under_NoPush": "",
+        "F5_Implied_Prob_Over": "",
+        "F5_Implied_Prob_Under": "",
+        "F5_Prob_Edge_Over": "",
+        "F5_Prob_Edge_Under": "",
+        "F5_EV_Over": "",
+        "F5_EV_Under": "",
+        "F5_Value_Side": "",
+        "F5_Selected_Price": "",
+        "F5_Selected_EV": "",
+        "F5_Selected_Prob_Edge": "",
+        "F5_Prob_Method": "",
+        "F5_Prob_Calibration_Flag": "",
+    }
+
+    probabilities = _f5_nb2_total_probabilities(
+        projected_mean,
+        market_line,
+    )
+
+    if probabilities is None:
+        return output
+
+    output.update({
+        "F5_Model_Prob_Over": round(
+            probabilities["over"],
+            4,
+        ),
+        "F5_Model_Prob_Under": round(
+            probabilities["under"],
+            4,
+        ),
+        "F5_Model_Prob_Push": round(
+            probabilities["push"],
+            4,
+        ),
+        "F5_Model_Prob_Over_NoPush": (
+            round(probabilities["over_no_push"], 4)
+            if probabilities["over_no_push"] is not None
+            else ""
+        ),
+        "F5_Model_Prob_Under_NoPush": (
+            round(probabilities["under_no_push"], 4)
+            if probabilities["under_no_push"] is not None
+            else ""
+        ),
+        "F5_Prob_Method": "nb2_alpha_0.30",
+        "F5_Prob_Calibration_Flag": (
+            "provisional_not_for_fire"
+        ),
+    })
+
+    market_ok_bool = (
+        market_ok
+        if isinstance(market_ok, bool)
+        else str(market_ok).strip().lower()
+        in {"true", "1", "yes", "y"}
+    )
+
+    if not market_ok_bool:
+        return output
+
+    implied_over, implied_under, devig_status = (
+        _ml_pair_devig_implied(
+            over_price,
+            under_price,
+        )
+    )
+
+    if devig_status != "ok":
+        return output
+
+    output["F5_Implied_Prob_Over"] = round(
+        implied_over,
+        4,
+    )
+    output["F5_Implied_Prob_Under"] = round(
+        implied_under,
+        4,
+    )
+
+    over_no_push = probabilities["over_no_push"]
+    under_no_push = probabilities["under_no_push"]
+
+    if over_no_push is not None:
+        output["F5_Prob_Edge_Over"] = round(
+            over_no_push - implied_over,
+            4,
+        )
+
+    if under_no_push is not None:
+        output["F5_Prob_Edge_Under"] = round(
+            under_no_push - implied_under,
+            4,
+        )
+
+    over_profit = _american_odds_profit_multiplier(
+        over_price
+    )
+    under_profit = _american_odds_profit_multiplier(
+        under_price
+    )
+
+    if over_profit is None or under_profit is None:
+        return output
+
+    # Pushes return the stake, contributing zero net EV.
+    over_ev = (
+        probabilities["over"] * over_profit
+        - probabilities["under"]
+    )
+    under_ev = (
+        probabilities["under"] * under_profit
+        - probabilities["over"]
+    )
+
+    output["F5_EV_Over"] = round(over_ev, 4)
+    output["F5_EV_Under"] = round(under_ev, 4)
+
+    if over_ev >= under_ev:
+        selected_side = "OVER"
+        selected_price = over_price
+        selected_ev = over_ev
+        selected_prob_edge = output[
+            "F5_Prob_Edge_Over"
+        ]
+    else:
+        selected_side = "UNDER"
+        selected_price = under_price
+        selected_ev = under_ev
+        selected_prob_edge = output[
+            "F5_Prob_Edge_Under"
+        ]
+
+    if selected_ev > 0:
+        output["F5_Value_Side"] = selected_side
+        output["F5_Selected_Price"] = selected_price
+        output["F5_Selected_EV"] = round(
+            selected_ev,
+            4,
+        )
+        output["F5_Selected_Prob_Edge"] = (
+            selected_prob_edge
+        )
+    else:
+        output["F5_Value_Side"] = "NO_VALUE"
+
+    return output
 
 
 def _clamp_unit_interval(x, lo=0.0, hi=1.0):
@@ -7266,6 +7570,16 @@ def run_predictions():
             "Away_Pitcher", "Home_Pitcher",
             "F5_Projected_Total", "F5_Away_Runs", "F5_Home_Runs",
             "F5_Market_Line", "F5_Edge", "F5_Pick",
+            "F5_Model_Prob_Over", "F5_Model_Prob_Under",
+            "F5_Model_Prob_Push",
+            "F5_Model_Prob_Over_NoPush",
+            "F5_Model_Prob_Under_NoPush",
+            "F5_Implied_Prob_Over", "F5_Implied_Prob_Under",
+            "F5_Prob_Edge_Over", "F5_Prob_Edge_Under",
+            "F5_EV_Over", "F5_EV_Under",
+            "F5_Value_Side", "F5_Selected_Price",
+            "F5_Selected_EV", "F5_Selected_Prob_Edge",
+            "F5_Prob_Method", "F5_Prob_Calibration_Flag",
             "F5_Model_Side", "F5_Starter_Lean", "F5_Eligible",
             "F5_Over_Juice", "F5_Under_Juice", "F5_Source", "F5_Book",
             "F5_Market_OK", "F5_No_Line_Reason",
@@ -7286,6 +7600,14 @@ def run_predictions():
                 elif _f5_edge_val < 0:
                     _f5_pick = "UNDER"
 
+            _f5_prob_value = _f5_probability_value_snapshot(
+                projected_mean=_f5_projected,
+                market_line=_f5_line,
+                over_price=_r.get("F5_Over_Juice"),
+                under_price=_r.get("F5_Under_Juice"),
+                market_ok=_r.get("F5_Market_OK"),
+            )
+
             f5_board_rows.append({
                 "Game_Date": _r.get("Game_Date", ""),
                 "Game_Time_MT": _r.get("Game_Time_MT", ""),
@@ -7299,6 +7621,7 @@ def run_predictions():
                 "F5_Market_Line": _r.get("F5_Market_Line", ""),
                 "F5_Edge": _f5_edge,
                 "F5_Pick": _f5_pick,
+                **_f5_prob_value,
                 "F5_Model_Side": _r.get("F5_Model_Side", ""),
                 "F5_Starter_Lean": _r.get("F5_Starter_Lean", ""),
                 "F5_Eligible": _r.get("F5_Eligible", ""),
