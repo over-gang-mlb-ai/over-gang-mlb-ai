@@ -77,6 +77,121 @@ def _tally_today(rows: List[Dict[str, str]]) -> Tuple[int, int, int, int, int, i
                 c_p += t[2]
     return ou_w, ou_l, ou_p, ml_w, ml_l, ml_p, c_w, c_l, c_p
 
+def _parse_bool(value: object) -> bool:
+    return str(value or "").strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "y",
+    }
+
+
+def _tally_f5_rows(
+    rows: List[Dict[str, str]],
+) -> Tuple[int, int, int]:
+    """
+    Count only canonical independent F5 decisions.
+
+    Historical experimental F5 rows without F5_Fired=True
+    are intentionally excluded.
+    """
+    wins = losses = pushes = 0
+
+    for row in rows:
+        if not _parse_bool(row.get("F5_Fired")):
+            continue
+
+        result = (
+            row.get("F5_Result") or ""
+        ).strip().upper()
+
+        if not _is_graded_result(result):
+            continue
+
+        tally = _result_to_wlp(result)
+        if not tally:
+            continue
+
+        wins += tally[0]
+        losses += tally[1]
+        pushes += tally[2]
+
+    return wins, losses, pushes
+
+
+def _latest_graded_f5_files(
+    archive_dir: Path,
+) -> List[Path]:
+    """
+    Select one canonical graded F5 board per slate date.
+
+    Multiple engine reruns can produce multiple board timestamps;
+    only the latest graded board for each YYYYMMDD is counted.
+    """
+    latest_by_date: Dict[str, Path] = {}
+
+    for path in archive_dir.glob(
+        "graded_f5_board_*.csv"
+    ):
+        parts = path.stem.split("_")
+
+        if len(parts) < 5:
+            continue
+
+        date_token = parts[-2]
+        time_token = parts[-1]
+
+        if (
+            len(date_token) != 8
+            or not date_token.isdigit()
+            or len(time_token) != 4
+            or not time_token.isdigit()
+        ):
+            continue
+
+        current = latest_by_date.get(date_token)
+
+        if (
+            current is None
+            or path.name > current.name
+        ):
+            latest_by_date[date_token] = path
+
+    return [
+        latest_by_date[date_token]
+        for date_token in sorted(latest_by_date)
+    ]
+
+
+def _tally_f5_season(
+    archive_dir: Path,
+) -> Tuple[int, int, int]:
+    wins = losses = pushes = 0
+
+    for path in _latest_graded_f5_files(
+        archive_dir
+    ):
+        try:
+            rows = _read_archive_rows(path)
+        except Exception as exc:
+            print(
+                f"Skipping unreadable F5 board "
+                f"{path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        day_w, day_l, day_p = _tally_f5_rows(
+            rows
+        )
+
+        wins += day_w
+        losses += day_l
+        pushes += day_p
+
+    return wins, losses, pushes
+
+
 
 def _fmt_wlp(w: int, l: int, p: int) -> str:
     return f"{w}-{l}-{p}"
@@ -252,6 +367,9 @@ def _build_message(
     ml_w: int,
     ml_l: int,
     ml_p: int,
+    f5_w: int,
+    f5_l: int,
+    f5_p: int,
     dw: int,
     dl: int,
     dp: int,
@@ -261,42 +379,64 @@ def _build_message(
     smw: int,
     sml: int,
     smp: int,
+    sf5_w: int,
+    sf5_l: int,
+    sf5_p: int,
     sdw: int,
     sdl: int,
     sdp: int,
 ) -> str:
     owr = _win_rate_pct(ow, ol)
     mwr = _win_rate_pct(ml_w, ml_l)
+    f5wr = _win_rate_pct(f5_w, f5_l)
     dwr = _win_rate_pct(dw, dl)
+
     sowr = _win_rate_pct(sow, sol)
     smwr = _win_rate_pct(smw, sml)
+    sf5wr = _win_rate_pct(sf5_w, sf5_l)
     sdwr = _win_rate_pct(sdw, sdl)
+
     dline = _header_date(archive_path)
     sep = _SEP
+
     return (
         "⚾ OVER GANG DAILY REPORT\n"
         f"{sep}\n"
         f"📅 {dline}\n"
         "\n"
         "TODAY\n"
-        f"🎯 O/U:   {ow}W · {ol}L · {op}P │ {owr:.1f}%\n"
-        f"🏆 ML:    {ml_w}W · {ml_l}L · {ml_p}P │ {mwr:.1f}%\n"
-        f"📊 Total: {dw}W · {dl}L · {dp}P │ {dwr:.1f}%\n"
+        f"🎯 O/U:   {ow}W · {ol}L · {op}P │ "
+        f"{owr:.1f}%\n"
+        f"🏆 ML:    {ml_w}W · {ml_l}L · "
+        f"{ml_p}P │ {mwr:.1f}%\n"
+        f"⏱️ F5:    {f5_w}W · {f5_l}L · "
+        f"{f5_p}P │ {f5wr:.1f}%\n"
+        f"📊 Total: {dw}W · {dl}L · {dp}P │ "
+        f"{dwr:.1f}%\n"
         "\n"
         f"{sep}\n"
         "SEASON YTD 📈\n"
-        f"🎯 O/U:   {sow}W · {sol}L · {sop}P │ {sowr:.1f}%\n"
-        f"🏆 ML:    {smw}W · {sml}L · {smp}P │ {smwr:.1f}%\n"
-        f"📊 Total: {sdw}W · {sdl}L · {sdp}P │ {sdwr:.1f}%\n"
+        f"🎯 O/U:   {sow}W · {sol}L · {sop}P │ "
+        f"{sowr:.1f}%\n"
+        f"🏆 ML:    {smw}W · {sml}L · {smp}P │ "
+        f"{smwr:.1f}%\n"
+        f"⏱️ F5:    {sf5_w}W · {sf5_l}L · "
+        f"{sf5_p}P │ {sf5wr:.1f}%\n"
+        f"📊 Total: {sdw}W · {sdl}L · "
+        f"{sdp}P │ {sdwr:.1f}%\n"
         "\n"
         f"{sep}\n"
         "📎 Full card attached"
     )
 
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Send nightly Telegram summary (today + season W/L/P)."
+        description=(
+            "Send nightly Telegram summary "
+            "(today + season W/L/P)."
+        )
     )
     parser.add_argument(
         "archive_csv",
@@ -306,39 +446,49 @@ def main() -> int:
     parser.add_argument(
         "season_summary_txt",
         type=Path,
-        help="Season summary text file (e.g. tracking/season_summary_2026.txt)",
+        help=(
+            "Season summary text file "
+            "(e.g. tracking/season_summary_2026.txt)"
+        ),
+    )
+    parser.add_argument(
+        "--graded-f5",
+        type=Path,
+        help=(
+            "Graded F5 board for the same slate. "
+            "Only F5_Fired=True rows are counted."
+        ),
     )
     args = parser.parse_args()
+
     arch = args.archive_csv.resolve()
     season_path = args.season_summary_txt.resolve()
 
     if not arch.is_file():
-        print(f"Archive not found: {arch}", file=sys.stderr)
+        print(
+            f"Archive not found: {arch}",
+            file=sys.stderr,
+        )
         return 1
+
     if not season_path.is_file():
-        print(f"Season summary not found: {season_path}", file=sys.stderr)
+        print(
+            f"Season summary not found: "
+            f"{season_path}",
+            file=sys.stderr,
+        )
         return 1
 
     try:
         rows = _read_archive_rows(arch)
-    except Exception as e:
-        print(f"Failed to read archive: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(
+            f"Failed to read archive: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
-    ou_w, ou_l, ou_p, ml_w, ml_l, ml_p, c_w, c_l, c_p = _tally_today(rows)
-
-    try:
-        season_ou, season_ml, season_cb = _load_season_triples(season_path)
-    except Exception as e:
-        print(f"{e}", file=sys.stderr)
-        return 1
-
-    sow, sol, sop = _parse_wlp_str(season_ou)
-    smw, sml, smp = _parse_wlp_str(season_ml)
-    sdw, sdl, sdp = _parse_wlp_str(season_cb)
-
-    msg = _build_message(
-        arch,
+    (
         ou_w,
         ou_l,
         ou_p,
@@ -348,21 +498,112 @@ def main() -> int:
         c_w,
         c_l,
         c_p,
+    ) = _tally_today(rows)
+
+    f5_w = f5_l = f5_p = 0
+
+    if args.graded_f5:
+        graded_f5_path = (
+            args.graded_f5.resolve()
+        )
+
+        if not graded_f5_path.is_file():
+            print(
+                f"Graded F5 board not found: "
+                f"{graded_f5_path}",
+                file=sys.stderr,
+            )
+            return 1
+
+        try:
+            f5_rows = _read_archive_rows(
+                graded_f5_path
+            )
+        except Exception as exc:
+            print(
+                f"Failed to read graded F5 board: "
+                f"{exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+        f5_w, f5_l, f5_p = _tally_f5_rows(
+            f5_rows
+        )
+
+    try:
+        (
+            season_ou,
+            season_ml,
+            season_cb,
+        ) = _load_season_triples(
+            season_path
+        )
+    except Exception as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    sow, sol, sop = _parse_wlp_str(
+        season_ou
+    )
+    smw, sml, smp = _parse_wlp_str(
+        season_ml
+    )
+    sdw, sdl, sdp = _parse_wlp_str(
+        season_cb
+    )
+
+    sf5_w, sf5_l, sf5_p = (
+        _tally_f5_season(arch.parent)
+    )
+
+    # Combined totals now represent O/U + ML + fired F5.
+    c_w += f5_w
+    c_l += f5_l
+    c_p += f5_p
+
+    sdw += sf5_w
+    sdl += sf5_l
+    sdp += sf5_p
+
+    msg = _build_message(
+        arch,
+        ou_w,
+        ou_l,
+        ou_p,
+        ml_w,
+        ml_l,
+        ml_p,
+        f5_w,
+        f5_l,
+        f5_p,
+        c_w,
+        c_l,
+        c_p,
         sow,
         sol,
         sop,
         smw,
         sml,
         smp,
+        sf5_w,
+        sf5_l,
+        sf5_p,
         sdw,
         sdl,
         sdp,
     )
+
     if _telegram_send_plain(msg):
         print("Telegram summary sent.")
         return 0
-    print("Telegram summary failed.", file=sys.stderr)
+
+    print(
+        "Telegram summary failed.",
+        file=sys.stderr,
+    )
     return 1
+
 
 
 if __name__ == "__main__":

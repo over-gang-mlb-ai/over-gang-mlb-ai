@@ -265,7 +265,28 @@ def grade_f5_board(
         out["F5_Grade_Source"] = GRADE_SOURCE
         out["F5_Grade_Note"] = ""
 
-        pick = str(row.get("F5_Pick") or "").strip().upper()
+        legacy_pick = str(
+            row.get("F5_Pick") or ""
+        ).strip().upper()
+        decision_side = str(
+            row.get("F5_Decision_Side") or ""
+        ).strip().upper()
+        f5_fired = _parse_bool(
+            row.get("F5_Fired")
+        )
+
+        # New independent F5 decisions are graded using the
+        # actual price-aware selected side. Historical boards
+        # without F5_Fired retain their legacy F5_Pick grading.
+        if (
+            f5_fired
+            and decision_side in {"OVER", "UNDER"}
+        ):
+            pick = decision_side
+        else:
+            pick = legacy_pick
+
+        out["F5_Graded_Side"] = pick
         line = _parse_float(row.get("F5_Market_Line"))
         if pick not in {"OVER", "UNDER"}:
             out["F5_Result"] = "NO_PLAY"
@@ -374,39 +395,118 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    date_compact = _date_arg_to_compact(args.date) if args.date else None
-    k_file = _resolve_input_file(args.k_file, "pitcher_k_board", date_compact)
-    f5_file = _resolve_input_file(args.f5_file, "f5_board", date_compact)
-    if not k_file or not k_file.exists():
-        print("Missing pitcher K board input.", file=sys.stderr)
-        return 2
-    if not f5_file or not f5_file.exists():
-        print("Missing F5 board input.", file=sys.stderr)
+    date_compact = (
+        _date_arg_to_compact(args.date)
+        if args.date
+        else None
+    )
+
+    k_file = _resolve_input_file(
+        args.k_file,
+        "pitcher_k_board",
+        date_compact,
+    )
+    f5_file = _resolve_input_file(
+        args.f5_file,
+        "f5_board",
+        date_compact,
+    )
+
+    k_available = bool(
+        k_file and k_file.exists()
+    )
+    f5_available = bool(
+        f5_file and f5_file.exists()
+    )
+
+    if not k_available and not f5_available:
+        print(
+            "Missing both pitcher K and F5 board inputs.",
+            file=sys.stderr,
+        )
         return 2
 
     date_yyyy_mm_dd = (
         _date_arg_to_api(args.date)
         if args.date
-        else _extract_date_from_path(k_file, "pitcher_k_board")
-        or _extract_date_from_path(f5_file, "f5_board")
+        else (
+            _extract_date_from_path(
+                k_file,
+                "pitcher_k_board",
+            )
+            if k_available
+            else None
+        )
+        or (
+            _extract_date_from_path(
+                f5_file,
+                "f5_board",
+            )
+            if f5_available
+            else None
+        )
     )
+
     if not date_yyyy_mm_dd:
-        print("Could not infer slate date; pass --date YYYYMMDD.", file=sys.stderr)
+        print(
+            "Could not infer slate date; "
+            "pass --date YYYYMMDD.",
+            file=sys.stderr,
+        )
         return 2
 
-    print(f"Using pitcher K board: {k_file}")
-    print(f"Using F5 board: {f5_file}")
-    print(f"Fetching MLB schedule for: {date_yyyy_mm_dd}")
-    schedule = fetch_schedule_games(date_yyyy_mm_dd)
-    print(f"Schedule games mapped: {len(schedule)}")
+    if k_available:
+        print(f"Using pitcher K board: {k_file}")
+    else:
+        print(
+            "Pitcher K board unavailable; "
+            "continuing with F5 grading."
+        )
+
+    if f5_available:
+        print(f"Using F5 board: {f5_file}")
+    else:
+        print(
+            "F5 board unavailable; "
+            "continuing with pitcher K grading."
+        )
+
+    print(
+        f"Fetching MLB schedule for: "
+        f"{date_yyyy_mm_dd}"
+    )
+
+    schedule = fetch_schedule_games(
+        date_yyyy_mm_dd
+    )
+
+    print(
+        f"Schedule games mapped: {len(schedule)}"
+    )
 
     boxscore_cache: Dict[Any, dict] = {}
     linescore_cache: Dict[Any, dict] = {}
-    k_out = grade_k_board(k_file, schedule, boxscore_cache)
-    f5_out = grade_f5_board(f5_file, schedule, linescore_cache)
-    print(f"Graded pitcher K board: {k_out}")
-    print(f"Graded F5 board: {f5_out}")
+
+    if k_available:
+        k_out = grade_k_board(
+            k_file,
+            schedule,
+            boxscore_cache,
+        )
+        print(
+            f"Graded pitcher K board: {k_out}"
+        )
+
+    if f5_available:
+        f5_out = grade_f5_board(
+            f5_file,
+            schedule,
+            linescore_cache,
+        )
+        print(f"Graded F5 board: {f5_out}")
+
     return 0
+
 
 
 if __name__ == "__main__":
