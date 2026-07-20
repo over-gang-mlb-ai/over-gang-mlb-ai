@@ -637,6 +637,50 @@ def _f5_probability_value_snapshot(
         )
         return output
 
+    # Keep price-aware decisions visible for auditing, but require
+    # meaningful value before promoting a decision to a production fire.
+    try:
+        projected_mean_float = float(projected_mean)
+        market_line_float = float(market_line)
+    except (TypeError, ValueError):
+        projected_mean_float = None
+        market_line_float = None
+
+    projection_direction_conflict = bool(
+        projected_mean_float is not None
+        and market_line_float is not None
+        and math.isfinite(projected_mean_float)
+        and math.isfinite(market_line_float)
+        and (
+            (
+                projected_mean_float > market_line_float
+                and selected_side == "UNDER"
+            )
+            or (
+                projected_mean_float < market_line_float
+                and selected_side == "OVER"
+            )
+        )
+    )
+
+    minimum_ev = (
+        0.10 if projection_direction_conflict else 0.05
+    )
+    minimum_prob_edge = (
+        0.08 if projection_direction_conflict else 0.05
+    )
+
+    if (
+        selected_ev < minimum_ev
+        or selected_prob_edge_float < minimum_prob_edge
+    ):
+        output["No_Fire_F5_Reason"] = (
+            "projection_conflict_below_f5_fire_minimum"
+            if projection_direction_conflict
+            else "below_f5_fire_minimum"
+        )
+        return output
+
     data_quality = str(
         data_quality_flag or ""
     ).strip().lower()
