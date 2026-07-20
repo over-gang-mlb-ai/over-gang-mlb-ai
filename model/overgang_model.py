@@ -9466,6 +9466,10 @@ def run_predictions():
 
             "Data_Quality_Flag", "No_Fire_Reason", "Trigger_Tags",
             "Preferred_Market", "Decision_Reason",
+            "F5_Decision_Side", "F5_Decision_Pick",
+            "F5_Selected_Price", "F5_Selected_EV",
+            "F5_Selected_Prob_Edge", "F5_Confidence",
+            "F5_Fired", "No_Fire_F5_Reason",
         ]
 
         ou_f5_decision_board_df = pd.DataFrame(
